@@ -11,11 +11,16 @@ if [[ "$configuration" != release && "$configuration" != debug ]]; then
   echo 'CONFIGURATION must be release or debug.' >&2
   exit 1
 fi
-swift build -c "$configuration" --product Radius --arch arm64 --arch x86_64
-binary_directory="$(swift build -c "$configuration" --arch arm64 --arch x86_64 --show-bin-path)"
+# Use one SwiftPM compiler path for tests and both architectures. Its multi-arch
+# Xcode build path imports different WebKit concurrency annotations on Xcode 16.4.
+swift build -c "$configuration" --product Radius --triple arm64-apple-macosx14.0
+arm_binary_directory="$(swift build -c "$configuration" --triple arm64-apple-macosx14.0 --show-bin-path)"
+swift build -c "$configuration" --product Radius --triple x86_64-apple-macosx14.0
+intel_binary_directory="$(swift build -c "$configuration" --triple x86_64-apple-macosx14.0 --show-bin-path)"
 app_directory="$PWD/dist/Radius.app"
 mkdir -p "$app_directory/Contents/MacOS" "$app_directory/Contents/Resources"
-cp "$binary_directory/Radius" "$app_directory/Contents/MacOS/Radius"
+lipo -create "$arm_binary_directory/Radius" "$intel_binary_directory/Radius" -output "$app_directory/Contents/MacOS/Radius"
+lipo -verify_arch arm64 x86_64 "$app_directory/Contents/MacOS/Radius"
 # Store declarative resources in the standard app resource directory.
 rm -rf "$app_directory/Contents/Resources/Modules"
 cp -R Sources/RadiusApp/Resources/Modules "$app_directory/Contents/Resources/Modules"
