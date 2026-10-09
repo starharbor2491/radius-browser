@@ -11,6 +11,7 @@
 #include <vector>
 #include "RadiusEngineABI.h"
 #include "include/cef_app.h"
+#include "include/cef_command_line.h"
 #include "include/cef_application_mac.h"
 #include "include/cef_client.h"
 #include "include/cef_parser.h"
@@ -39,6 +40,13 @@ void CancelPump() {
 void SchedulePump(int64_t delay);
 class EngineApp final : public CefApp, public CefBrowserProcessHandler {
  public:
+  void OnBeforeCommandLineProcessing(const CefString& process_type,
+                                    CefRefPtr<CefCommandLine> command_line) override {
+    // Radius enforces popup policy in OnBeforePopup. Chrome's earlier blocker
+    // otherwise ignores Radius's allow toggle, especially in private contexts
+    // where default content settings cannot be changed.
+    if (process_type.empty()) command_line->AppendSwitch("disable-popup-blocking");
+  }
   CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override { return this; }
   void OnScheduleMessagePumpWork(int64_t delay) override {
     dispatch_async(dispatch_get_main_queue(), ^{ SchedulePump(delay); });
@@ -305,11 +313,6 @@ class ContextHandler final : public CefRequestContextHandler {
     // CEF gives callbacks fresh C++ wrappers; their pointer identity differs.
     if (stopped || context == contexts.end() || context->second.generation != generation_) return;
     Trace("request context ready");
-    // Chrome's popup blocker runs before CEF OnBeforePopup. Let requests reach
-    // our handler, which enforces Radius's popup toggle and user-gesture policy
-    // for every page, including private contexts and adopted popups.
-    context->second.value->SetContentSetting(CefString(),CefString(),
-        CEF_CONTENT_SETTING_TYPE_POPUPS,CEF_CONTENT_SETTING_VALUE_ALLOW);
     context->second.ready = true;
     std::vector<Page*> waiting;
     for (auto& entry : pages)

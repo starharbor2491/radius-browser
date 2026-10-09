@@ -26,7 +26,7 @@ struct ChromeSurface: ViewModifier {
                 .overlay(alignment: .bottom) { Rectangle().fill(.primary.opacity(0.2)).frame(height: 1) }
         case .native:
             content.background(Color(nsColor: .windowBackgroundColor))
-                .overlay(alignment: .bottom) { Divider() }
+                .overlay(alignment: .bottom) { Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1) }
         }
     }
 }

@@ -141,7 +141,11 @@ enum AppSmokeTest {
                         guard !cookies.contains(normalToken), !cookies.contains(privateToken) else { throw ValidationError("Chromium cookies leaked into another private window.") }
                         guard try await evaluate(tab, "String(localStorage.getItem('\(normalToken)'))") == "null",
                               try await evaluate(tab, "String(localStorage.getItem('\(privateToken)'))") == "null" else { throw ValidationError("Chromium local storage leaked into a private window.") }
-                        if index == 0 { _ = try await evaluate(tab, "document.cookie = '\(privateToken)=1; path=/'; localStorage.setItem('\(privateToken)', '1'); document.cookie") }
+                        if index == 0 {
+                            _ = try await evaluate(tab, "document.cookie = '\(privateToken)=1; path=/'; localStorage.setItem('\(privateToken)', '1'); document.cookie")
+                            trace("Checking private Chromium popup policy and opener")
+                            try await verifyPopups(in: probe.0, app: app)
+                        }
                     }
                     let separateProfile = Profile(name: "Isolation probe"); app.library.profiles.append(separateProfile)
                     let separate = try await openProbe(app: app, privateBrowsing: false, profileID: separateProfile.id, address: address)
@@ -153,27 +157,8 @@ enum AppSmokeTest {
                     guard !app.library.history.contains(where: { $0.url.query?.contains("private-probe") == true }),
                           !app.library.sessions.flatMap(\.tabs).contains(where: { $0.url?.query?.contains("private-probe") == true }) else { throw ValidationError("Private Chromium browsing entered saved history or sessions.") }
                     for (model, window) in probes { model.closeWindow(); window.close() }; probes.removeAll()
-                    trace("Checking Chromium popup opener and tab context")
-                    let blockedPopup = try await evaluate(chromium, "(() => { const w = window.open('about:blank'); if (w) { w.close(); return 'opened'; } return 'blocked'; })()")
-                    guard blockedPopup == "blocked" else { throw ValidationError("Chromium opened an unsolicited popup while Radius blocks popups.") }
-                    app.library.preferences.blockPopups = false; browser.updatePopupPolicy()
-                    let popupResult = try await evaluate(chromium, "(() => { const w = window.open('about:blank'); if (!w) return 'blocked'; w.document.write('<html><title>Radius Chromium popup</title><body>Popup</body></html>'); w.document.close(); return 'opened'; })()")
-                    guard popupResult == "opened" else { throw ValidationError("Chromium rejected its popup request: \(popupResult).") }
-                    let popupDeadline = Date().addingTimeInterval(10)
-                    while browser.activeWebTab.title != "Radius Chromium popup" {
-                        if Date() > popupDeadline {
-                            let selected = browser.selectedTab
-                            var actualTitle = "unavailable"
-                            if let popup = browser.activeWebTab as? ChromiumTab {
-                                actualTitle = (try? await evaluate(popup, "String(document.title)")) ?? "unavailable"
-                            }
-                            throw ValidationError("Chromium popup did not open inside Radius. Selected engine: \((selected.engineID ?? .webkit).label); title: \(browser.activeWebTab.title ?? "nil"); document title: \(actualTitle); error: \(browser.activeWebTab.errorMessage ?? "none").")
-                        }
-                        try await Task.sleep(for: .milliseconds(100))
-                    }
-                    guard let popup = browser.activeWebTab as? ChromiumTab,
-                          try await evaluate(popup, "String(window.opener !== null)") == "true" else { throw ValidationError("Chromium popup lost its opener.") }
-                    browser.closeTab(browser.session.selectedTabID); browser.selectTab(id)
+                    trace("Checking normal Chromium popup policy and opener")
+                    try await verifyPopups(in: browser, app: app)
                     let captureResponse = try await chromium.request("Page.captureScreenshot", parameters: ["format": "png", "captureBeyondViewport": false])
                     guard let captureObject = try JSONSerialization.jsonObject(with: captureResponse) as? [String: Any],
                           let encoded = captureObject["data"] as? String, let contentPNG = Data(base64Encoded: encoded),
@@ -189,7 +174,11 @@ enum AppSmokeTest {
                         if Date() > httpsDeadline { throw ValidationError("Chromium did not load its HTTPS check page.") }
                         try await Task.sleep(for: .milliseconds(100))
                     }
-                    guard chromium.url?.scheme == "https", try await chromium.readerText().contains("Example Domain") else { throw ValidationError("Chromium HTTPS browsing failed.") }
+                    let httpsPage = try await evaluate(chromium, "JSON.stringify({href: location.href, title: document.title, body: document.body ? document.body.innerText.slice(0, 300) : null})")
+                    trace("HTTPS probe: reported address \(chromium.url?.absoluteString ?? "nil"); document \(httpsPage)")
+                    guard chromium.url?.scheme == "https" else { throw ValidationError("Chromium HTTPS address was not reported: \(chromium.url?.absoluteString ?? "nil").") }
+                    let httpsReader = try await chromium.readerText()
+                    guard httpsReader.contains("Example Domain") else { throw ValidationError("Chromium HTTPS reader did not contain the page heading (\(httpsReader.count) characters).") }
                     try await Task.sleep(for: .milliseconds(500))
                     guard let view = window.contentView else { throw ValidationError("Cannot capture embedded Chromium.") }
                     try capture(view, to: output.appendingPathComponent("Radius-chromium.png"))
@@ -224,6 +213,35 @@ enum AppSmokeTest {
             throw ValidationError("The Chromium script did not return its expected result.")
         }
         return value
+    }
+    private static func verifyPopups(in browser: BrowserModel, app: AppState) async throws {
+        let parentID = browser.session.selectedTabID
+        guard let parent = browser.activeWebTab as? ChromiumTab, let expectedWindow = parent.nativeView.window else { throw ValidationError("The popup probe requires a hosted Chromium tab.") }
+        let originalPolicy = app.library.preferences.blockPopups
+        defer {
+            app.library.preferences.blockPopups = originalPolicy
+            browser.updatePopupPolicy()
+        }
+        app.library.preferences.blockPopups = true; browser.updatePopupPolicy()
+        let blocked = try await evaluate(parent, "(() => { const w = window.open('about:blank'); if (w) { w.close(); return 'opened'; } return 'blocked'; })()")
+        guard blocked == "blocked" else { throw ValidationError("Chromium opened an unsolicited popup while Radius blocks popups.") }
+        app.library.preferences.blockPopups = false; browser.updatePopupPolicy()
+        let opened = try await evaluate(parent, "(() => { const w = window.open('about:blank'); if (!w) return 'blocked'; w.document.write('<html><title>Radius Chromium popup</title><body>Popup</body></html>'); w.document.close(); return 'opened'; })()")
+        guard opened == "opened" else { throw ValidationError("Chromium rejected its allowed popup request: \(opened).") }
+        let deadline = Date().addingTimeInterval(10)
+        while browser.activeWebTab.title != "Radius Chromium popup" {
+            if Date() > deadline {
+                var documentTitle = "unavailable"
+                if let popup = browser.activeWebTab as? ChromiumTab { documentTitle = (try? await evaluate(popup, "String(document.title)")) ?? "unavailable" }
+                throw ValidationError("Chromium popup did not open inside Radius. Engine: \(browser.activeWebTab.engineID.label); title: \(browser.activeWebTab.title ?? "nil"); document title: \(documentTitle); error: \(browser.activeWebTab.errorMessage ?? "none").")
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        guard browser.session.selectedTabID != parentID,
+              let popup = browser.activeWebTab as? ChromiumTab,
+              popup.nativeView.window === expectedWindow,
+              try await evaluate(popup, "String(window.opener !== null)") == "true" else { throw ValidationError("Chromium popup lost its opener or native window.") }
+        browser.closeTab(browser.session.selectedTabID); browser.selectTab(parentID)
     }
     private static func openProbe(app: AppState, privateBrowsing: Bool, profileID: UUID?, address: String) async throws -> (BrowserModel, NSWindow) {
         let model = BrowserModel(app: app, isPrivate: privateBrowsing)
