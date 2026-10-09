@@ -73,6 +73,8 @@ python3 scripts/chromium-proof.py build
 python3 scripts/chromium-proof.py run --style chrome --url chrome://version
 python3 scripts/chromium-proof.py run --style chrome --url https://chromewebstore.google.com/
 python3 scripts/chromium-proof.py run --style native-alloy --url https://example.com/
+python3 scripts/chromium-proof.py probe --style chrome
+python3 scripts/chromium-proof.py probe --style native-alloy
 ```
 
 The native CPU architecture is selected by default. Use `--arch arm64` or
@@ -96,14 +98,10 @@ profile cannot establish that Radius credentials are protected by Keychain.
 
 ## Verification performed in this workspace
 
-The available executor was Debian Linux x86_64. No macOS SDK, Xcode, macOS
-execution endpoint, Developer ID identity, or notarization credentials were
-configured. Installing the Linux Swift compiler can test portable Radius code;
-it cannot compile or exercise AppKit, SwiftUI, or WebKit. Apple's
-[Xcode requirements](https://developer.apple.com/support/xcode/) identify the
-supported macOS build hosts. A macOS CI runner can compile the application after
-the workflow is made available to it; that does not replace interactive tests
-on a Mac or a signed clean-install proof.
+The interactive executor is Debian Linux x86_64. Actual macOS compilation and
+bounded runtime checks were subsequently executed through GitHub Actions.
+Developer ID and notarization credentials are not configured. Hosted CI does
+not replace interactive Mac usability checks or a signed clean-install proof.
 
 Both macOS archives were downloaded over HTTPS from the
 [CEF distribution service](https://cef-builds.spotifycdn.com/index.html), checked
@@ -111,9 +109,19 @@ against its published SHA-1 values, and independently hashed with SHA-256 for
 the pinned script. The actual archives were inspected for the sample build
 files and the macOS runtime-style restriction.
 
-Both `fetch` commands passed against those archives. The `build` command on
-Linux exited with a clear macOS requirement before downloading or creating a
-build directory. The macOS compilation and launch paths have not been run here.
+Both `fetch` commands passed against those archives. The Linux build command
+correctly refused a non-macOS host. In [macOS proof run 37943490620](https://github.com/starharbor2491/radius-browser/actions/runs/37943490620),
+both architectures compiled successfully. On the Apple Silicon host, both
+Chrome-style and native Alloy samples executed JavaScript in a loopback page
+and exited normally after an ordinary Cocoa quit request. Intel runtime probes
+were explicitly skipped on that ARM host. The dedicated workflow now uses
+`macos-15-intel` for native Intel execution; its result must be assessed separately.
+
+The bounded `probe` command writes JSON evidence and runtime logs. It verifies
+a tokenized renderer callback and normal process exit, without relaxing sandbox
+flags. Forced timeout cleanup is recorded as failure. These sample results do
+not verify native Radius hosting, Chrome Web Store installation, extension APIs,
+credential protection, or consumer distribution.
 
 | Architecture | Archive bytes | Pinned SHA-256 |
 | --- | ---: | --- |
@@ -136,7 +144,7 @@ view-hosting bridge or lift the runtime-style restriction.
 
 | Gate | Required evidence | Current result |
 | --- | --- | --- |
-| macOS build and lifecycle | Build both architectures; load framework/helpers; browse; close every browser; quit cleanly with sandbox enabled. | Not executed on macOS. |
+| macOS build and lifecycle | Build both architectures; load framework/helpers; browse; close every browser; quit cleanly with sandbox enabled. | Both sample architectures compiled. ARM Chrome-style and Alloy renderer/quit probes passed with sandbox support requested. Native Intel runtime checks are a separate gate. Radius integration is unverified. |
 | Native Radius hosting | Render inside the chosen Radius window architecture; verify IME, focus, shortcuts, VoiceOver, drag/drop, popups, fullscreen, media, and multiple displays. | Not implemented. Native-parent CEF limitation confirmed. |
 | Consumer extension installation | Install from Chrome Web Store through its normal flow, without developer mode, unpacking, or command-line flags; restart; receive an extension update; remove it. | Not executed. |
 | Manifest V3 behavior | Exercise service-worker restart, content scripts, permissions and revocation, action popup anchoring, side panels, storage, and the declared browser API matrix. | Not executed. |

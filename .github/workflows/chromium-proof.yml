@@ -14,12 +14,16 @@ concurrency:
 jobs:
   upstream-cef:
     name: Upstream CEF (${{ matrix.architecture }})
-    runs-on: macos-15
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
-        architecture: [arm64, x86_64]
+        include:
+          - architecture: arm64
+            runner: macos-15
+          - architecture: x86_64
+            runner: macos-15-intel
     defaults:
       run:
         shell: bash
