@@ -114,7 +114,7 @@ final class AppState: ObservableObject {
     }
     func uninstall(_ module: InstalledModule) {
         let alert = NSAlert(); alert.messageText = "Uninstall \(module.manifest.name)?"
-        alert.informativeText = "The package will be deleted and its feature will stop. Saved notes and settings are kept unless you choose to delete them."
+        alert.informativeText = "The package descriptor will be deleted and its feature will stop. The implementation remains in Radius. Saved notes and settings are kept unless you choose to delete them."
         alert.addButton(withTitle: "Uninstall and keep data"); alert.addButton(withTitle: "Cancel")
         if module.manifest.capability == .notes { alert.addButton(withTitle: "Uninstall and delete all notes") }
         let response = alert.runModal()

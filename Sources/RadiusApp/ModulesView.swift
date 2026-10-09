@@ -32,7 +32,8 @@ struct ModulesView: View {
                     }
                 }
             }
-            Text("Declarative packages · no arbitrary native code · no account required").font(.caption).foregroundStyle(.secondary)
+            Text("Packages control built-in features. Removing a package stops its feature; the implementation remains in Radius.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack { Button("Import local module…") { app.importModule() }; Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.defaultAction) }
         }.padding(28).frame(width: 760, height: 620)
     }

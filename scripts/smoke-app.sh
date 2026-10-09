@@ -36,24 +36,32 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 : >dist/smoke-app.log
-rm -f dist/smoke-sample.txt dist/smoke-sample.log
-python3 scripts/smoke-server.py >dist/smoke-server.log 2>&1 &
+rm -f dist/smoke-sample.txt dist/smoke-sample.log dist/smoke-port.txt
+python3 -u scripts/smoke-server.py --port-file dist/smoke-port.txt >dist/smoke-server.log 2>&1 &
 smoke_server_pid=$!
 smoke_server_ready=false
-for attempt in {1..20}; do
-  if curl --connect-timeout 1 --max-time 1 -fsS http://127.0.0.1:8765/ >/dev/null 2>&1; then
+for attempt in {1..120}; do
+  if [[ -s dist/smoke-port.txt ]]; then
     smoke_server_ready=true
     break
   fi
-  sleep 0.1
+  if ! kill -0 "$smoke_server_pid" 2>/dev/null; then break; fi
+  sleep 0.5
 done
 if [[ "$smoke_server_ready" != true ]]; then
   echo 'The HTTP smoke fixture did not start.' >&2
   exit 1
 fi
+smoke_port="$(cat dist/smoke-port.txt)"
+if [[ ! "$smoke_port" =~ ^[0-9]+$ ]]; then
+  echo 'The HTTP fixture returned an invalid port.' >&2
+  exit 1
+fi
+smoke_url="http://127.0.0.1:$smoke_port/"
+curl --noproxy '*' --connect-timeout 2 --max-time 5 -fsS "$smoke_url" >/dev/null
 RADIUS_SMOKE_TEST_DATA="$PWD/dist/smoke-data" \
 RADIUS_SMOKE_TEST_OUTPUT="$PWD/dist/screenshots" \
-RADIUS_SMOKE_TEST_URL=http://127.0.0.1:8765/ \
+RADIUS_SMOKE_TEST_URL="$smoke_url" \
   dist/Radius.app/Contents/MacOS/Radius --smoke-test >dist/smoke-app.log 2>&1 &
 smoke_app_pid=$!
 (

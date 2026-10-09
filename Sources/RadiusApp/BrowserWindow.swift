@@ -80,6 +80,7 @@ struct BrowserWindow: View {
             }
         }
         .tint(theme.accent.color).preferredColorScheme(theme.scheme).controlSize(theme.controlSize)
+        .background(Color(nsColor: .windowBackgroundColor))
         .focusedSceneObject(model)
         .animation(theme.reducedMotion || systemReduceMotion ? nil : .easeOut(duration: 0.16), value: visiblePanel)
         .background(WindowCloseObserver(model: model))

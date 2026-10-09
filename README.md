@@ -21,7 +21,7 @@ You can also open `Package.swift` in Xcode and run the Radius executable. CI pro
 - Multiple windows, horizontal/vertical tabs, tab pinning and reordering, navigation, search, find, page zoom, and crash reload.
 - Profile-separated website storage, bookmarks, history, and notes; private windows with temporary website storage.
 - Bookmark HTML import/export and downloads with a native destination picker.
-- Five declarative feature packages: Resource Monitor, Notes, Reader, Page Capture, and Focus Mode. Install, disable, uninstall, and inspect their permissions.
+- Five declarative capability packages: Resource Monitor, Notes, Reader, Page Capture, and Focus Mode. Install, disable, uninstall their descriptors, and inspect permissions. Their host implementations remain compiled into Radius; removing a descriptor stops access and sampling. Independently removable feature code is a later release gate.
 - macOS, Material-inspired, Liquid Glass-inspired, and Graphite appearance; light/dark/system modes, accent, density, corners, and transparency.
 - Tabs on all four edges, navigation at top/bottom, left/right sidebar, adjustable sidebar width, bookmarks and status bars.
 - Preview, undo, named setups, configuration-only setup import/export, and engine-independent recovery.

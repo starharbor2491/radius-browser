@@ -7,7 +7,7 @@ The implementation is a native WebKit browser development build. It is **not yet
 | Native browsing | WebKit, windows, tabs, navigation, search, find, zoom, popup controls, JavaScript dialogs, media permission prompts, process-crash recovery |
 | Profiles and privacy | Separate WebKit stores per profile; ephemeral per-private-window store; no private history or session persistence; saved downloads remain on disk |
 | Local data | Actor-backed SQLite, transactionally saved JSON state, stale-save protection, bounded imports; no password storage or database encryption claim |
-| Modules | Five real installed declarative packages; constrained native host capabilities; dependency handling; activation, disable, physical removal, local-manifest import; no downloaded native code |
+| Modules | Five installed declarative descriptors for constrained native host capabilities; dependencies, activation, disable, descriptor removal, local-manifest import. Feature implementations remain compiled into Radius; independently removable behavior code and provider replacement are not implemented |
 | Module updates | Newer packages bundled with a newer Radius build only; no network catalog or update service |
 | Appearance | Four native-rendered style presets, modes, accent, density, transparency, corner controls; Material and Liquid Glass are interpretations, not full vendor implementations |
 | Layout | Tabs on all four edges; tab drag/keyboard-menu reordering; navigation top/bottom; sidebar left/right/hidden and width; bookmarks/status bars |

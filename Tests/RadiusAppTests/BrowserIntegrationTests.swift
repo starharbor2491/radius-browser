@@ -88,6 +88,28 @@ struct BrowserIntegrationTests {
         browser.closeWindow()
         #expect(await app.flush())
     }
+    @Test func javaScriptConfirmationUsesNativeDelegateAndReturnsBothChoices() async throws {
+        _ = NSApplication.shared
+        let tab = WebTab(dataStore: .nonPersistent(), downloads: DownloadCenter())
+        defer { tab.dispose() }
+        #expect(tab.responds(to: NSSelectorFromString("webView:runJavaScriptConfirmPanelWithMessage:initiatedByFrame:completionHandler:")))
+        tab.webView.loadHTMLString("<html><head><title>Confirmation fixture</title></head><body>Confirmation test</body></html>", baseURL: URL(string: "https://fixture.invalid"))
+        try await waitUntil { tab.webView.title == "Confirmation fixture" && !tab.webView.isLoading }
+        for expected in [true, false] {
+            let responder = ConfirmationResponder(accept: expected)
+            let timer = Timer(timeInterval: 0.02, repeats: true) { _ in
+                MainActor.assumeIsolated { responder.dismissModalIfPresent() }
+            }
+            // A run-loop timer can dismiss the real alert while runModal is active.
+            RunLoop.main.add(timer, forMode: .common)
+            RunLoop.main.add(timer, forMode: .modalPanel)
+            defer { timer.invalidate() }
+            let result = try await tab.webView.evaluateJavaScript("confirm('Radius confirmation integration test')") as? Bool
+            timer.invalidate()
+            #expect(responder.presented)
+            #expect(result == expected)
+        }
+    }
     private func fixture() async throws -> (AppState, URL) {
         _ = NSApplication.shared
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("radius-native-test-" + UUID().uuidString, isDirectory: true)
@@ -102,5 +124,17 @@ struct BrowserIntegrationTests {
             if Date() > deadline { throw ValidationError("WebKit integration test timed out.") }
             try await Task.sleep(for: .milliseconds(20))
         }
+    }
+}
+
+@MainActor
+private final class ConfirmationResponder {
+    let accept: Bool
+    private(set) var presented = false
+    init(accept: Bool) { self.accept = accept }
+    func dismissModalIfPresent() {
+        guard !presented, NSApp.modalWindow != nil else { return }
+        presented = true
+        NSApp.stopModal(withCode: accept ? .alertFirstButtonReturn : .alertSecondButtonReturn)
     }
 }

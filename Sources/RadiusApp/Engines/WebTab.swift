@@ -107,10 +107,6 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
     func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor @Sendable () -> Void) {
         let alert = siteAlert(frame, message); alert.addButton(withTitle: "OK"); alert.runModal(); completionHandler()
     }
-    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @Sendable (Bool) -> Void) {
-        let alert = siteAlert(frame, message); alert.addButton(withTitle: "OK"); alert.addButton(withTitle: "Cancel")
-        completionHandler(alert.runModal() == .alertFirstButtonReturn)
-    }
     func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor @Sendable (String?) -> Void) {
         let alert = siteAlert(frame, prompt); let input = NSTextField(string: defaultText ?? "")
         input.frame = NSRect(x: 0, y: 0, width: 320, height: 24); alert.accessoryView = input
@@ -149,6 +145,15 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
         guard !text.isEmpty else { return }
         let config = WKFindConfiguration(); config.backwards = backwards; config.wraps = true
         webView.find(text, configuration: config) { _ in }
+    }
+}
+extension WebTab {
+    // SDK importers differ on the completion block's actor annotation. Export the
+    // stable Objective-C selector explicitly; WebKit calls it on the main actor.
+    @objc(webView:runJavaScriptConfirmPanelWithMessage:initiatedByFrame:completionHandler:)
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor @Sendable (Bool) -> Void) {
+        let alert = siteAlert(frame, message); alert.addButton(withTitle: "OK"); alert.addButton(withTitle: "Cancel")
+        completionHandler(alert.runModal() == .alertFirstButtonReturn)
     }
 }
 struct WebViewHost: NSViewRepresentable {
