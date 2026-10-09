@@ -11,8 +11,8 @@ if [[ "$configuration" != release && "$configuration" != debug ]]; then
   echo 'CONFIGURATION must be release or debug.' >&2
   exit 1
 fi
-swift build -c "$configuration" --product Radius
-binary_directory="$(swift build -c "$configuration" --show-bin-path)"
+swift build -c "$configuration" --product Radius --arch arm64 --arch x86_64
+binary_directory="$(swift build -c "$configuration" --arch arm64 --arch x86_64 --show-bin-path)"
 app_directory="$PWD/dist/Radius.app"
 mkdir -p "$app_directory/Contents/MacOS" "$app_directory/Contents/Resources"
 cp "$binary_directory/Radius" "$app_directory/Contents/MacOS/Radius"

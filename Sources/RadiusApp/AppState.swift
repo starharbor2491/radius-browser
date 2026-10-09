@@ -20,11 +20,13 @@ final class AppState: ObservableObject {
     private var revision: UInt64 = 0
     private var claimedSessions = Set<UUID>()
     var terminating = false
+    private(set) var windows: [UUID: BrowserReference] = [:]
     var configuration: Configuration { previewConfiguration ?? library.preferences.configuration }
 
     init(directory: URL? = nil) {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        dataDirectory = directory ?? support.appendingPathComponent("org.radius.browser", isDirectory: true)
+        let smokeDirectory = CommandLine.arguments.contains("--smoke-test") ? ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_DATA"].map { URL(fileURLWithPath: $0, isDirectory: true) } : nil
+        dataDirectory = directory ?? smokeDirectory ?? support.appendingPathComponent("org.radius.browser", isDirectory: true)
         AppDelegate.state = self
     }
     func load() async {
@@ -135,6 +137,8 @@ final class AppState: ObservableObject {
         guard ready else { return }
         if let index = library.sessions.firstIndex(where: { $0.id == session.id }) { library.sessions[index] = session }
     }
+    func registerWindow(_ model: BrowserModel) { windows[model.session.id] = BrowserReference(model) }
+    func unregisterWindow(_ id: UUID) { windows.removeValue(forKey: id) }
     func closeSession(_ id: UUID) {
         if !terminating { library.sessions.removeAll { $0.id == id }; claimedSessions.remove(id) }
     }
@@ -146,6 +150,7 @@ final class AppState: ObservableObject {
         if library.history.count > 10_000 { library.history.removeFirst(library.history.count - 10_000) }
     }
     func toggleBookmark(url: URL, title: String, profileID: UUID) {
+        guard AddressResolver.isWebURL(url) else { notice = "Only HTTP and HTTPS pages can be saved as bookmarks."; return }
         if library.bookmarks.contains(where: { $0.url == url && $0.profileID == profileID }) {
             library.bookmarks.removeAll { $0.url == url && $0.profileID == profileID }
         } else { library.bookmarks.append(Bookmark(profileID: profileID, title: title, url: url)) }
@@ -231,11 +236,22 @@ import UniformTypeIdentifiers
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static weak var state: AppState?
-    func applicationDidFinishLaunching(_ notification: Notification) { NSApp.setActivationPolicy(.regular); NSApp.activate(ignoringOtherApps: true) }
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.regular); NSApp.activate(ignoringOtherApps: true)
+        if CommandLine.arguments.contains("--smoke-test") { Task { await AppSmokeTest.run() } }
+    }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let state = Self.state else { return .terminateNow }
+        let activeWindows = state.windows.values.compactMap(\.model).filter { $0.downloads.hasActive }
+        if !activeWindows.isEmpty {
+            let alert = NSAlert(); alert.messageText = "Cancel active downloads and quit Radius?"
+            alert.informativeText = "There are unfinished downloads in \(activeWindows.count) windows."
+            alert.addButton(withTitle: "Keep Radius open"); alert.addButton(withTitle: "Cancel downloads and quit")
+            guard alert.runModal() == .alertSecondButtonReturn else { return .terminateCancel }
+        }
         state.terminating = true
         Task {
+            for browser in activeWindows { await browser.downloads.cancelAllAndWait() }
             if await state.flush() { sender.reply(toApplicationShouldTerminate: true) }
             else {
                 let alert = NSAlert(); alert.messageText = "Your latest changes could not be saved."
@@ -247,4 +263,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         return .terminateLater
     }
+}
+
+@MainActor
+final class BrowserReference {
+    weak var model: BrowserModel?
+    init(_ model: BrowserModel) { self.model = model }
 }

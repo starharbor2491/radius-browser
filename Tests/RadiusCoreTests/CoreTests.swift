@@ -153,3 +153,20 @@ private func module(_ id: String, _ capability: ModuleCapability) -> ModuleManif
     #expect(throws: (any Error).self) { try LibraryDatabase(url: url) }
     #expect(try Data(contentsOf: url) == before)
 }
+
+@Test func interruptedModuleUpdateRestoresPreviousPackage() throws {
+    let directory = temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let repository = try ModuleRepository(root: directory)
+    let manifest = module("org.radius.notes", .notes)
+    try repository.install(manifest); try repository.setEnabled(manifest.id, false)
+    let backup = ".backup-" + UUID().uuidString
+    let stage = ".stage-" + UUID().uuidString
+    try FileManager.default.moveItem(at: directory.appendingPathComponent(manifest.id), to: directory.appendingPathComponent(backup))
+    let journal = try JSONSerialization.data(withJSONObject: ["id": manifest.id, "stage": stage, "backup": backup])
+    try journal.write(to: directory.appendingPathComponent(".transaction.json"))
+    let repaired = try ModuleRepository(root: directory)
+    #expect(try repaired.installed().first?.manifest == manifest)
+    #expect(try repaired.installed().first?.enabled == false)
+    #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent(".transaction.json").path))
+}

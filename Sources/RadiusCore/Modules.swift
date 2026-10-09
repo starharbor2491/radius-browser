@@ -55,6 +55,7 @@ public struct InstalledModule: Identifiable, Equatable, Sendable {
     public let diskBytes: Int
 }
 private struct ModuleReceipt: Codable { var enabled: Bool }
+private struct ModuleTransaction: Codable { let id: String; let stage: String; let backup: String }
 
 /// Declarative packages only. The host exposes five narrow capabilities, never arbitrary native code.
 /// Removing a package deletes its files; activation depends on a valid installed manifest and receipt.
@@ -63,6 +64,8 @@ public struct ModuleRepository: Sendable {
     public init(root: URL) throws {
         self.root = root
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try rejectLink(root)
+        try recoverInterruptedInstallation()
     }
     public func installed() throws -> [InstalledModule] {
         let folders = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isSymbolicLinkKey, .isDirectoryKey], options: [.skipsHiddenFiles])
@@ -106,6 +109,7 @@ public struct ModuleRepository: Sendable {
     }
     public func install(_ manifest: ModuleManifest, enabled: Bool? = nil) throws {
         try manifest.validate()
+        try recoverInterruptedInstallation()
         let previous = try installed().first { $0.id == manifest.id }
         let activate = enabled ?? previous?.enabled ?? true
         let directory = root.appendingPathComponent(manifest.id, isDirectory: true)
@@ -115,11 +119,15 @@ public struct ModuleRepository: Sendable {
         defer { try? FileManager.default.removeItem(at: staging) }
         try JSONEncoder().encode(manifest).write(to: staging.appendingPathComponent("manifest.json"), options: .atomic)
         try JSONEncoder().encode(ModuleReceipt(enabled: activate)).write(to: staging.appendingPathComponent("receipt.json"), options: .atomic)
+        let transaction = ModuleTransaction(id: manifest.id, stage: staging.lastPathComponent, backup: backup.lastPathComponent)
+        let journal = root.appendingPathComponent(".transaction.json")
+        try JSONEncoder().encode(transaction).write(to: journal, options: .atomic)
         let replacing = FileManager.default.fileExists(atPath: directory.path)
         if replacing { try rejectLink(directory); try FileManager.default.moveItem(at: directory, to: backup) }
         do {
             try FileManager.default.moveItem(at: staging, to: directory)
             if replacing { try FileManager.default.removeItem(at: backup) }
+            try FileManager.default.removeItem(at: journal)
         } catch {
             if replacing && !FileManager.default.fileExists(atPath: directory.path) { try? FileManager.default.moveItem(at: backup, to: directory) }
             throw error
@@ -156,6 +164,32 @@ public struct ModuleRepository: Sendable {
             for item in try installationPlan(for: manifest.id, catalog: catalog) { try install(item) }
         }
         try Data("1".utf8).write(to: marker, options: .atomic)
+    }
+    private func recoverInterruptedInstallation() throws {
+        let journal = root.appendingPathComponent(".transaction.json")
+        guard FileManager.default.fileExists(atPath: journal.path) else { return }
+        try rejectLink(journal)
+        let transaction = try JSONDecoder().decode(ModuleTransaction.self, from: boundedRead(journal, limit: 1024))
+        guard ModuleManifest.validID(transaction.id), transaction.stage.hasPrefix(".stage-"),
+              UUID(uuidString: String(transaction.stage.dropFirst(7))) != nil,
+              transaction.backup.hasPrefix(".backup-"), UUID(uuidString: String(transaction.backup.dropFirst(8))) != nil else {
+            throw ValidationError("An interrupted module update has an invalid journal. Reset modules in Recovery.")
+        }
+        let destination = root.appendingPathComponent(transaction.id, isDirectory: true)
+        let stage = root.appendingPathComponent(transaction.stage, isDirectory: true)
+        let backup = root.appendingPathComponent(transaction.backup, isDirectory: true)
+        for file in [destination, stage, backup] where FileManager.default.fileExists(atPath: file.path) { try rejectLink(file) }
+        if !FileManager.default.fileExists(atPath: destination.path) {
+            if FileManager.default.fileExists(atPath: backup.path) { try FileManager.default.moveItem(at: backup, to: destination) }
+            else if FileManager.default.fileExists(atPath: stage.path) {
+                let manifestURL = stage.appendingPathComponent("manifest.json"); try rejectLink(manifestURL)
+                let manifest = try ModuleManifest.decode(boundedRead(manifestURL, limit: 32 * 1024))
+                guard manifest.id == transaction.id else { throw ValidationError("An interrupted installation has mismatched metadata.") }
+                try FileManager.default.moveItem(at: stage, to: destination)
+            }
+        }
+        for file in [stage, backup] where FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
+        try FileManager.default.removeItem(at: journal)
     }
     private func requireNoDependents(_ id: String, modules: [InstalledModule]) throws {
         if let dependent = modules.first(where: { $0.manifest.dependencies.contains(id) }) {

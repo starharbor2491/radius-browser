@@ -101,7 +101,7 @@ struct BrowserWindow: View {
         .onReceive(NotificationCenter.default.publisher(for: .radiusFind)) { notification in if notification.object as? UUID == model.session.id { findVisible = true; findFocused = true } }
         .onExitCommand { model.focusMode = false; findVisible = false; addressFocused = false }
         .onChange(of: app.installedModules) { _, _ in if !app.enabled(.focusMode) { model.focusMode = false } }
-        .onChange(of: model.session.selectedTabID) { _, _ in findVisible = false; addressFocused = false; model.addressEditing = false }
+        .onChange(of: model.session.selectedTabID) { _, _ in findVisible = false; model.addressEditing = addressFocused }
         .onChange(of: addressFocused) { _, focused in model.addressEditing = focused }
         .onChange(of: findVisible) { _, visible in if visible { findFocused = true } }
         .onChange(of: app.library.preferences.blockPopups) { _, _ in model.updatePopupPolicy() }
@@ -115,7 +115,7 @@ struct BrowserWindow: View {
                 TextField("Search or enter website", text: $model.address)
                     .textFieldStyle(.plain).focused($addressFocused).onSubmit { model.addressEditing = false; model.navigate(model.address); addressFocused = false }
                     .accessibilityLabel("Website address or search")
-                if model.hasPage && !model.isPrivate {
+                if model.selectedTab.url.map(AddressResolver.isWebURL) == true && !model.isPrivate {
                     IconButton(title: "Bookmark this page", icon: isBookmarked ? "star.fill" : "star", active: isBookmarked) { model.toggleBookmark() }
                 }
             }

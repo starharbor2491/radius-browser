@@ -10,6 +10,7 @@ final class DownloadItem: ObservableObject, Identifiable {
     @Published var status = "Waiting for a destination"
     @Published var destination: URL?
     var staging: URL?
+    var approvedReplacement = false
     @Published var active = true
     @Published var fraction = 0.0
     let download: WKDownload
@@ -37,6 +38,7 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
             item.status = "Cancelled"; item.active = false; item.progressObservation = nil; completionHandler(nil); return
         }
         let staging = url.deletingLastPathComponent().appendingPathComponent(".radius-download-" + UUID().uuidString + ".part")
+        item.approvedReplacement = FileManager.default.fileExists(atPath: url.path)
         item.destination = url; item.staging = staging; item.status = "Downloading"; completionHandler(staging)
     }
     func downloadDidFinish(_ download: WKDownload) {
@@ -45,6 +47,14 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
         guard let staging = item.staging, let destination = item.destination else { item.status = "Failed: missing destination"; return }
         do {
             if FileManager.default.fileExists(atPath: destination.path) {
+                if !item.approvedReplacement {
+                    let alert = NSAlert(); alert.messageText = "Replace a file that appeared during this download?"
+                    alert.informativeText = "A file now exists at \(destination.lastPathComponent). Your completed download is kept separately until you choose."
+                    alert.addButton(withTitle: "Keep existing file"); alert.addButton(withTitle: "Replace file")
+                    guard alert.runModal() == .alertSecondButtonReturn else {
+                        item.status = "Download complete. Existing file kept; downloaded copy is available in Finder."; item.fraction = 1; return
+                    }
+                }
                 _ = try FileManager.default.replaceItemAt(destination, withItemAt: staging)
             } else { try FileManager.default.moveItem(at: staging, to: destination) }
             item.staging = nil; item.fraction = 1; item.status = "Finished"
@@ -63,5 +73,15 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
         item.active = false; item.status = "Cancelled"; item.progressObservation = nil
     }
     func cancelAll() { items.filter(\.active).forEach(cancel) }
+    func cancelAllAndWait() async {
+        for item in items where item.active {
+            let staging = item.staging
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                item.download.cancel { _ in continuation.resume() }
+            }
+            item.active = false; item.status = "Cancelled"; item.progressObservation = nil; item.staging = nil
+            if let staging { try? FileManager.default.removeItem(at: staging) }
+        }
+    }
     var hasActive: Bool { items.contains(where: \.active) }
 }

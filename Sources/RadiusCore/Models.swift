@@ -198,7 +198,7 @@ public struct LibraryState: Codable, Equatable, Sendable {
         history = Array(history.filter { profileIDs.contains($0.profileID) && AddressResolver.isWebURL($0.url) }.suffix(10_000))
         notes = notes.filter { profileIDs.contains($0.profileID) }
         var sessionsSeen = Set<UUID>()
-        sessions = Array(sessions.filter { profileIDs.contains($0.profileID) && sessionsSeen.insert($0.id).inserted }.prefix(20))
+        sessions = sessions.filter { profileIDs.contains($0.profileID) && sessionsSeen.insert($0.id).inserted }
         for i in sessions.indices { sessions[i].normalize() }
         preferences.configuration.normalize()
         for i in preferences.savedConfigurations.indices { preferences.savedConfigurations[i].configuration.normalize() }

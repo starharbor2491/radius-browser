@@ -17,7 +17,7 @@ struct CustomizeView: View {
             SheetHeader(title: "Customize", subtitle: "Change the look. Arrange your space. Keep your place.")
             HStack(alignment: .top, spacing: 28) {
                 VStack(alignment: .leading, spacing: 16) {
-                    Picker("Customize category", selection: $selection) { Text("Appearance").tag(0); Text("BrowserLayout").tag(1); Text("Saved setups").tag(2) }.pickerStyle(.segmented)
+                    Picker("Customize category", selection: $selection) { Text("Appearance").tag(0); Text("Layout").tag(1); Text("Saved setups").tag(2) }.pickerStyle(.segmented)
                     ScrollView { if selection == 0 { appearance } else if selection == 1 { layout } else { savedSetups } }.frame(maxHeight: .infinity)
                 }.frame(width: 340)
                 VStack(alignment: .leading, spacing: 16) {
@@ -80,7 +80,7 @@ struct CustomizeView: View {
             Toggle("Show bookmarks bar", isOn: binding(\.layout.bookmarksBar))
             Toggle("Show status bar", isOn: binding(\.layout.statusBar))
             Divider()
-            Text("BrowserLayout presets").font(.headline)
+            Text("Layout presets").font(.headline)
             HStack {
                 Button("Classic") { change { $0.layout = BrowserLayout() } }
                 Button("Sidebar") { change { $0.layout.tabs = .leading; $0.layout.sidebar = .trailing } }

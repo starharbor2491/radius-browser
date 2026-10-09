@@ -21,6 +21,8 @@ jobs:
         run: ./scripts/test.sh
       - name: Build native app
         run: ./scripts/build-app.sh
+      - name: Launch packaged app and capture native screens
+        run: ./scripts/smoke-app.sh
       - name: Archive application
         run: ditto -c -k --sequesterRsrc --keepParent dist/Radius.app dist/Radius-macOS.zip
       - uses: actions/upload-artifact@v4
@@ -28,6 +30,12 @@ jobs:
           name: Radius-macOS-local-build
           path: dist/Radius-macOS.zip
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Radius-native-screenshots
+          path: dist/screenshots/*.png
+          if-no-files-found: warn
   portable-core:
     runs-on: ubuntu-24.04
     container: swift:6.2.1

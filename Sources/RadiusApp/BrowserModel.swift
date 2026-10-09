@@ -27,6 +27,7 @@ final class BrowserModel: ObservableObject {
         self.app = app; self.isPrivate = isPrivate; session = app.claimSession(privateBrowsing: isPrivate)
         if isPrivate { privateDataStore = .nonPersistent() }
         address = selectedTab.url?.absoluteString ?? ""
+        app.registerWindow(self)
     }
     func webTab(_ id: UUID) -> WebTab {
         if let cached = webTabs[id] { return cached }
@@ -39,11 +40,11 @@ final class BrowserModel: ObservableObject {
     private func attach(_ tab: WebTab, id: UUID) {
         tab.onChange = { [weak self, weak tab] finished in
             guard let self, let tab, let index = self.session.tabs.firstIndex(where: { $0.id == id }) else { return }
-            if let url = tab.webView.url, AddressResolver.isWebURL(url) {
+            if let url = tab.webView.url, AddressResolver.isWebURL(url) || url.scheme == "blob" || url.absoluteString == "about:blank" {
                 self.session.tabs[index].url = url
                 self.session.tabs[index].title = String((tab.webView.title ?? url.host ?? "Website").prefix(512))
                 if self.session.selectedTabID == id && !self.addressEditing { self.address = url.absoluteString }
-                if finished && !self.isPrivate {
+                if finished && !self.isPrivate && AddressResolver.isWebURL(url) {
                     self.app.addHistory(url: url, title: self.session.tabs[index].title, profileID: self.session.profileID)
                 }
             }
@@ -71,6 +72,7 @@ final class BrowserModel: ObservableObject {
         tab.load(url)
     }
     func newTab(url: URL? = nil) {
+        if let url, !AddressResolver.isWebURL(url) { app.notice = "This page cannot be reopened in a separate browsing context."; return }
         guard session.tabs.count < 200 else { app.notice = "This window has 200 tabs. Close a tab or open another window."; return }
         let tab = BrowserTab(url: url)
         session.tabs.append(tab); selectTab(tab.id)
@@ -82,7 +84,7 @@ final class BrowserModel: ObservableObject {
     func closeTab(_ id: UUID) {
         guard let index = session.tabs.firstIndex(where: { $0.id == id }) else { return }
         let closing = session.tabs[index]
-        if closing.url != nil { closedTabs.append(closing); if closedTabs.count > 20 { closedTabs.removeFirst() } }
+        if let url = closing.url, AddressResolver.isWebURL(url) { closedTabs.append(closing); if closedTabs.count > 20 { closedTabs.removeFirst() } }
         webTabs.removeValue(forKey: id)?.dispose()
         session.tabs.remove(at: index)
         if session.tabs.isEmpty { session.tabs = [BrowserTab()] }
@@ -124,7 +126,7 @@ final class BrowserModel: ObservableObject {
         if isPrivate { privateDataStore = .nonPersistent() }
     }
     func toggleBookmark() {
-        guard !isPrivate, let url = selectedTab.url else { return }
+        guard !isPrivate, let url = selectedTab.url, AddressResolver.isWebURL(url) else { return }
         app.toggleBookmark(url: url, title: selectedTab.title, profileID: session.profileID)
     }
     func togglePanel(_ next: BrowserPanel) {
@@ -138,7 +140,7 @@ final class BrowserModel: ObservableObject {
         webTabs.values.forEach { $0.dispose() }; webTabs.removeAll()
         downloads.cancelAll()
         if !isPrivate { app.closeSession(session.id) }
-        privateDataStore = nil; closedTabs.removeAll()
+        privateDataStore = nil; closedTabs.removeAll(); app.unregisterWindow(session.id)
     }
 }
 enum BrowserPanel: String, CaseIterable, Identifiable {
