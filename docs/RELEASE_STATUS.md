@@ -26,7 +26,7 @@ The standard application workflow builds both CPU architectures, verifies signat
 
 ## Consumer release gates
 
-1. Preserve passing native CI for the packaged source and perform the interactive [clean-Mac checklist](TESTING.md), including ARM visible Chromium composition, VoiceOver, IME, representative websites, media permissions, download races, recovery, and session/focus behavior. The source and artifacts in AUDIT.md pass native CI; those automated checks do not replace interactive acceptance.
+1. Preserve passing native CI for the packaged source and perform the interactive [clean-Mac checklist](TESTING.md), including visible Chromium composition on a clean Mac, VoiceOver, IME, representative websites, media permissions, download races, recovery, and session/focus behavior. The source and artifacts in AUDIT.md pass native CI; those automated checks do not replace interactive acceptance.
 2. Provide a supported Chrome-style embedding architecture for the required Chrome extensions, then pass consumer installation, Manifest V3 APIs, restart/update/removal, and isolation checks in [CHROMIUM.md](CHROMIUM.md). CEF native-parent Alloy is insufficient.
 3. Implement a signed consumer engine install/update/removal flow and an offline installer with the same application behavior.
 4. Complete the remaining module/component requirements before advertising the broader plan's modularity. Three current optional behaviors remain in the host, and the catalog/update service is local only.
