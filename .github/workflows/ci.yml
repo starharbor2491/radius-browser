@@ -21,6 +21,8 @@ jobs:
         run: ./scripts/test.sh
       - name: Build native app
         run: ./scripts/build-app.sh
+      - name: Verify native delegates in release configuration
+        run: swift test -c release --filter BrowserIntegrationTests
       - name: Launch packaged app and capture native screens
         timeout-minutes: 3
         run: ./scripts/smoke-app.sh

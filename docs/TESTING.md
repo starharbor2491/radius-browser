@@ -1,6 +1,6 @@
 # Validation
 
-Run `./scripts/test.sh` on macOS or Linux with Swift 6 and SQLite development headers. Run `./scripts/build-app.sh` on macOS. CI builds an application zip for local testing.
+Run `./scripts/test.sh` on macOS or Linux with Swift 6 and SQLite development headers. Run `./scripts/build-app.sh` on macOS. CI builds a universal application zip for local testing and runs `./scripts/smoke-app.sh` against the packaged binary. The smoke test uses a disposable data directory and a dynamically allocated loopback HTTP fixture; it captures native screens and checks browsing, reader extraction, saving, and normal shutdown.
 
 ## Clean-Mac checklist
 

@@ -19,7 +19,7 @@ intel_binary_directory="$(swift build -c "$configuration" --triple x86_64-apple-
 app_directory="$PWD/dist/Radius.app"
 mkdir -p "$app_directory/Contents/MacOS" "$app_directory/Contents/Resources/Legal"
 lipo -create "$arm_binary_directory/Radius" "$intel_binary_directory/Radius" -output "$app_directory/Contents/MacOS/Radius"
-lipo -verify_arch arm64 x86_64 "$app_directory/Contents/MacOS/Radius"
+lipo "$app_directory/Contents/MacOS/Radius" -verify_arch arm64 x86_64
 # Store declarative resources in the standard app resource directory.
 rm -rf "$app_directory/Contents/Resources/Modules"
 cp -R Sources/RadiusApp/Resources/Modules "$app_directory/Contents/Resources/Modules"

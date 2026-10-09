@@ -19,7 +19,7 @@ The implementation is a native WebKit browser development build. It is **not yet
 
 ## Verification
 
-Portable core tests exercise input validation, SQLite round trips and stale saves, module lifecycles/dependencies/cycles, symlink rejection, configuration sanitization, and bookmark import/export. Native compilation and clean-Mac behavioral checks are separate gates. A Linux parser check does not establish macOS SDK type compatibility or GUI correctness.
+The 13 portable tests exercise input validation, SQLite round trips and stale saves, module lifecycles/dependencies/cycles, symlink rejection, interrupted updates, configuration sanitization, and bookmark import/export. Six native integration tests cover private persistence, profile context changes, popup openers, generated documents, tab limits, and real JavaScript confirmations. The packaged-app smoke check captures native screens and verifies HTTP browsing, reader extraction, saving, and normal termination. CI results apply to the tested commit; interactive clean-Mac checks remain separate gates. See [the review record](AUDIT.md).
 
 Before calling this a consumer v1 release:
 
