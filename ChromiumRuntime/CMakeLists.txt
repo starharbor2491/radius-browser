@@ -3,6 +3,9 @@ cmake_minimum_required(VERSION 3.21)
 project(RadiusChromium LANGUAGES C CXX OBJCXX)
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CEF_ROOT}/cmake")
 find_package(CEF REQUIRED)
+# The package builder signs the completed development binaries explicitly.
+# Xcode rejects CEF's empty signing identity for a dynamic-library target.
+set(CMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED NO)
 if(NOT OS_MAC OR NOT USE_SANDBOX)
   message(FATAL_ERROR "This adapter requires macOS and the CEF sandbox")
 endif()

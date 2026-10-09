@@ -128,6 +128,13 @@ import CSQLite
     #expect(bookmarks[0].url.absoluteString == "https://example.test/?a=1&b=2")
     #expect(bookmarks[0].title == "A's 📖 &lt;")
 }
+@Test func bookmarkImportIgnoresCommentsAndRawText() throws {
+    let text = #"<!-- <a href="https://comment.test">Comment only</a> --><SCRIPT>const value = '<a href="https://script.test">Script</a>';</sCrIpT><style><a href="https://style.test">CSS</a></style><a href="https://real.test">Real<!--hidden--> <b>bookmark</b></a>"#
+    let bookmarks = try BookmarkExchange.parse(Data(text.utf8), profileID: UUID())
+    #expect(bookmarks.count == 1)
+    #expect(bookmarks[0].url.host == "real.test")
+    #expect(bookmarks[0].title == "Real bookmark")
+}
 @Test func malformedBookmarkAnchorsHaveBoundedParsingTime() {
     let malformed = Data(String(repeating: #"<a href="https://example.test">"#, count: 10_000).utf8)
     let clock = ContinuousClock(), start = clock.now

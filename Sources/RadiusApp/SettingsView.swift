@@ -11,6 +11,7 @@ struct SettingsView: View {
     @State private var section = SettingsSection.general
     @State private var profileName = ""
     @State private var clearing = false
+    @ObservedObject private var chromiumRuntime = ChromiumRuntime.shared
     enum SettingsSection: String, CaseIterable, Identifiable {
         case general = "General", profiles = "Profiles", privacy = "Privacy", engines = "Browsing engines"
         var id: Self { self }
@@ -82,7 +83,7 @@ struct SettingsView: View {
         }
     }
     private var engines: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        ScrollView { VStack(alignment: .leading, spacing: 20) {
             Text("Choose the engine that displays websites. Your browser controls and recovery stay available independently.").foregroundStyle(.secondary)
             GroupBox {
                 HStack(alignment: .top, spacing: 14) {
@@ -100,13 +101,12 @@ struct SettingsView: View {
                 app.library.profiles[index].engineID = engine
             })) {
                 Text("WebKit").tag(BrowserEngineID.webkit)
-                if ChromiumRuntime.shared.isInstalled(in: app.dataDirectory) { Text("Chromium Alloy").tag(BrowserEngineID.chromium) }
+                Text(chromiumRuntime.isInstalled(in: app.dataDirectory) ? "Chromium Alloy" : "Chromium Alloy (unavailable)").tag(BrowserEngineID.chromium).disabled(!chromiumRuntime.isInstalled(in: app.dataDirectory))
             }
             Text("Existing tabs keep their engine. Use a tab's context menu to reopen it in another engine.").font(.caption).foregroundStyle(.secondary)
             Link("Engine compatibility and release status", destination: URL(string: "https://github.com/starharbor2491/radius-browser/blob/codex/radius-v1/docs/CHROMIUM.md")!)
             Text("A required engine can be removed only after a compatible replacement is installed. Apple's system WebKit framework is part of macOS.").font(.caption).foregroundStyle(.secondary)
-            Spacer()
-        }
+        }.frame(maxWidth: .infinity, alignment: .leading) }
     }
     private func preference<T>(_ path: WritableKeyPath<Preferences, T>) -> Binding<T> {
         Binding(get: { app.library.preferences[keyPath: path] }, set: { app.library.preferences[keyPath: path] = $0 })
@@ -130,13 +130,15 @@ struct SettingsView: View {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         clearing = true
         let profileID = model.session.profileID
+        let profileName = model.profile.name
         Task {
             defer { clearing = false }
             do {
                 try await ChromiumRuntime.shared.clearWebsiteData(profileID: profileID, dataDirectory: app.dataDirectory)
                 let store = WKWebsiteDataStore(forIdentifier: profileID)
                 await store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
-                model.activeWebTab.reload(); app.notice = "Website data for this profile was cleared."
+                if model.session.profileID == profileID { model.activeWebTab.reload() }
+                app.notice = "Website data for \(profileName) was cleared."
             } catch { app.notice = error.localizedDescription }
         }
     }

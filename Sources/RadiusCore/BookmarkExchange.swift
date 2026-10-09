@@ -49,12 +49,18 @@ public enum BookmarkExchange {
                 if pendingHref != nil && title.count < 16_384 { title.append(bytes[i]) }
                 i += 1; continue
             }
+            if i + 3 < bytes.count && bytes[(i + 1)...(i + 3)].elementsEqual([33, 45, 45]) {
+                i += 4
+                while i + 2 < bytes.count && !bytes[i...(i + 2)].elementsEqual([45, 45, 62]) { i += 1 }
+                i = min(bytes.count, i + 3); continue
+            }
             i += 1
             var closing = false
             if i < bytes.count && bytes[i] == 47 { closing = true; i += 1 }
             let nameStart = i
             while i < bytes.count && !whitespace(bytes[i]) && bytes[i] != 62 && bytes[i] != 47 && bytes[i] != 60 { i += 1 }
             let isAnchor = i - nameStart == 1 && (bytes[nameStart] == 65 || bytes[nameStart] == 97)
+            let tagName = String(decoding: bytes[nameStart..<i], as: UTF8.self).lowercased()
             let attributesStart = i
             var quote: UInt8?
             while i < bytes.count {
@@ -66,6 +72,22 @@ public enum BookmarkExchange {
             }
             guard i < bytes.count else { break }
             if bytes[i] == 60 { continue } // Abandon an unterminated tag at the next tag.
+            if !closing && (tagName == "script" || tagName == "style") {
+                let marker = Array(("</" + tagName).utf8)
+                i += 1
+                while i < bytes.count {
+                    if bytes[i] == 60 && i + marker.count < bytes.count {
+                        let matches = marker.indices.allSatisfy { offset in
+                            let byte = bytes[i + offset]
+                            return (byte >= 65 && byte <= 90 ? byte + 32 : byte) == marker[offset]
+                        }
+                        let next = bytes[i + marker.count]
+                        if matches && (whitespace(next) || next == 62) { break }
+                    }
+                    i += 1
+                }
+                continue
+            }
             if isAnchor {
                 if closing {
                     if let pendingHref {

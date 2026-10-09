@@ -67,7 +67,10 @@ struct Page {
   CefRefPtr<CefRegistration> observer;
   std::string context_key;
   std::string pending_url;
+  std::string title;
+  bool navigation_failed = false;
   bool closing = false;
+  bool navigated = false;
   bool popups = false;
   void* callback_context = nullptr;
   radius_cef_event_callback event = nullptr;
@@ -86,9 +89,10 @@ void Message(Page* page, int event, const std::string& message) {
   auto value = CefDictionaryValue::Create(); value->SetString("message", message); Emit(page, event, value);
 }
 void State(Page* page, bool finished = false) {
-  if (!page->browser) return;
+  if (!page->browser || !page->navigated) return;
   auto value = CefDictionaryValue::Create();
   value->SetString("url", page->browser->GetMainFrame()->GetURL());
+  value->SetString("title",page->title);
   value->SetBool("loading", page->browser->IsLoading());
   value->SetBool("canGoBack", page->browser->CanGoBack());
   value->SetBool("canGoForward", page->browser->CanGoForward());
@@ -162,6 +166,7 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     const std::string url = target_url.ToString();
     if (!url.empty() && !Allowed(url)) return true;
     Page* child = Allocate(page_->context_key);
+    child->navigated = true;
     const bool adopted = page_->popup(page_->callback_context, child, url.c_str()) != 0;
     if (!adopted) { Destroy(child); return true; }
     pending_popups_[popup_id] = child;
@@ -179,18 +184,28 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     }
   }
   void OnTitleChange(CefRefPtr<CefBrowser>, const CefString& title) override {
-    if (!page_) return;
+    if (!page_ || !page_->navigated) return;
+    page_->title = title.ToString();
     auto value = CefDictionaryValue::Create(); value->SetString("title", title); Emit(page_,RADIUS_CEF_STATE,value);
   }
   void OnAddressChange(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame, const CefString&) override {
     if (page_ && frame->IsMain()) State(page_);
   }
-  void OnLoadingStateChange(CefRefPtr<CefBrowser>, bool loading, bool, bool) override {
-    if (page_) State(page_, !loading);
+  void OnLoadingStateChange(CefRefPtr<CefBrowser>, bool, bool, bool) override {
+    if (page_) State(page_);
+  }
+  void OnLoadStart(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame, TransitionType) override {
+    if (page_ && frame->IsMain()) { page_->navigation_failed = false; page_->title.clear(); }
+  }
+  void OnLoadEnd(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame, int) override {
+    if (page_ && frame->IsMain() && !page_->navigation_failed) State(page_,true);
   }
   void OnLoadError(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame,
       ErrorCode code,const CefString& error,const CefString&) override {
-    if (page_ && frame->IsMain() && code != ERR_ABORTED) Message(page_,RADIUS_CEF_ERROR,error.ToString());
+    if (page_ && frame->IsMain()) {
+      page_->navigation_failed = true;
+      if (code != ERR_ABORTED) Message(page_,RADIUS_CEF_ERROR,error.ToString());
+    }
   }
   bool OnBeforeBrowse(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame,
       CefRefPtr<CefRequest> request,bool,bool) override {
@@ -288,6 +303,7 @@ void Command(void* opaque,int command,const char* text,double value) {
   if (command==RADIUS_CEF_POPUPS) { page->popups=value!=0; return; }
   if (command==RADIUS_CEF_LOAD) {
     if (!Allowed(text ? text : "")) { Message(page,RADIUS_CEF_ERROR,"Only HTTP and HTTPS addresses are supported."); return; }
+    page->navigated=true;
     page->pending_url=text;
     if (page->browser) page->browser->GetMainFrame()->LoadURL(text);
     return;
@@ -299,6 +315,7 @@ void Command(void* opaque,int command,const char* text,double value) {
     case RADIUS_CEF_STOP: browser->StopLoad(); break;
     case RADIUS_CEF_BACK: browser->GoBack(); break;
     case RADIUS_CEF_FORWARD: browser->GoForward(); break;
+    case RADIUS_CEF_FOCUS: host->SetFocus(true); break;
     case RADIUS_CEF_ZOOM: host->SetZoomLevel(std::log(value)/std::log(1.2)); break;
     case RADIUS_CEF_FIND:
       if (!text || !*text) host->StopFinding(true);
@@ -307,9 +324,12 @@ void Command(void* opaque,int command,const char* text,double value) {
   }
 }
 void DevTools(void* opaque,int id,const char* method,const char* parameters) {
-  auto page=static_cast<Page*>(opaque); if (!page->browser) { Message(page,RADIUS_CEF_ERROR,"The page is not ready."); return; }
+  auto page=static_cast<Page*>(opaque);
   auto value=CefParseJSON(parameters,JSON_PARSER_RFC);
-  page->browser->GetHost()->ExecuteDevToolsMethod(id,method,value ? value->GetDictionary() : nullptr);
+  if (page->browser && !page->closing &&
+      page->browser->GetHost()->ExecuteDevToolsMethod(id,method,value ? value->GetDictionary() : nullptr) != 0) return;
+  auto response=CefDictionaryValue::Create(); response->SetInt("id",id); response->SetBool("success",false);
+  Emit(page,RADIUS_CEF_RESULT,response);
 }
 void Close(void* opaque) {
   auto page=static_cast<Page*>(opaque); if (!pages.count(page)) return;

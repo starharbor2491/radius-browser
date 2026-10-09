@@ -14,7 +14,7 @@ struct ChromiumSettingsView: View {
         GroupBox {
             VStack(alignment: .leading, spacing: 10) {
                 HStack { Text("Chromium Alloy").font(.headline); Spacer(); Text(installed ? "Development runtime installed" : "Optional development runtime").font(.caption).foregroundStyle(.secondary) }
-                Text("An embedded Chromium engine for Radius's native controls. Chrome extensions and downloads are not supported by this development adapter.").font(.callout).foregroundStyle(.secondary)
+                Text("An embedded Chromium engine for Radius's native controls. Chrome extensions, downloads, and camera/microphone capture are not supported by this development adapter.").font(.callout).foregroundStyle(.secondary)
                 HStack {
                     Button(installed ? "Replace runtime…" : "Install runtime…") { choosePackage() }.disabled(busy || runtime.isLoaded)
                     if installed {

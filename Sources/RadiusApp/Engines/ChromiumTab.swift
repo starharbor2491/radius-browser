@@ -50,10 +50,11 @@ final class ChromiumTab: BrowserEngineTab {
     }
     override func reload() { errorMessage = nil; command(Int(RADIUS_CEF_RELOAD)) }
     override func stop() { command(Int(RADIUS_CEF_STOP)) }
-    override func goBack() { command(Int(RADIUS_CEF_BACK)) }
-    override func goForward() { command(Int(RADIUS_CEF_FORWARD)) }
+    override func goBack() { errorMessage = nil; command(Int(RADIUS_CEF_BACK)) }
+    override func goForward() { errorMessage = nil; command(Int(RADIUS_CEF_FORWARD)) }
     override func setZoom(_ value: Double) { super.setZoom(value); command(Int(RADIUS_CEF_ZOOM), value: zoom) }
     override func updatePopupPolicy() { command(Int(RADIUS_CEF_POPUPS), value: allowPopups?() == true ? 1 : 0) }
+    override func focus() { command(Int(RADIUS_CEF_FOCUS)) }
     override func find(_ text: String, backwards: Bool = false) { command(Int(RADIUS_CEF_FIND), text: text, value: backwards ? 1 : 0) }
     override func readerText() async throws -> String {
         let data = try await request("Runtime.evaluate", parameters: ["expression": "document.body ? document.body.innerText.slice(0, 200000) : ''", "returnByValue": true])
@@ -94,14 +95,19 @@ final class ChromiumTab: BrowserEngineTab {
         switch event {
         case Int32(RADIUS_CEF_STATE), Int32(RADIUS_CEF_FINISHED):
             if let address = value["url"] as? String { pageURL = URL(string: address) }
-            if let title = value["title"] as? String { pageTitle = title }
-            if let value = value["loading"] as? Bool { loading = value; progress = value ? 0.4 : 1 }
+            if let title = value["title"] as? String { pageTitle = title.isEmpty ? nil : title }
+            if let value = value["loading"] as? Bool {
+                loading = value; progress = value ? 0.4 : 1
+                if value { errorMessage = nil }
+            }
             if let value = value["canGoBack"] as? Bool { canGoBack = value }
             if let value = value["canGoForward"] as? Bool { canGoForward = value }
             onChange?(event == Int32(RADIUS_CEF_FINISHED))
-        case Int32(RADIUS_CEF_ERROR), Int32(RADIUS_CEF_NOTICE):
+        case Int32(RADIUS_CEF_ERROR):
             errorMessage = value["message"] as? String
-            if event == Int32(RADIUS_CEF_ERROR) { loading = false; progress = 0 }
+            loading = false; progress = 0
+        case Int32(RADIUS_CEF_NOTICE):
+            if let message = value["message"] as? String { onNotice?(message) }
         case Int32(RADIUS_CEF_CLOSED):
             page = nil; cancelRequests(); onClose?()
         case Int32(RADIUS_CEF_RESULT):

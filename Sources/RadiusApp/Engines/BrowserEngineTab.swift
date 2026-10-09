@@ -15,6 +15,7 @@ class BrowserEngineTab: NSObject, ObservableObject {
     var onChange: ((Bool) -> Void)?
     var onCreateWindow: ((BrowserEngineTab, URL?) -> Bool)?
     var onClose: (() -> Void)?
+    var onNotice: ((String) -> Void)?
     var allowPopups: (() -> Bool)? { didSet { updatePopupPolicy() } }
     var nativeView: NSView { preconditionFailure("An engine must provide its native view") }
     var url: URL? { nil }
@@ -27,8 +28,9 @@ class BrowserEngineTab: NSObject, ObservableObject {
     func goForward() { preconditionFailure("An engine must implement forward navigation") }
     func setZoom(_ value: Double) { zoom = min(3, max(0.5, value)) }
     func updatePopupPolicy() {}
+    func focus() { nativeView.window?.makeFirstResponder(nativeView) }
     func find(_ text: String, backwards: Bool = false) { preconditionFailure("An engine must implement find") }
     func readerText() async throws -> String { throw ValidationError("This engine cannot extract page text.") }
     func saveScreenshot(app: AppState) { app.notice = "This engine cannot capture the page." }
-    func dispose() { onChange = nil; onCreateWindow = nil; onClose = nil; allowPopups = nil }
+    func dispose() { onChange = nil; onCreateWindow = nil; onClose = nil; onNotice = nil; allowPopups = nil }
 }

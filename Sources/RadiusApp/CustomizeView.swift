@@ -162,15 +162,11 @@ struct LayoutPreview: View {
             HStack(spacing: 0) {
                 if layout.tabs == .leading { verticalTabs }
                 if layout.sidebar == .leading { miniSidebar }
-                VStack(alignment: .leading, spacing: 12) {
-                    RoundedRectangle(cornerRadius: 3).fill(.primary.opacity(0.7)).frame(width: 95, height: 9)
-                    ForEach(0..<4) { _ in RoundedRectangle(cornerRadius: 2).fill(.primary.opacity(0.12)).frame(height: 5) }
-                    if layout.split != nil {
-                        Divider()
-                        Text(layout.split == .sideBySide ? "Two panes · side by side" : "Two panes · stacked").font(.system(size: 8)).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                }.padding(16).frame(maxWidth: .infinity, maxHeight: .infinity).background(Color(nsColor: .textBackgroundColor))
+                Group {
+                    if layout.split == .sideBySide { HStack(spacing: 0) { miniDocument; Divider(); miniDocument } }
+                    else if layout.split == .stacked { VStack(spacing: 0) { miniDocument; Divider(); miniDocument } }
+                    else { miniDocument }
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 if layout.sidebar == .trailing { miniSidebar }
                 if layout.tabs == .trailing { verticalTabs }
             }
@@ -184,5 +180,12 @@ struct LayoutPreview: View {
     private var miniTabs: some View { HStack { Text("New tab").padding(5).background(.background, in: RoundedRectangle(cornerRadius: 4)); Text("+"); Spacer() }.font(.system(size: 8)).padding(5).background(theme.accent.color.opacity(0.08)) }
     private var miniNavigation: some View { HStack { Text("‹  ›"); Text("Search or enter website").frame(maxWidth: .infinity).padding(5).background(.background, in: RoundedRectangle(cornerRadius: 4)); Text("···") }.font(.system(size: 8)).padding(5) }
     private var miniSidebar: some View { VStack(alignment: .leading, spacing: 10) { Text("Bookmarks").bold(); Text("A good find"); Spacer() }.font(.system(size: 8)).padding(8).frame(width: 70).background(.quaternary) }
-    private var verticalTabs: some View { VStack(alignment: .leading) { Text("New tab"); Text("+"); Spacer() }.font(.system(size: 8)).padding(7).frame(width: 55).background(theme.accent.color.opacity(0.08)) }
+    private var miniDocument: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            RoundedRectangle(cornerRadius: 3).fill(.primary.opacity(0.7)).frame(maxWidth: 95).frame(height: 9)
+            ForEach(0..<3) { _ in RoundedRectangle(cornerRadius: 2).fill(.primary.opacity(0.12)).frame(height: 5) }
+            Spacer(minLength: 2)
+        }.padding(12).frame(maxWidth: .infinity, maxHeight: .infinity).background(Color(nsColor: .textBackgroundColor))
+    }
+    private var verticalTabs: some View { VStack(alignment: .leading) { Text("New tab"); if layout.treeTabs == true { Text("Reference").padding(.leading, 8) }; Text("+"); Spacer() }.font(.system(size: 8)).padding(7).frame(width: 55).background(theme.accent.color.opacity(0.08)) }
 }

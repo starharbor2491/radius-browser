@@ -8,6 +8,58 @@ import RadiusCore
 @Suite(.serialized)
 @MainActor
 struct BrowserIntegrationTests {
+    @Test func splitPreviewAndAppearanceChangesPreserveBrowsingState() async throws {
+        let (app, directory) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = BrowserModel(app: app, isPrivate: false)
+        let originalTabs = browser.session.tabs
+        var preview = app.configuration; preview.layout.split = .sideBySide
+        app.previewConfiguration = preview; browser.synchronizeSplit()
+        #expect(browser.session.tabs == originalTabs)
+        #expect(browser.session.split == nil)
+        app.previewConfiguration = nil; browser.synchronizeSplit()
+        #expect(browser.session.tabs == originalTabs)
+        browser.beginSplit(.sideBySide); browser.endSplit()
+        let tabsBeforeAppearance = browser.session.tabs
+        var appearance = app.configuration; appearance.theme.accent = .orange
+        app.applyConfiguration(appearance)
+        #expect(browser.session.split == nil)
+        #expect(browser.session.tabs == tabsBeforeAppearance)
+        browser.beginSplit(.sideBySide)
+        #expect(browser.session.split != nil)
+        #expect(browser.session.tabs == tabsBeforeAppearance)
+        browser.closeWindow(); #expect(await app.flush())
+    }
+    @Test func profileReplacementResetsGeneratedPagesAndAddress() async throws {
+        let (app, directory) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = BrowserModel(app: app, isPrivate: true)
+        browser.session.tabs[0].url = URL(string: "blob:https://fixture.invalid/unique")
+        browser.session.tabs[0].title = "Generated page"
+        let profile = Profile(name: "Separate"); app.library.profiles.append(profile)
+        browser.changeProfile(profile.id)
+        #expect(browser.selectedTab.url == nil)
+        #expect(browser.selectedTab.title == "New tab")
+        #expect(browser.address.isEmpty)
+        browser.closeWindow(); #expect(await app.flush())
+    }
+    @Test func missingEnginePreservesTabPlacementAndOffersExplicitReplacement() async throws {
+        let (app, directory) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = BrowserModel(app: app, isPrivate: true)
+        let id = browser.session.selectedTabID
+        let oldTab = browser.activeWebTab
+        browser.changeEngine(id, to: .chromium)
+        #expect(browser.session.selectedTabID == id)
+        #expect(browser.selectedTab.engineID == .chromium)
+        #expect(browser.activeWebTab is UnavailableEngineTab)
+        #expect(browser.activeWebTab.errorMessage != nil)
+        browser.changeEngine(id, to: .webkit)
+        #expect(browser.activeWebTab.engineID == .webkit)
+        #expect(browser.activeWebTab !== oldTab)
+        #expect(browser.session.tabs.count == 1)
+        browser.closeWindow(); #expect(await app.flush())
+    }
     @Test func splitPanesNavigateIndependentlyAndClosingPromotesChildren() async throws {
         let (app, directory) = try await fixture()
         defer { try? FileManager.default.removeItem(at: directory) }

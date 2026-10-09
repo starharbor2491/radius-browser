@@ -13,6 +13,7 @@ import platform
 import shutil
 import subprocess
 import tarfile
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -25,9 +26,18 @@ def build(work, arch):
     proof.require_mac()
     archive, stem = proof.fetch_archive(work, arch)
     source = work / stem
-    if not source.exists():
-        with tarfile.open(archive, "r:bz2") as compressed:
-            compressed.extractall(work, filter="data")
+    marker = source / ".radius-extracted-sha256"
+    expected_digest = proof.ARCHIVES[arch][1]
+    if not marker.is_file() or marker.read_text().strip() != expected_digest:
+        # An interrupted extraction must never be mistaken for a complete SDK.
+        with tempfile.TemporaryDirectory(prefix="cef-extract-", dir=work) as staging:
+            with tarfile.open(archive, "r:bz2") as compressed:
+                compressed.extractall(staging, filter="data")
+            extracted = Path(staging) / stem
+            (extracted / marker.name).write_text(expected_digest + "\n")
+            if source.exists():
+                shutil.rmtree(source)
+            extracted.rename(source)
     output = work / ("adapter-build-" + arch)
     proof.checked(["cmake", "-S", ROOT / "ChromiumRuntime", "-B", output, "-G", "Xcode",
                    "-DCEF_ROOT=" + str(source), "-DPROJECT_ARCH=" + arch, "-DUSE_SANDBOX=ON"])

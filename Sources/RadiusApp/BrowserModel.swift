@@ -66,6 +66,7 @@ final class BrowserModel: ObservableObject {
             return true
         }
         tab.onClose = { [weak self] in self?.closeTab(id) }
+        tab.onNotice = { [weak self] message in self?.app.notice = message }
         tab.allowPopups = { [weak self] in self?.app.library.preferences.blockPopups == false }
         webTabs[id] = tab
     }
@@ -96,7 +97,7 @@ final class BrowserModel: ObservableObject {
         // Both views remain mounted in a split. Keep native focus and toolbar context together.
         if session.split != nil, let view = webTabs[id]?.nativeView, let window = view.window {
             if let current = window.firstResponder as? NSView, current === view || current.isDescendant(of: view) { return }
-            window.makeFirstResponder(view)
+            webTabs[id]?.focus()
         }
     }
     func closeTab(_ id: UUID) {
