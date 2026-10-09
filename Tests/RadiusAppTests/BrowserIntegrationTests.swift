@@ -8,13 +8,42 @@ import RadiusCore
 @Suite(.serialized)
 @MainActor
 struct BrowserIntegrationTests {
+    @Test func splitPanesNavigateIndependentlyAndClosingPromotesChildren() async throws {
+        let (app, directory) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        app.library.preferences.configuration.layout.split = .sideBySide
+        let browser = BrowserModel(app: app, isPrivate: true)
+        browser.synchronizeSplit()
+        let pair = try #require(browser.session.split)
+        let first = try #require(browser.webTab(pair.first) as? WebTab), second = try #require(browser.webTab(pair.second) as? WebTab)
+        #expect(first !== second)
+        first.webView.loadHTMLString("<html><title>Left pane</title><body>Left</body></html>", baseURL: URL(string: "https://left.invalid"))
+        second.webView.loadHTMLString("<html><title>Right pane</title><body>Right</body></html>", baseURL: URL(string: "https://right.invalid"))
+        try await waitUntil { first.webView.title == "Left pane" && second.webView.title == "Right pane" }
+        browser.updateFocusedTab(second.webView)
+        #expect(browser.session.selectedTabID == pair.second)
+        #expect(URL(string: browser.address)?.host == "right.invalid")
+        #expect(first.webView.url?.host == "left.invalid")
+        browser.newTab(parentID: pair.second)
+        let child = browser.session.selectedTabID
+        #expect(browser.session.split?.first == pair.first)
+        #expect(browser.session.split?.second == child)
+        browser.closeTab(pair.second)
+        #expect(browser.session.tabs.first(where: { $0.id == child })?.parentID == nil)
+        browser.closeTab(pair.first)
+        #expect(browser.session.split == nil)
+        #expect(first.webView.navigationDelegate == nil)
+        browser.closeWindow()
+        #expect(await app.flush())
+        #expect(app.library.sessions.isEmpty)
+    }
     @Test func privateWindowDoesNotSaveTabsOrHistory() async throws {
         let (app, directory) = try await fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
         let browser = BrowserModel(app: app, isPrivate: true)
         browser.session.tabs[0].url = URL(string: "https://private.example")
         #expect(!app.library.sessions.contains { $0.id == browser.session.id })
-        #expect(!browser.activeWebTab.webView.configuration.websiteDataStore.isPersistent)
+        #expect(!(try #require(browser.activeWebTab as? WebTab)).webView.configuration.websiteDataStore.isPersistent)
         browser.closeWindow()
         #expect(await app.flush())
         let database = try LibraryDatabase(url: directory.appendingPathComponent("library.sqlite"))
@@ -26,11 +55,11 @@ struct BrowserIntegrationTests {
         let (app, directory) = try await fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
         let browser = BrowserModel(app: app, isPrivate: false)
-        let oldView = browser.activeWebTab
+        let oldView = try #require(browser.activeWebTab as? WebTab)
         let profile = Profile(name: "Separate")
         app.library.profiles.append(profile)
         browser.changeProfile(profile.id)
-        let newView = browser.activeWebTab
+        let newView = try #require(browser.activeWebTab as? WebTab)
         #expect(newView !== oldView)
         #expect(oldView.webView.navigationDelegate == nil)
         #expect(newView.webView.configuration.websiteDataStore.identifier == profile.id)
@@ -42,12 +71,12 @@ struct BrowserIntegrationTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         app.library.preferences.blockPopups = false
         let browser = BrowserModel(app: app, isPrivate: true)
-        let parent = browser.activeWebTab
+        let parent = try #require(browser.activeWebTab as? WebTab)
         parent.webView.loadHTMLString("<html><head><title>Fixture</title></head><body>Popup test</body></html>", baseURL: URL(string: "https://fixture.invalid"))
         try await waitUntil { parent.webView.title == "Fixture" && !parent.webView.isLoading }
         _ = try await parent.webView.evaluateJavaScript("window.open('about:blank', '_blank'); 'opened'")
         try await waitUntil { browser.session.tabs.count == 2 }
-        let child = browser.activeWebTab
+        let child = try #require(browser.activeWebTab as? WebTab)
         #expect(child !== parent)
         #expect(!child.webView.configuration.websiteDataStore.isPersistent)
         let hasOpener = try await child.webView.evaluateJavaScript("window.opener !== null") as? Bool
@@ -72,11 +101,11 @@ struct BrowserIntegrationTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         app.library.preferences.blockPopups = false
         let browser = BrowserModel(app: app, isPrivate: false)
-        let parent = browser.activeWebTab
+        let parent = try #require(browser.activeWebTab as? WebTab)
         parent.webView.loadHTMLString("<html><head><title>Source</title></head><body>Source</body></html>", baseURL: URL(string: "https://fixture.invalid"))
         try await waitUntil { parent.webView.title == "Source" && !parent.webView.isLoading }
         _ = try await parent.webView.evaluateJavaScript("const u = URL.createObjectURL(new Blob(['<html><head><title>Generated document</title></head><body>Generated</body></html>'], {type: 'text/html'})); window.open(u, '_blank'); 'opened'")
-        try await waitUntil { browser.session.tabs.count == 2 && browser.activeWebTab.webView.title == "Generated document" }
+        try await waitUntil { browser.session.tabs.count == 2 && browser.activeWebTab.title == "Generated document" }
         #expect(browser.selectedTab.url?.scheme == "blob")
         browser.toggleBookmark()
         #expect(app.library.bookmarks.isEmpty)

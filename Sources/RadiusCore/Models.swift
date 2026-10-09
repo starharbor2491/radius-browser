@@ -55,20 +55,34 @@ public enum AddressResolver {
     }
 }
 
+public enum BrowserEngineID: String, Codable, CaseIterable, Sendable {
+    case webkit, chromium
+    public var label: String { self == .webkit ? "WebKit" : "Chromium" }
+}
 public struct BrowserTab: Identifiable, Codable, Equatable, Sendable {
     public var id: UUID
     public var title: String
     public var url: URL?
     public var pinned: Bool
-    public init(id: UUID = UUID(), title: String = "New tab", url: URL? = nil, pinned: Bool = false) {
-        self.id = id; self.title = title; self.url = url; self.pinned = pinned
+    public var parentID: UUID?
+    public var collapsed: Bool?
+    public var engineID: BrowserEngineID?
+    public init(id: UUID = UUID(), title: String = "New tab", url: URL? = nil, pinned: Bool = false, parentID: UUID? = nil, engineID: BrowserEngineID? = nil) {
+        self.id = id; self.title = title; self.url = url; self.pinned = pinned; self.parentID = parentID; self.engineID = engineID
     }
+}
+public struct TabSplit: Codable, Equatable, Sendable {
+    public var first: UUID
+    public var second: UUID
+    public init(first: UUID, second: UUID) { self.first = first; self.second = second }
+    public func contains(_ id: UUID) -> Bool { first == id || second == id }
 }
 public struct WindowSession: Identifiable, Codable, Equatable, Sendable {
     public var id: UUID
     public var profileID: UUID
     public var tabs: [BrowserTab]
     public var selectedTabID: UUID
+    public var split: TabSplit?
     public init(id: UUID = UUID(), profileID: UUID, tabs: [BrowserTab] = []) {
         self.id = id; self.profileID = profileID
         self.tabs = tabs.isEmpty ? [BrowserTab()] : tabs
@@ -83,11 +97,71 @@ public struct WindowSession: Identifiable, Codable, Equatable, Sendable {
         }
         if tabs.isEmpty { tabs = [BrowserTab()] }
         if !tabs.contains(where: { $0.id == selectedTabID }) { selectedTabID = tabs[0].id }
+        let ids = Set(tabs.map(\.id))
+        for i in tabs.indices {
+            var visited: Set<UUID> = [tabs[i].id]
+            var parent = tabs[i].parentID
+            var depth = 0
+            while let id = parent {
+                depth += 1
+                guard ids.contains(id), visited.insert(id).inserted, depth <= 8, !tabs[i].pinned else {
+                    tabs[i].parentID = nil; break
+                }
+                parent = tabs.first(where: { $0.id == id })?.parentID
+            }
+        }
+        if let pair = split, pair.first == pair.second || !ids.contains(pair.first) || !ids.contains(pair.second) { split = nil }
+        if let pair = split, !pair.contains(selectedTabID) { split?.first = selectedTabID }
+    }
+    public func ancestors(of id: UUID) -> [UUID] {
+        var result: [UUID] = [], seen: Set<UUID> = [id]
+        var parent = tabs.first(where: { $0.id == id })?.parentID
+        while let current = parent, seen.insert(current).inserted, result.count < 8 {
+            result.append(current); parent = tabs.first(where: { $0.id == current })?.parentID
+        }
+        return result
+    }
+    public var visibleTreeTabs: [BrowserTab] {
+        var result: [BrowserTab] = []
+        func appendChildren(of parent: UUID?) {
+            for tab in tabs where tab.parentID == parent {
+                result.append(tab)
+                if tab.collapsed != true { appendChildren(of: tab.id) }
+            }
+        }
+        appendChildren(of: nil)
+        return result
+    }
+    @discardableResult public mutating func setParent(_ id: UUID, to parent: UUID?) -> Bool {
+        guard let index = tabs.firstIndex(where: { $0.id == id }), !tabs[index].pinned,
+              parent == nil || (parent != id && tabs.contains(where: { $0.id == parent }) && !ancestors(of: parent!).contains(id)) else { return false }
+        let descendants = tabs.filter { ancestors(of: $0.id).contains(id) }
+        let depth = parent.map { ancestors(of: $0).count + 1 } ?? 0
+        guard descendants.allSatisfy({ ancestors(of: $0.id).count - ancestors(of: id).count + depth <= 8 }), depth <= 8 else { return false }
+        tabs[index].parentID = parent
+        return true
+    }
+    public mutating func selectTab(_ id: UUID) {
+        guard tabs.contains(where: { $0.id == id }) else { return }
+        if let pair = split, !pair.contains(id) {
+            if selectedTabID == pair.second { split?.second = id } else { split?.first = id }
+        }
+        selectedTabID = id
+        for ancestor in ancestors(of: id) {
+            if let index = tabs.firstIndex(where: { $0.id == ancestor }) { tabs[index].collapsed = false }
+        }
+    }
+    public mutating func enableSplit() {
+        guard split == nil else { return }
+        let other = tabs.first(where: { $0.id != selectedTabID }) ?? BrowserTab()
+        if !tabs.contains(where: { $0.id == other.id }) { tabs.append(other) }
+        split = TabSplit(first: selectedTabID, second: other.id)
     }
 }
 public struct Profile: Identifiable, Codable, Equatable, Sendable {
     public var id: UUID
     public var name: String
+    public var engineID: BrowserEngineID?
     public init(id: UUID = UUID(), name: String) { self.id = id; self.name = name }
 }
 public struct Bookmark: Identifiable, Codable, Equatable, Sendable {
@@ -133,6 +207,7 @@ public enum Density: String, Codable, CaseIterable, Sendable { case comfortable,
 public enum TabPlacement: String, Codable, CaseIterable, Sendable { case top, bottom, leading, trailing }
 public enum BarPlacement: String, Codable, CaseIterable, Sendable { case top, bottom }
 public enum SidebarPlacement: String, Codable, CaseIterable, Sendable { case leading, trailing, hidden }
+public enum SplitAxis: String, Codable, CaseIterable, Sendable { case sideBySide, stacked }
 public struct Theme: Codable, Equatable, Sendable {
     public var design: DesignSystem = .native
     public var colorMode: ColorMode = .system
@@ -153,9 +228,12 @@ public struct BrowserLayout: Codable, Equatable, Sendable {
     public var sidebarWidth: Double = 240
     public var bookmarksBar: Bool = false
     public var statusBar: Bool = true
+    public var treeTabs: Bool?
+    public var split: SplitAxis?
     public init() {}
     public mutating func normalize() {
         sidebarWidth = sidebarWidth.isFinite ? min(360, max(180, sidebarWidth)) : 240
+        if treeTabs == true && (tabs == .top || tabs == .bottom) { tabs = .leading }
     }
 }
 public struct Configuration: Codable, Equatable, Sendable {

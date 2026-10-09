@@ -28,6 +28,63 @@ import CSQLite
     session.normalize()
     #expect(session.tabs.count == 1)
 }
+@Test func legacySessionsAndSetupsLoadWithoutTreeOrSplitFields() throws {
+    let original = WindowSession(profileID: UUID())
+    var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(original)) as? [String: Any])
+    object.removeValue(forKey: "split")
+    var tabs = try #require(object["tabs"] as? [[String: Any]])
+    tabs[0].removeValue(forKey: "parentID"); tabs[0].removeValue(forKey: "collapsed"); object["tabs"] = tabs
+    let decoded = try JSONDecoder().decode(WindowSession.self, from: JSONSerialization.data(withJSONObject: object))
+    #expect(decoded == original)
+    let legacy = Data(#"{"formatVersion":1,"name":"Old setup","configuration":{"theme":{"design":"native","colorMode":"system","accent":"blue","density":"comfortable","cornerRadius":10,"transparency":true,"reducedMotion":false},"layout":{"tabs":"top","navigation":"top","sidebar":"leading","sidebarWidth":240,"bookmarksBar":false,"statusBar":true}}}"#.utf8)
+    #expect(try SetupPack.decode(legacy).configuration.layout.split == nil)
+    #expect(try SetupPack.decode(legacy).configuration.layout.treeTabs == nil)
+}
+@Test func tabTreesRejectCyclesAndExposeSelectedChildren() {
+    let root = BrowserTab(), child = BrowserTab(), grandchild = BrowserTab()
+    var session = WindowSession(profileID: UUID(), tabs: [root, child, grandchild])
+    let childMoved = session.setParent(child.id, to: root.id); #expect(childMoved)
+    let grandchildMoved = session.setParent(grandchild.id, to: child.id); #expect(grandchildMoved)
+    let cycle = session.setParent(root.id, to: grandchild.id); #expect(!cycle)
+    let selfParent = session.setParent(root.id, to: root.id); #expect(!selfParent)
+    let missingParent = session.setParent(root.id, to: UUID()); #expect(!missingParent)
+    session.tabs[0].collapsed = true
+    #expect(session.visibleTreeTabs.map(\.id) == [root.id])
+    session.selectTab(grandchild.id)
+    #expect(session.visibleTreeTabs.map(\.id) == [root.id, child.id, grandchild.id])
+    #expect(session.ancestors(of: grandchild.id) == [child.id, root.id])
+    session.tabs[0].parentID = grandchild.id
+    session.normalize()
+    #expect(session.visibleTreeTabs.count == 3)
+    #expect(session.tabs[0].parentID == nil)
+}
+@Test func tabTreesBoundDepthIncludingMovedSubtrees() {
+    var session = WindowSession(profileID: UUID(), tabs: (0..<11).map { _ in BrowserTab() })
+    for i in 1...8 { let moved = session.setParent(session.tabs[i].id, to: session.tabs[i - 1].id); #expect(moved) }
+    let tooDeep = session.setParent(session.tabs[9].id, to: session.tabs[8].id); #expect(!tooDeep)
+    let childMoved = session.setParent(session.tabs[10].id, to: session.tabs[9].id); #expect(childMoved)
+    let subtreeTooDeep = session.setParent(session.tabs[9].id, to: session.tabs[7].id); #expect(!subtreeTooDeep)
+    session.tabs[9].parentID = session.tabs[8].id
+    session.normalize()
+    #expect(session.tabs[9].parentID == nil)
+}
+@Test func splitSelectionReplacesOnlyActivePaneAndRepairsMissingTabs() throws {
+    let a = BrowserTab(), b = BrowserTab(), c = BrowserTab()
+    var session = WindowSession(profileID: UUID(), tabs: [a, b, c])
+    session.enableSplit()
+    #expect(session.split == TabSplit(first: a.id, second: b.id))
+    session.selectTab(b.id); session.selectTab(c.id)
+    #expect(session.split == TabSplit(first: a.id, second: c.id))
+    let restored = try JSONDecoder().decode(WindowSession.self, from: JSONEncoder().encode(session))
+    #expect(restored == session)
+    session.tabs.removeAll { $0.id == a.id }; session.normalize()
+    #expect(session.split == nil)
+    session.split = TabSplit(first: c.id, second: c.id); session.normalize()
+    #expect(session.split == nil)
+    var empty = WindowSession(profileID: UUID()); empty.enableSplit()
+    #expect(empty.tabs.count == 2)
+    #expect(empty.selectedTabID == empty.split?.first)
+}
 @Test func sharedSetupContainsNoPrivateDataAndClampsDimensions() throws {
     var config = Configuration()
     config.layout.sidebarWidth = 900

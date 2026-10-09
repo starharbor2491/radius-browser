@@ -74,6 +74,17 @@ struct CustomizeView: View {
                     Text("Left").tag(TabPlacement.leading); Text("Right").tag(TabPlacement.trailing)
                 }.labelsHidden()
             }
+            Toggle("Tree tabs", isOn: Binding(get: { draft.layout.treeTabs == true }, set: { enabled in
+                change { $0.layout.treeTabs = enabled; if enabled && ($0.layout.tabs == .top || $0.layout.tabs == .bottom) { $0.layout.tabs = .leading } }
+            }))
+            Text("Group related pages under a parent tab. Tree tabs use a vertical tab strip.").font(.caption).foregroundStyle(.secondary)
+            field("Browsing panes") {
+                Picker("Browsing panes", selection: binding(\.layout.split)) {
+                    Text("One pane").tag(Optional<SplitAxis>.none)
+                    Text("Side by side").tag(Optional(SplitAxis.sideBySide))
+                    Text("Stacked").tag(Optional(SplitAxis.stacked))
+                }.labelsHidden()
+            }
             field("Navigation bar") { Picker("Navigation bar placement", selection: binding(\.layout.navigation)) { Text("Top").tag(BarPlacement.top); Text("Bottom").tag(BarPlacement.bottom) }.pickerStyle(.segmented).labelsHidden() }
             field("Sidebar") { Picker("Sidebar placement", selection: binding(\.layout.sidebar)) { Text("Left").tag(SidebarPlacement.leading); Text("Right").tag(SidebarPlacement.trailing); Text("Hidden").tag(SidebarPlacement.hidden) }.pickerStyle(.segmented).labelsHidden() }
             field("Sidebar width · \(Int(draft.layout.sidebarWidth)) pt") { Slider(value: binding(\.layout.sidebarWidth), in: 180...360, step: 10).accessibilityLabel("Sidebar width") }
@@ -115,6 +126,7 @@ struct CustomizeView: View {
     }
     private func change(_ mutation: (inout Configuration) -> Void) {
         undoStack.append(draft); if undoStack.count > 50 { undoStack.removeFirst() }; mutation(&draft)
+        if draft.layout.tabs == .top || draft.layout.tabs == .bottom { draft.layout.treeTabs = false }
     }
     private func field<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 8) { Text(label).font(.callout.weight(.medium)); content() }
@@ -152,6 +164,10 @@ struct LayoutPreview: View {
                 VStack(alignment: .leading, spacing: 12) {
                     RoundedRectangle(cornerRadius: 3).fill(.primary.opacity(0.7)).frame(width: 95, height: 9)
                     ForEach(0..<4) { _ in RoundedRectangle(cornerRadius: 2).fill(.primary.opacity(0.12)).frame(height: 5) }
+                    if layout.split != nil {
+                        Divider()
+                        Text(layout.split == .sideBySide ? "Two panes · side by side" : "Two panes · stacked").font(.system(size: 8)).foregroundStyle(.secondary)
+                    }
                     Spacer()
                 }.padding(16).frame(maxWidth: .infinity, maxHeight: .infinity).background(Color(nsColor: .textBackgroundColor))
                 if layout.sidebar == .trailing { miniSidebar }

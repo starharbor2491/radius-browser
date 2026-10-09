@@ -6,18 +6,12 @@ import RadiusCore
 
 /// Engine objects stay inside this adapter. The native shell and recovery do not require a web view.
 @MainActor
-final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate {
+final class WebTab: BrowserEngineTab, WKNavigationDelegate, WKUIDelegate {
     let webView: WKWebView
-    @Published var loading = false
-    @Published var progress = 0.0
-    @Published var canGoBack = false
-    @Published var canGoForward = false
-    @Published var errorMessage: String?
-    @Published var zoom = 1.0
-    var onChange: ((Bool) -> Void)?
-    var onCreateWindow: ((WKWebViewConfiguration, URL?) -> WKWebView?)?
-    var onClose: (() -> Void)?
-    var allowPopups: (() -> Bool)? { didSet { updatePopupPolicy() } }
+    override var nativeView: NSView { webView }
+    override var url: URL? { webView.url }
+    override var title: String? { webView.title }
+    override var engineID: BrowserEngineID { .webkit }
     private let downloads: DownloadCenter
     private var observations: [NSKeyValueObservation] = []
     init(dataStore: WKWebsiteDataStore, downloads: DownloadCenter, configuration: WKWebViewConfiguration? = nil) {
@@ -37,16 +31,19 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
             webView.observe(\.url, options: [.new]) { [weak self] _, _ in Task { @MainActor [weak self] in self?.refresh(false) } }
         ]
     }
-    func load(_ url: URL) {
+    override func load(_ url: URL) {
         guard AddressResolver.isWebURL(url) else { errorMessage = "This address is not supported."; return }
         errorMessage = nil; updatePopupPolicy(); webView.load(URLRequest(url: url))
     }
-    func updatePopupPolicy() { webView.configuration.preferences.javaScriptCanOpenWindowsAutomatically = allowPopups?() == true }
-    func reload() { errorMessage = nil; webView.reload() }
-    func setZoom(_ value: Double) { zoom = min(3, max(0.5, value)); webView.pageZoom = zoom }
-    func dispose() {
+    override func updatePopupPolicy() { webView.configuration.preferences.javaScriptCanOpenWindowsAutomatically = allowPopups?() == true }
+    override func reload() { errorMessage = nil; webView.reload() }
+    override func stop() { webView.stopLoading() }
+    override func goBack() { webView.goBack() }
+    override func goForward() { webView.goForward() }
+    override func setZoom(_ value: Double) { super.setZoom(value); webView.pageZoom = zoom }
+    override func dispose() {
         webView.stopLoading(); webView.navigationDelegate = nil; webView.uiDelegate = nil
-        observations.removeAll(); onChange = nil; onCreateWindow = nil; onClose = nil; allowPopups = nil
+        observations.removeAll(); super.dispose()
     }
     private func refresh(_ finished: Bool) {
         loading = webView.isLoading; canGoBack = webView.canGoBack; canGoForward = webView.canGoForward
@@ -94,7 +91,9 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
         guard url == nil || url?.absoluteString == "about:blank" || url?.scheme == "blob" || url.map(AddressResolver.isWebURL) == true else { return nil }
         // WebKit's javaScriptCanOpenWindowsAutomatically setting blocks unsolicited popups.
         // Return a view using the supplied configuration; WebKit preserves the request and opener.
-        return onCreateWindow?(configuration, url)
+        let child = WebTab(dataStore: configuration.websiteDataStore, downloads: downloads, configuration: configuration)
+        guard onCreateWindow?(child, url) == true else { child.dispose(); return nil }
+        return child.webView
     }
     func webViewDidClose(_ webView: WKWebView) { onClose?() }
     func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor @Sendable ([URL]?) -> Void) {
@@ -128,7 +127,7 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
         alert.addButton(withTitle: "Don't allow"); alert.addButton(withTitle: "Allow")
         decisionHandler(alert.runModal() == .alertSecondButtonReturn ? .grant : .deny)
     }
-    func saveScreenshot(app: AppState) {
+    override func saveScreenshot(app: AppState) {
         webView.takeSnapshot(with: nil) { [weak app] image, error in
             Task { @MainActor in
                 guard let app else { return }
@@ -139,20 +138,20 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
             }
         }
     }
-    func readerText() async throws -> String {
+    override func readerText() async throws -> String {
         let script = "(() => { const e = document.querySelector('article') || document.querySelector('main') || document.body; return e ? e.innerText.slice(0, 200000) : ''; })()"
         let result = try await webView.evaluateJavaScript(script)
         guard let text = result as? String, !text.isEmpty else { throw ValidationError("This page has no readable text.") }
         return text
     }
-    func find(_ text: String, backwards: Bool = false) {
+    override func find(_ text: String, backwards: Bool = false) {
         guard !text.isEmpty else { return }
         let config = WKFindConfiguration(); config.backwards = backwards; config.wraps = true
         webView.find(text, configuration: config) { _ in }
     }
 }
 struct WebViewHost: NSViewRepresentable {
-    let tab: WebTab
-    func makeNSView(context: Context) -> WKWebView { tab.webView }
-    func updateNSView(_ nsView: WKWebView, context: Context) {}
+    let tab: BrowserEngineTab
+    func makeNSView(context: Context) -> NSView { tab.nativeView }
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }

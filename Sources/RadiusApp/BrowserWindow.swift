@@ -109,6 +109,8 @@ struct BrowserWindow: View {
         .onChange(of: addressFocused) { _, focused in model.addressEditing = focused }
         .onChange(of: findVisible) { _, visible in if visible { findFocused = true } }
         .onChange(of: app.library.preferences.blockPopups) { _, _ in model.updatePopupPolicy() }
+        .onAppear { model.synchronizeSplit() }
+        .onChange(of: layout.split) { _, _ in model.synchronizeSplit() }
     }
     private var navigation: some View {
         HStack(spacing: theme.spacing) {
@@ -140,6 +142,11 @@ struct BrowserWindow: View {
                 if app.enabled(.screenshot) { Button("Save screenshot…") { model.activeWebTab.saveScreenshot(app: app) }.disabled(!model.hasPage) }
                 if app.enabled(.focusMode) { Button("Focus mode") { model.focusMode = true } }
                 Button("Find in page…") { findVisible = true }.disabled(!model.hasPage)
+                Menu("Split view") {
+                    Button("Side by side") { app.library.preferences.configuration.layout.split = .sideBySide }
+                    Button("Stacked") { app.library.preferences.configuration.layout.split = .stacked }
+                    Button("Return to one pane") { model.endSplit() }.disabled(model.session.split == nil)
+                }
                 Divider()
                 Button("New private window") { openWindow(id: "private") }
                 Button("Recovery") { model.sheet = .recovery }
@@ -156,7 +163,7 @@ struct BrowserWindow: View {
             if vertical {
                 VStack(spacing: 6) {
                     HStack { Text("Tabs").font(.headline); Spacer(); newTabButton }.padding(.horizontal, 12).padding(.top, 12)
-                    ScrollView { LazyVStack(spacing: 4) { ForEach(model.session.tabs) { tabRow($0, vertical: true) } }.padding(6) }
+                    ScrollView { LazyVStack(spacing: 4) { ForEach(layout.treeTabs == true ? model.session.visibleTreeTabs : model.session.tabs) { tabRow($0, vertical: true) } }.padding(6) }
                     profileMenu.padding(12)
                 }
             } else {
@@ -170,6 +177,10 @@ struct BrowserWindow: View {
     }
     private func tabRow(_ tab: BrowserTab, vertical: Bool) -> some View {
         HStack(spacing: 5) {
+            if vertical && layout.treeTabs == true && model.session.tabs.contains(where: { $0.parentID == tab.id }) {
+                Button { model.toggleBranch(tab.id) } label: { Image(systemName: tab.collapsed == true ? "chevron.right" : "chevron.down").font(.caption).frame(width: 18, height: 24) }
+                    .buttonStyle(.plain).accessibilityLabel("\(tab.collapsed == true ? "Expand" : "Collapse") \(tab.title)")
+            }
             Button { model.selectTab(tab.id) } label: {
                 HStack(spacing: 7) {
                     Image(systemName: tab.pinned ? "pin.fill" : "globe").font(.caption).foregroundStyle(.secondary)
@@ -188,6 +199,17 @@ struct BrowserWindow: View {
             Button("Move earlier") { model.moveTab(tab.id, by: -1) }
             Button("Move later") { model.moveTab(tab.id, by: 1) }
             Button("Duplicate tab") { model.newTab(url: tab.url) }
+            if layout.treeTabs == true {
+                Button("New child tab") { model.newTab(parentID: tab.id); addressFocused = true }
+                Button("Move to top level") { _ = model.session.setParent(tab.id, to: nil) }.disabled(tab.parentID == nil)
+                Menu("Move under tab") {
+                    ForEach(model.session.tabs.filter { $0.id != tab.id && !model.session.ancestors(of: $0.id).contains(tab.id) }) { parent in
+                        Button(parent.title) {
+                            if !model.session.setParent(tab.id, to: parent.id) { app.notice = "Tab trees support up to eight levels. Pinned tabs stay at the top level." }
+                        }
+                    }
+                }.disabled(tab.pinned)
+            }
             Divider(); Button("Close tab") { model.closeTab(tab.id) }
         }
         .draggable(tab.id.uuidString)
@@ -196,6 +218,7 @@ struct BrowserWindow: View {
             model.moveTab(id, before: tab.id); return true
         }
         .accessibilityElement(children: .contain).accessibilityValue(tab.id == model.session.selectedTabID ? "Selected tab" : "Tab")
+        .padding(.leading, vertical && layout.treeTabs == true ? CGFloat(model.session.ancestors(of: tab.id).count * 10) : 0)
     }
     private var newTabButton: some View { IconButton(title: "New tab", icon: "plus") { model.newTab(); addressFocused = true } }
     private var profileMenu: some View {
@@ -215,13 +238,42 @@ struct BrowserWindow: View {
                     IconButton(title: "Close find", icon: "xmark") { findVisible = false }
                 }.padding(10).background(.bar)
             }
-            if model.hasPage {
+            if let pair = model.session.split, let axis = layout.split {
+                if axis == .sideBySide {
+                    HSplitView { splitPane(pair.first); splitPane(pair.second) }
+                } else { VSplitView { splitPane(pair.first); splitPane(pair.second) } }
+            } else if model.hasPage {
                 BrowserPage(tab: model.activeWebTab).id(ObjectIdentifier(model.activeWebTab))
             } else { startPage }
         }
         .overlay(alignment: .topTrailing) {
             if model.focusMode { Button("Exit focus  esc") { model.focusMode = false }.padding(10).background(.regularMaterial, in: Capsule()).padding(12) }
         }
+    }
+    private func splitPane(_ id: UUID) -> some View {
+        let descriptor = model.session.tabs.first(where: { $0.id == id })
+        let selected = id == model.session.selectedTabID
+        return VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Button { model.selectTab(id) } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: selected ? "circle.inset.filled" : "circle").foregroundStyle(selected ? theme.accent.color : .secondary)
+                        Text(descriptor?.title ?? "New tab").lineLimit(1)
+                        Spacer()
+                    }.contentShape(Rectangle())
+                }.buttonStyle(.plain).accessibilityLabel("Select pane: \(descriptor?.title ?? "New tab")")
+                IconButton(title: "Return to one pane", icon: "rectangle") { model.selectTab(id); model.endSplit() }
+            }.font(.caption).padding(.horizontal, 12).padding(.vertical, 8).background(.bar)
+            if descriptor?.url != nil {
+                BrowserPage(tab: model.webTab(id)).id(ObjectIdentifier(model.webTab(id)))
+            } else {
+                VStack(spacing: 14) {
+                    Text("New tab").font(.title2)
+                    Button("Enter a website…") { model.selectTab(id); addressFocused = true }.buttonStyle(.borderedProminent)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity).background(Color(nsColor: .textBackgroundColor))
+            }
+        }.frame(minWidth: 180, minHeight: 120).frame(maxHeight: .infinity)
+            .accessibilityElement(children: .contain).accessibilityLabel(selected ? "Active browsing pane" : "Browsing pane")
     }
     private var startPage: some View {
         VStack(alignment: .leading, spacing: 28) {
@@ -288,7 +340,7 @@ struct BrowserWindow: View {
     }
 }
 struct BrowserPage: View {
-    @ObservedObject var tab: WebTab
+    @ObservedObject var tab: BrowserEngineTab
     var body: some View {
         VStack(spacing: 0) {
             if tab.loading { ProgressView(value: tab.progress).progressViewStyle(.linear).frame(height: 2) }
@@ -308,6 +360,7 @@ struct WindowCloseObserver: NSViewRepresentable {
     @MainActor final class ObserverView: NSView {
         let model: BrowserModel
         private var observation: NotificationObservation?
+        private var focusObservation: NotificationObservation?
         private var delegateProxy: WindowDelegateProxy?
         init(model: BrowserModel) { self.model = model; super.init(frame: .zero) }
         required init?(coder: NSCoder) { fatalError("Not used") }
@@ -318,6 +371,9 @@ struct WindowCloseObserver: NSViewRepresentable {
             window.isRestorable = false
             let proxy = WindowDelegateProxy(original: window.delegate, model: model)
             delegateProxy = proxy; window.delegate = proxy
+            focusObservation = NotificationObservation(NotificationCenter.default.addObserver(forName: NSWindow.didUpdateNotification, object: window, queue: .main) { [weak model, weak window] _ in
+                MainActor.assumeIsolated { model?.updateFocusedTab(window?.firstResponder) }
+            })
             observation = NotificationObservation(NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [model] _ in
                 Task { @MainActor in model.closeWindow() }
             })
@@ -330,20 +386,20 @@ extension Notification.Name {
 }
 
 struct NavigationButtons: View {
-    @ObservedObject var tab: WebTab
+    @ObservedObject var tab: BrowserEngineTab
     let hasPage: Bool
     var body: some View {
         HStack(spacing: 2) {
-            IconButton(title: "Back", icon: "chevron.left") { tab.webView.goBack() }.disabled(!tab.canGoBack)
-            IconButton(title: "Forward", icon: "chevron.right") { tab.webView.goForward() }.disabled(!tab.canGoForward)
+            IconButton(title: "Back", icon: "chevron.left") { tab.goBack() }.disabled(!tab.canGoBack)
+            IconButton(title: "Forward", icon: "chevron.right") { tab.goForward() }.disabled(!tab.canGoForward)
             IconButton(title: tab.loading ? "Stop loading" : "Reload", icon: tab.loading ? "xmark" : "arrow.clockwise") {
-                if tab.loading { tab.webView.stopLoading() } else { tab.reload() }
+                if tab.loading { tab.stop() } else { tab.reload() }
             }.disabled(!hasPage)
         }
     }
 }
 struct ZoomControls: View {
-    @ObservedObject var tab: WebTab
+    @ObservedObject var tab: BrowserEngineTab
     var body: some View {
         HStack(spacing: 8) {
             Button("−") { tab.setZoom(tab.zoom - 0.1) }.buttonStyle(.plain).accessibilityLabel("Zoom out")

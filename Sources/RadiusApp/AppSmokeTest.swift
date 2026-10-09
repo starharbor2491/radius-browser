@@ -55,14 +55,35 @@ enum AppSmokeTest {
                 trace("Navigating to loopback HTTP fixture")
                 browser.navigate(address)
                 let pageDeadline = Date().addingTimeInterval(10)
-                while browser.activeWebTab.webView.title != "Radius HTTP fixture" || browser.activeWebTab.loading {
+                while browser.activeWebTab.title != "Radius HTTP fixture" || browser.activeWebTab.loading {
                     if Date() > pageDeadline { throw ValidationError("The packaged app could not navigate to its HTTP test page.") }
                     try await Task.sleep(for: .milliseconds(100))
                 }
-                guard browser.activeWebTab.webView.url?.scheme == "http" else { throw ValidationError("HTTP navigation did not reach the fixture.") }
+                guard browser.activeWebTab.url?.scheme == "http" else { throw ValidationError("HTTP navigation did not reach the fixture.") }
                 trace("Extracting reader text")
                 let text = try await browser.activeWebTab.readerText()
                 guard text.contains("Local browser check") else { throw ValidationError("Reader could not read the HTTP fixture.") }
+                trace("Verifying split panes and tree tabs")
+                browser.panel = nil
+                var config = app.library.preferences.configuration
+                config.layout.tabs = .leading; config.layout.treeTabs = true; config.layout.split = .sideBySide
+                app.applyConfiguration(config); browser.synchronizeSplit()
+                guard let pair = browser.session.split else { throw ValidationError("Split panes did not open.") }
+                browser.selectTab(pair.second); browser.navigate(address)
+                let splitDeadline = Date().addingTimeInterval(10)
+                while browser.webTab(pair.second).title != "Radius HTTP fixture" || browser.webTab(pair.second).loading {
+                    if Date() > splitDeadline { throw ValidationError("The second browsing pane could not navigate.") }
+                    try await Task.sleep(for: .milliseconds(100))
+                }
+                guard browser.webTab(pair.first) !== browser.webTab(pair.second), browser.session.split?.first == pair.first else { throw ValidationError("Browsing panes were not independent.") }
+                _ = browser.session.setParent(pair.second, to: pair.first)
+                try await Task.sleep(for: .milliseconds(500))
+                guard let view = window.contentView, let image = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw ValidationError("Cannot capture split panes.") }
+                view.cacheDisplay(in: view.bounds, to: image)
+                guard let png = image.representation(using: .png, properties: [:]) else { throw ValidationError("Cannot encode split panes.") }
+                try png.write(to: output.appendingPathComponent("Radius-split.png"))
+                browser.selectOtherPane()
+                guard browser.session.selectedTabID == pair.first else { throw ValidationError("Switching panes did not update the address context.") }
             }
             trace("Saving browser data")
             guard await app.flush() else { throw ValidationError(app.notice ?? "App data could not be saved.") }
