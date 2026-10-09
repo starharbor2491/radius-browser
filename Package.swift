@@ -12,6 +12,7 @@ var targets: [Target] = [
 products.append(.executable(name: "Radius", targets: ["RadiusApp"]))
 targets.append(.executableTarget(name: "RadiusApp", dependencies: ["RadiusCore"],
     resources: [.copy("Resources")]))
+targets.append(.testTarget(name: "RadiusAppTests", dependencies: ["RadiusApp"]))
 #endif
 
 let package = Package(name: "Radius", platforms: [.macOS(.v14)],

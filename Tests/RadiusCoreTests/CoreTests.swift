@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 import Foundation
 import Testing
+import CSQLite
 @testable import RadiusCore
 
 @Test func addressesAreResolvedSafely() {
@@ -137,4 +138,18 @@ private func module(_ id: String, _ capability: ModuleCapability) -> ModuleManif
     try repository.install(manifest)
     #expect(try repository.installed().first?.manifest.version == 2)
     #expect(try repository.installed().first?.enabled == false)
+}
+
+@Test func newerDatabaseIsRejectedWithoutMutation() throws {
+    let directory = temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let url = directory.appendingPathComponent("library.sqlite")
+    var handle: OpaquePointer?
+    #expect(sqlite3_open(url.path, &handle) == SQLITE_OK)
+    #expect(sqlite3_exec(handle, "PRAGMA user_version=2; CREATE TABLE future(data TEXT);", nil, nil, nil) == SQLITE_OK)
+    sqlite3_close(handle)
+    let before = try Data(contentsOf: url)
+    #expect(throws: (any Error).self) { try LibraryDatabase(url: url) }
+    #expect(try Data(contentsOf: url) == before)
 }

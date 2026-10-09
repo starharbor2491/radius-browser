@@ -303,7 +303,7 @@ struct WindowCloseObserver: NSViewRepresentable {
     func updateNSView(_ nsView: ObserverView, context: Context) {}
     @MainActor final class ObserverView: NSView {
         let model: BrowserModel
-        private var observation: NSObjectProtocol?
+        private var observation: NotificationObservation?
         private var delegateProxy: WindowDelegateProxy?
         init(model: BrowserModel) { self.model = model; super.init(frame: .zero) }
         required init?(coder: NSCoder) { fatalError("Not used") }
@@ -314,11 +314,10 @@ struct WindowCloseObserver: NSViewRepresentable {
             window.isRestorable = false
             let proxy = WindowDelegateProxy(original: window.delegate, model: model)
             delegateProxy = proxy; window.delegate = proxy
-            observation = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [model] _ in
+            observation = NotificationObservation(NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [model] _ in
                 Task { @MainActor in model.closeWindow() }
-            }
+            })
         }
-        deinit { if let observation { NotificationCenter.default.removeObserver(observation) } }
     }
 }
 extension Notification.Name {

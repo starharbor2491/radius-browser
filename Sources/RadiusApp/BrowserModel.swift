@@ -115,6 +115,10 @@ final class BrowserModel: ObservableObject {
         alert.informativeText = "Open pages will reload in the selected profile. Sign-ins stay separate. Unsaved page work may be lost."
         alert.addButton(withTitle: "Switch profile"); alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        changeProfile(id)
+    }
+    func changeProfile(_ id: UUID) {
+        guard app.library.profiles.contains(where: { $0.id == id }) else { return }
         webTabs.values.forEach { $0.dispose() }; webTabs.removeAll(); closedTabs.removeAll()
         session.profileID = id; panel = nil
         if isPrivate { privateDataStore = .nonPersistent() }

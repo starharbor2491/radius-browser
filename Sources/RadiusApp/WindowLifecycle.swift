@@ -4,7 +4,8 @@ import AppKit
 /// Keeps SwiftUI's window delegate while intercepting a destructive window-close decision.
 @MainActor
 final class WindowDelegateProxy: NSObject, NSWindowDelegate {
-    weak var original: (any NSWindowDelegate)?
+    // AppKit owns and calls its window delegate on the main thread. NSObject forwarding is nonisolated.
+    nonisolated(unsafe) weak var original: (any NSWindowDelegate)?
     let model: BrowserModel
     init(original: (any NSWindowDelegate)?, model: BrowserModel) { self.original = original; self.model = model }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -18,4 +19,11 @@ final class WindowDelegateProxy: NSObject, NSWindowDelegate {
     }
     override func responds(to selector: Selector!) -> Bool { super.responds(to: selector) || original?.responds(to: selector) == true }
     override func forwardingTarget(for selector: Selector!) -> Any? { original?.responds(to: selector) == true ? original : super.forwardingTarget(for: selector) }
+}
+
+/// NotificationCenter permits observer removal from any thread; the token is immutable.
+final class NotificationObservation: @unchecked Sendable {
+    private let token: NSObjectProtocol
+    init(_ token: NSObjectProtocol) { self.token = token }
+    deinit { NotificationCenter.default.removeObserver(token) }
 }
