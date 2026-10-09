@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 import AppKit
+import Darwin
 import SwiftUI
 import RadiusCore
 
@@ -188,6 +189,8 @@ enum AppSmokeTest {
                     try await Task.sleep(for: .milliseconds(500))
                     guard let view = window.contentView else { throw ValidationError("Cannot capture embedded Chromium.") }
                     try capture(view, to: output.appendingPathComponent("Radius-chromium.png"))
+                    // WindowServer capture includes GPU-backed layers omitted by Cocoa bitmap caching.
+                    await captureWindow(window, to: output.appendingPathComponent("Radius-chromium-window.png"))
                     trace("Closing Chromium while WebKit and Radius remain open")
                     browser.closeTab(id)
                     let closeDeadline = Date().addingTimeInterval(10)
@@ -211,6 +214,40 @@ enum AppSmokeTest {
         view.cacheDisplay(in: view.bounds, to: image)
         guard let png = image.representation(using: .png, properties: [:]), png.count > 1000 else { throw ValidationError("The \(url.lastPathComponent) screenshot was empty.") }
         try png.write(to: url)
+    }
+    private static func captureWindow(_ window: NSWindow, to url: URL) async {
+        window.makeKeyAndOrderFront(nil)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        process.arguments = ["-x", "-o", "-l", String(window.windowNumber), url.path]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
+        do {
+            try await Task.sleep(for: .milliseconds(300))
+            try Task.checkCancellation()
+            try process.run()
+            let deadline = ContinuousClock.now.advanced(by: .seconds(8))
+            while process.isRunning && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(50)) }
+            if process.isRunning { throw ValidationError("Window capture timed out.") }
+            process.waitUntilExit()
+            let file = try FileHandle(forReadingFrom: url)
+            defer { try? file.close() }
+            let png = try file.read(upToCount: 8 * 1024 * 1024 + 1) ?? Data()
+            guard process.terminationStatus == 0, png.count > 1000, png.count <= 8 * 1024 * 1024,
+                  png.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]) else { throw ValidationError("Window capture was unavailable.") }
+            trace("Chromium own-window OS capture saved")
+        } catch {
+            if process.isRunning {
+                process.terminate()
+                try? await Task.sleep(for: .milliseconds(250))
+                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+                process.waitUntilExit()
+            }
+            // Recording permission depends on the runner. Keep the renderer assertions;
+            // never grant recording access or alter the runner's privacy settings here.
+            trace("Chromium own-window OS capture unavailable: \(error.localizedDescription)")
+            try? FileManager.default.removeItem(at: url)
+        }
     }
     private static func evaluate(_ tab: ChromiumTab, _ source: String) async throws -> String {
         let data = try await tab.request("Runtime.evaluate", parameters: ["expression": source, "returnByValue": true])
