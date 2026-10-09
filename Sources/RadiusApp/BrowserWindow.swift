@@ -60,7 +60,7 @@ struct BrowserWindow: View {
         if model.isClosed { Color.clear }
         else { content }
     }
-    private var content: some View {
+    private var browserLayout: some View {
         VStack(spacing: 0) {
             if !model.focusMode {
                 if layout.tabs == .top { tabs(vertical: false) }
@@ -91,6 +91,9 @@ struct BrowserWindow: View {
         .focusedSceneObject(model)
         .animation(theme.reducedMotion || systemReduceMotion ? nil : .easeOut(duration: 0.16), value: visiblePanel)
         .background(WindowCloseObserver(model: model))
+    }
+    private var presentation: some View {
+        browserLayout
         .sheet(item: $model.sheet) { sheet in
             Group {
                 switch sheet {
@@ -108,6 +111,9 @@ struct BrowserWindow: View {
                 ScrollView { Text(reader ?? "").font(.system(size: 18, design: .serif)).lineSpacing(7).textSelection(.enabled).frame(maxWidth: 660, alignment: .leading).padding(24).frame(maxWidth: .infinity) }
             }.padding(24).frame(width: 760, height: 640).background(Color(nsColor: .windowBackgroundColor))
         }
+    }
+    private var windowCommands: some View {
+        presentation
         .onReceive(NotificationCenter.default.publisher(for: .radiusFocusAddress)) { notification in if notification.object as? UUID == model.session.id { addressFocused = true } }
         .onReceive(NotificationCenter.default.publisher(for: .radiusFind)) { notification in if notification.object as? UUID == model.session.id { findVisible = true; findFocused = true } }
         .onExitCommand { model.focusMode = false; findVisible = false; addressFocused = false; readerTask?.cancel(); reader = nil }
@@ -116,11 +122,17 @@ struct BrowserWindow: View {
             if !app.enabled(.reader) { readerTask?.cancel(); reader = nil }
         }
         .onChange(of: model.session.selectedTabID) { _, _ in findVisible = false; model.addressEditing = addressFocused; readerTask?.cancel(); reader = nil }
+    }
+    private var readerLifecycle: some View {
+        windowCommands
         .onChange(of: model.session.profileID) { _, _ in readerTask?.cancel(); reader = nil }
         .onChange(of: model.selectedTab.url) { _, _ in readerTask?.cancel(); reader = nil }
         .onReceive(model.activeWebTab.$navigationRevision.dropFirst()) { _ in readerTask?.cancel(); reader = nil }
         .onChange(of: model.sheet) { _, sheet in if sheet != nil { readerTask?.cancel(); reader = nil } }
         .onDisappear { readerTask?.cancel(); reader = nil }
+    }
+    private var content: some View {
+        readerLifecycle
         .onChange(of: addressFocused) { _, focused in model.addressEditing = focused }
         .onChange(of: findVisible) { _, visible in if visible { findFocused = true } }
         .onChange(of: app.library.preferences.blockPopups) { _, _ in model.updatePopupPolicy() }
