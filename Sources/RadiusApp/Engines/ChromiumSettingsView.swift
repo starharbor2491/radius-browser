@@ -8,7 +8,7 @@ struct ChromiumSettingsView: View {
     @EnvironmentObject private var app: AppState
     @ObservedObject private var runtime = ChromiumRuntime.shared
     @State private var busy = false
-    @State private var installed = false
+    private var installed: Bool { runtime.isInstalled(in: dataDirectory) }
     @State private var message: String?
     var body: some View {
         GroupBox {
@@ -27,7 +27,7 @@ struct ChromiumSettingsView: View {
                 if runtime.isLoaded { Text("Restart Radius with WebKit selected before changing the runtime.").font(.caption).foregroundStyle(.secondary) }
                 if let message { Text(message).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
             }.padding(8)
-        }.onAppear { installed = runtime.isInstalled(in: dataDirectory) }
+        }
     }
     private func choosePackage() {
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
@@ -40,7 +40,7 @@ struct ChromiumSettingsView: View {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         busy = true
         Task {
-            defer { busy = false; installed = runtime.isInstalled(in: dataDirectory) }
+            defer { busy = false }
             do { try await runtime.install(from: source, dataDirectory: dataDirectory); message = runtime.status }
             catch { message = error.localizedDescription }
         }
@@ -93,7 +93,7 @@ struct ChromiumSettingsView: View {
         alert.informativeText = "Tabs configured for Chromium will be unavailable until you reinstall it or reopen them in WebKit. Chromium profile website data is kept."
         alert.addButton(withTitle: "Remove runtime"); alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        do { try runtime.uninstall(dataDirectory: dataDirectory); installed = false; message = runtime.status }
+        do { try runtime.uninstall(dataDirectory: dataDirectory); message = runtime.status }
         catch { message = error.localizedDescription }
     }
 }

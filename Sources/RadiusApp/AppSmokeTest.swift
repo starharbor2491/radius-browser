@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 import AppKit
+import SwiftUI
 import RadiusCore
 
 /// CI-only launch verification using the actual app window and an isolated, disposable data folder.
@@ -100,6 +101,61 @@ enum AppSmokeTest {
                         throw ValidationError("Chromium was not hosted inside the actual Radius window.")
                     }
                     guard try await browser.webTab(id).readerText().contains("Local browser check") else { throw ValidationError("Embedded Chromium did not execute the reader request.") }
+                    guard let chromium = browser.webTab(id) as? ChromiumTab else { throw ValidationError("Chromium adapter is unavailable.") }
+                    trace("Checking Chromium profile and private-window isolation")
+                    let normalToken = "radiusNormal" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+                    _ = try await evaluate(chromium, "document.cookie = '\(normalToken)=1; path=/; max-age=60'; localStorage.setItem('\(normalToken)', '1'); document.cookie")
+                    guard try await evaluate(chromium, "document.cookie").contains(normalToken) else { throw ValidationError("The normal Chromium profile could not set its test cookie.") }
+                    var probes: [(BrowserModel, NSWindow)] = []
+                    defer { for (model, window) in probes { model.closeWindow(); window.close() } }
+                    let privateToken = "radiusPrivate" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+                    for index in 0..<2 {
+                        let probe = try await openProbe(app: app, privateBrowsing: true, profileID: nil, address: address + "?private-probe=\(index)")
+                        probes.append(probe)
+                        guard let tab = probe.0.activeWebTab as? ChromiumTab else { throw ValidationError("A private probe used the wrong engine.") }
+                        let cookies = try await evaluate(tab, "document.cookie")
+                        guard !cookies.contains(normalToken), !cookies.contains(privateToken) else { throw ValidationError("Chromium cookies leaked into another private window.") }
+                        guard try await evaluate(tab, "String(localStorage.getItem('\(normalToken)'))") == "null",
+                              try await evaluate(tab, "String(localStorage.getItem('\(privateToken)'))") == "null" else { throw ValidationError("Chromium local storage leaked into a private window.") }
+                        if index == 0 { _ = try await evaluate(tab, "document.cookie = '\(privateToken)=1; path=/'; localStorage.setItem('\(privateToken)', '1'); document.cookie") }
+                    }
+                    let separateProfile = Profile(name: "Isolation probe"); app.library.profiles.append(separateProfile)
+                    let separate = try await openProbe(app: app, privateBrowsing: false, profileID: separateProfile.id, address: address)
+                    probes.append(separate)
+                    guard let separateTab = separate.0.activeWebTab as? ChromiumTab else { throw ValidationError("The separate profile used the wrong engine.") }
+                    let separateCookies = try await evaluate(separateTab, "document.cookie")
+                    guard !separateCookies.contains(normalToken) else { throw ValidationError("Chromium profile cookies were not separated.") }
+                    guard try await evaluate(separateTab, "String(localStorage.getItem('\(normalToken)'))") == "null" else { throw ValidationError("Chromium profile local storage was not separated.") }
+                    guard !app.library.history.contains(where: { $0.url.query?.contains("private-probe") == true }),
+                          !app.library.sessions.flatMap(\.tabs).contains(where: { $0.url?.query?.contains("private-probe") == true }) else { throw ValidationError("Private Chromium browsing entered saved history or sessions.") }
+                    for (model, window) in probes { model.closeWindow(); window.close() }; probes.removeAll()
+                    trace("Checking Chromium popup opener and tab context")
+                    app.library.preferences.blockPopups = false; browser.updatePopupPolicy()
+                    _ = try await evaluate(chromium, "(() => { const w = window.open('about:blank'); if (!w) return 'blocked'; w.document.write('<html><title>Radius Chromium popup</title><body>Popup</body></html>'); return 'opened'; })()")
+                    let popupDeadline = Date().addingTimeInterval(10)
+                    while browser.activeWebTab.title != "Radius Chromium popup" {
+                        if Date() > popupDeadline { throw ValidationError("Chromium popup did not open inside Radius.") }
+                        try await Task.sleep(for: .milliseconds(100))
+                    }
+                    guard let popup = browser.activeWebTab as? ChromiumTab,
+                          try await evaluate(popup, "String(window.opener !== null)") == "true" else { throw ValidationError("Chromium popup lost its opener.") }
+                    browser.closeTab(browser.session.selectedTabID); browser.selectTab(id)
+                    let capture = try await chromium.request("Page.captureScreenshot", parameters: ["format": "png", "captureBeyondViewport": false])
+                    guard let captureObject = try JSONSerialization.jsonObject(with: capture) as? [String: Any],
+                          let encoded = captureObject["data"] as? String, let contentPNG = Data(base64Encoded: encoded),
+                          contentPNG.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]), contentPNG.count > 1000 else {
+                        throw ValidationError("Chromium could not capture its rendered page.")
+                    }
+                    try contentPNG.write(to: output.appendingPathComponent("Radius-chromium-content.png"))
+                    trace("Checking ordinary HTTPS browsing in Chromium")
+                    browser.navigate("https://example.com/")
+                    let httpsDeadline = Date().addingTimeInterval(20)
+                    while chromium.title != "Example Domain" || chromium.loading {
+                        if let error = chromium.errorMessage { throw ValidationError(error) }
+                        if Date() > httpsDeadline { throw ValidationError("Chromium did not load its HTTPS check page.") }
+                        try await Task.sleep(for: .milliseconds(100))
+                    }
+                    guard chromium.url?.scheme == "https", try await chromium.readerText().contains("Example Domain") else { throw ValidationError("Chromium HTTPS browsing failed.") }
                     try await Task.sleep(for: .milliseconds(500))
                     guard let view = window.contentView, let image = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw ValidationError("Cannot capture embedded Chromium.") }
                     view.cacheDisplay(in: view.bounds, to: image)
@@ -122,6 +178,32 @@ enum AppSmokeTest {
             // Let this actor job return before AppKit enters its deferred-termination loop.
             NSApp.perform(#selector(NSApplication.terminate(_:)), with: nil, afterDelay: 0)
         } catch { fail(error.localizedDescription) }
+    }
+    private static func evaluate(_ tab: ChromiumTab, _ source: String) async throws -> String {
+        let data = try await tab.request("Runtime.evaluate", parameters: ["expression": source, "returnByValue": true])
+        guard let response = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let result = response["result"] as? [String: Any], let value = result["value"] as? String else {
+            throw ValidationError("The Chromium script did not return its expected result.")
+        }
+        return value
+    }
+    private static func openProbe(app: AppState, privateBrowsing: Bool, profileID: UUID?, address: String) async throws -> (BrowserModel, NSWindow) {
+        let model = BrowserModel(app: app, isPrivate: privateBrowsing)
+        if let profileID { model.changeProfile(profileID) }
+        model.changeEngine(model.session.selectedTabID, to: .chromium)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: BrowserWindow(model: model).environmentObject(app))
+        window.orderFront(nil); model.navigate(address)
+        do {
+            let deadline = Date().addingTimeInterval(15)
+            while model.activeWebTab.title != "Radius HTTP fixture" || model.activeWebTab.loading {
+                if let error = model.activeWebTab.errorMessage { throw ValidationError(error) }
+                if Date() > deadline { throw ValidationError("A Chromium isolation page did not load.") }
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            return (model, window)
+        } catch { model.closeWindow(); window.close(); throw error }
     }
     private static func trace(_ message: String) {
         FileHandle.standardOutput.write(Data((message + "\n").utf8))

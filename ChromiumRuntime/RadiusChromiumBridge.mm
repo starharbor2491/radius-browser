@@ -267,6 +267,9 @@ int Initialize(const char* package,const char* data,const char* main_bundle) {
   CefString(&settings.root_cache_path) = data_root;
   CefString(&settings.log_file) = data_root + "/engine.log";
   settings.log_severity = LOGSEVERITY_DISABLE; // Never persist private page URLs in a diagnostic log.
+  if ([[[NSProcessInfo processInfo] arguments] containsObject:@"--smoke-test"] &&
+      [[[NSProcessInfo processInfo] environment] objectForKey:@"RADIUS_SMOKE_TEST_DATA"])
+    settings.log_severity = LOGSEVERITY_INFO; // Only isolated CI fixture browsing.
   std::string executable = std::string(main_bundle) + "/Contents/MacOS/Radius";
   char* argv[] = {executable.data()}; CefMainArgs args(1,argv);
   engine_app = new EngineApp();
@@ -283,7 +286,9 @@ void* Create(const char* profile,const char* private_window) {
   if (!contexts.count(key)) {
     CefRequestContextSettings settings;
     if (!ephemeral) CefString(&settings.cache_path) = data_root + "/Profiles/" + profile;
-    contexts.emplace(key,Context{CefRequestContext::CreateContext(settings,nullptr),0});
+    auto context = CefRequestContext::CreateContext(settings,nullptr);
+    if (!context) { last_error="Chromium could not create an isolated website context."; return nullptr; }
+    contexts.emplace(key,Context{context,0});
   }
   Page* page = Allocate(key);
   CefWindowInfo window; window.SetAsChild(page->view,CefRect(0,0,800,600));

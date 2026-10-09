@@ -42,6 +42,18 @@ jobs:
         run: ./scripts/smoke-app.sh
       - name: Archive development runtime
         run: ditto -c -k --sequesterRsrc --keepParent "$RUNNER_TEMP/radius-cef-runtime/Chromium-${{ matrix.arch }}.radiusengine" "dist/Chromium-${{ matrix.arch }}.radiusengine.zip"
+      - name: Record native runtime validation
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          path = Path(os.environ['RUNNER_TEMP']) / 'radius-cef-runtime' / 'radius-adapter-${{ matrix.arch }}.json'
+          evidence = json.loads(path.read_text())
+          evidence['radiusEmbeddedRuntimeValidated'] = True
+          evidence['testedSource'] = os.environ['GITHUB_SHA']
+          evidence['nativeChecks'] = ['HTTP', 'HTTPS', 'reader', 'PNG capture', 'profiles', 'private windows', 'popup opener', 'tab close', 'normal quit']
+          path.write_text(json.dumps(evidence, indent=2) + '\n')
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: Radius-Chromium-${{ matrix.arch }}-development-runtime
@@ -55,5 +67,6 @@ jobs:
             dist/screenshots/*.png
             dist/smoke-*.log
             dist/smoke-sample.txt
+            dist/smoke-data/Chromium/engine.log
             ${{ runner.temp }}/radius-cef-runtime/radius-adapter-*.json
           if-no-files-found: warn

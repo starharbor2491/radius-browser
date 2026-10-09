@@ -30,6 +30,7 @@ foreach(suffix_list ${CEF_HELPER_APP_SUFFIXES})
   SET_EXECUTABLE_TARGET_PROPERTIES(${helper_target})
   target_link_libraries(${helper_target} libcef_dll_wrapper ${CEF_STANDARD_LIBS})
   set_target_properties(${helper_target} PROPERTIES OUTPUT_NAME "${helper_name}"
+    XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "${helper_id}"
     MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_BINARY_DIR}/${helper_target}.plist")
   add_dependencies(RadiusChromiumBridge ${helper_target})
 endforeach()

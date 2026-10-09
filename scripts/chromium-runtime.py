@@ -51,8 +51,14 @@ def build(work, arch):
     frameworks.mkdir(parents=True)
     shutil.copy2(output / "Release/RadiusChromiumBridge.dylib", binaries)
     framework = source / "Release/Chromium Embedded Framework.framework"
-    # ditto preserves framework symlinks and permissions on macOS.
-    proof.checked(["ditto", framework, frameworks / framework.name])
+    # Match CEF's COPY_MAC_FRAMEWORK macro: the SDK is flat; applications use
+    # a versioned macOS framework with these standard relative symlinks.
+    packaged_framework = frameworks / framework.name
+    (packaged_framework / "Versions").mkdir(parents=True)
+    proof.checked(["ditto", framework, packaged_framework / "Versions/A"])
+    for name in ("Chromium Embedded Framework", "Libraries", "Resources"):
+        (packaged_framework / name).symlink_to("Versions/A/" + name)
+    (packaged_framework / "Versions/Current").symlink_to("A")
     helpers = list((output / "Release").glob("RadiusChromium Helper*.app"))
     if len(helpers) != 5:
         raise RuntimeError(f"Expected five sandbox helper variants, found {len(helpers)}")
@@ -80,7 +86,16 @@ def build(work, arch):
             files[str(path.relative_to(package))] = hashlib.file_digest(content, "sha256").hexdigest()
     manifest = {"format": 1, "abi": 1, "architecture": arch, "cefVersion": proof.VERSION, "files": files}
     (package / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    source_files = [ROOT / "ChromiumRuntime/RadiusChromiumBridge.mm", ROOT / "ChromiumRuntime/Helper.cc",
+                    ROOT / "ChromiumRuntime/CMakeLists.txt", ROOT / "ChromiumRuntime/Helper-Info.plist.in",
+                    ROOT / "Sources/RadiusEngineABI/include/RadiusEngineABI.h", Path(__file__).resolve()]
+    source_digests = {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest() for path in source_files}
+    try:
+        radius_commit = subprocess.check_output(["git", "-C", ROOT, "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL).strip()
+    except (OSError, subprocess.CalledProcessError):
+        radius_commit = None
     evidence = {"package": str(package), "architecture": arch, "cefVersion": proof.VERSION,
+                "radiusCommit": radius_commit, "adapterSourceSHA256": source_digests,
                 "archiveSHA256": proof.ARCHIVES[arch][1], "sandbox": True,
                 "radiusAdapter": True, "radiusEmbeddedRuntimeValidated": False,
                 "chromeExtensions": False, "developerID": False, "notarized": False,

@@ -49,7 +49,7 @@ struct ModuleCard: View {
                 VStack(alignment: .leading, spacing: 5) {
                     HStack { Text(manifest.name).font(.headline); Text("v\(manifest.version)").font(.caption).foregroundStyle(.secondary) }
                     Text(manifest.summary).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    HStack { Text(manifest.publisher); Text("· WebKit + native shell"); Link("Source", destination: manifest.source) }.font(.caption).foregroundStyle(.secondary)
+                    HStack { Text(manifest.publisher); Text("· Native shell"); Link("Source", destination: manifest.source) }.font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
                 if let installed {
