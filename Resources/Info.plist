@@ -8,6 +8,7 @@
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>1.0.0</string>
 <key>CFBundleVersion</key><string>1</string>
+<key>NSHumanReadableCopyright</key><string>Radius development build. Source: https://github.com/starharbor2491/radius-browser · MPL-2.0 (new code), MIT (original repository).</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoadsInWebContent</key><true/></dict>
 <key>NSHighResolutionCapable</key><true/>
