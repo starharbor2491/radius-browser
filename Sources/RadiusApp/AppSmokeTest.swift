@@ -174,8 +174,8 @@ enum AppSmokeTest {
                     guard let popup = browser.activeWebTab as? ChromiumTab,
                           try await evaluate(popup, "String(window.opener !== null)") == "true" else { throw ValidationError("Chromium popup lost its opener.") }
                     browser.closeTab(browser.session.selectedTabID); browser.selectTab(id)
-                    let capture = try await chromium.request("Page.captureScreenshot", parameters: ["format": "png", "captureBeyondViewport": false])
-                    guard let captureObject = try JSONSerialization.jsonObject(with: capture) as? [String: Any],
+                    let captureResponse = try await chromium.request("Page.captureScreenshot", parameters: ["format": "png", "captureBeyondViewport": false])
+                    guard let captureObject = try JSONSerialization.jsonObject(with: captureResponse) as? [String: Any],
                           let encoded = captureObject["data"] as? String, let contentPNG = Data(base64Encoded: encoded),
                           contentPNG.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]), contentPNG.count > 1000 else {
                         throw ValidationError("Chromium could not capture its rendered page.")
