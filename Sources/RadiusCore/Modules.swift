@@ -104,15 +104,17 @@ public struct ModuleRepository: Sendable {
         try visit(id)
         return result
     }
-    public func install(_ manifest: ModuleManifest) throws {
+    public func install(_ manifest: ModuleManifest, enabled: Bool? = nil) throws {
         try manifest.validate()
+        let previous = try installed().first { $0.id == manifest.id }
+        let activate = enabled ?? previous?.enabled ?? true
         let directory = root.appendingPathComponent(manifest.id, isDirectory: true)
         let staging = root.appendingPathComponent(".stage-" + UUID().uuidString, isDirectory: true)
         let backup = root.appendingPathComponent(".backup-" + UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: staging) }
         try JSONEncoder().encode(manifest).write(to: staging.appendingPathComponent("manifest.json"), options: .atomic)
-        try JSONEncoder().encode(ModuleReceipt(enabled: true)).write(to: staging.appendingPathComponent("receipt.json"), options: .atomic)
+        try JSONEncoder().encode(ModuleReceipt(enabled: activate)).write(to: staging.appendingPathComponent("receipt.json"), options: .atomic)
         let replacing = FileManager.default.fileExists(atPath: directory.path)
         if replacing { try rejectLink(directory); try FileManager.default.moveItem(at: directory, to: backup) }
         do {

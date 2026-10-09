@@ -9,6 +9,7 @@ final class DownloadItem: ObservableObject, Identifiable {
     @Published var name = "Preparing download…"
     @Published var status = "Waiting for a destination"
     @Published var destination: URL?
+    var staging: URL?
     @Published var active = true
     @Published var fraction = 0.0
     let download: WKDownload
@@ -26,7 +27,7 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
         }
     }
     private func item(_ download: WKDownload) -> DownloadItem? { items.first { $0.download === download } }
-    func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
+    func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping @MainActor @Sendable (URL?) -> Void) {
         guard let item = item(download) else { completionHandler(nil); return }
         let cleanName = URL(fileURLWithPath: suggestedFilename).lastPathComponent
         item.name = cleanName.isEmpty ? "Download" : cleanName
@@ -35,19 +36,30 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
         guard panel.runModal() == .OK, let url = panel.url else {
             item.status = "Cancelled"; item.active = false; item.progressObservation = nil; completionHandler(nil); return
         }
-        item.destination = url; item.status = "Downloading"; completionHandler(url)
+        let staging = url.deletingLastPathComponent().appendingPathComponent(".radius-download-" + UUID().uuidString + ".part")
+        item.destination = url; item.staging = staging; item.status = "Downloading"; completionHandler(staging)
     }
     func downloadDidFinish(_ download: WKDownload) {
         guard let item = item(download) else { return }
-        item.active = false; item.fraction = 1; item.status = "Finished"; item.progressObservation = nil
+        item.active = false; item.progressObservation = nil
+        guard let staging = item.staging, let destination = item.destination else { item.status = "Failed: missing destination"; return }
+        do {
+            if FileManager.default.fileExists(atPath: destination.path) {
+                _ = try FileManager.default.replaceItemAt(destination, withItemAt: staging)
+            } else { try FileManager.default.moveItem(at: staging, to: destination) }
+            item.staging = nil; item.fraction = 1; item.status = "Finished"
+        } catch { item.status = "Failed to save: \(error.localizedDescription). Temporary file kept at \(staging.path)." }
     }
     func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
         guard let item = item(download) else { return }
         item.active = false; item.status = "Failed: \(error.localizedDescription)"; item.progressObservation = nil
+        if let staging = item.staging { try? FileManager.default.removeItem(at: staging); item.staging = nil }
     }
     func cancel(_ item: DownloadItem) {
         guard item.active else { return }
-        item.download.cancel { _ in }
+        let staging = item.staging
+        item.download.cancel { _ in if let staging { try? FileManager.default.removeItem(at: staging) } }
+        item.staging = nil
         item.active = false; item.status = "Cancelled"; item.progressObservation = nil
     }
     func cancelAll() { items.filter(\.active).forEach(cancel) }

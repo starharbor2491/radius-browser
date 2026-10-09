@@ -17,7 +17,7 @@ struct CustomizeView: View {
             SheetHeader(title: "Customize", subtitle: "Change the look. Arrange your space. Keep your place.")
             HStack(alignment: .top, spacing: 28) {
                 VStack(alignment: .leading, spacing: 16) {
-                    Picker("Customize category", selection: $selection) { Text("Appearance").tag(0); Text("Layout").tag(1); Text("Saved setups").tag(2) }.pickerStyle(.segmented)
+                    Picker("Customize category", selection: $selection) { Text("Appearance").tag(0); Text("BrowserLayout").tag(1); Text("Saved setups").tag(2) }.pickerStyle(.segmented)
                     ScrollView { if selection == 0 { appearance } else if selection == 1 { layout } else { savedSetups } }.frame(maxHeight: .infinity)
                 }.frame(width: 340)
                 VStack(alignment: .leading, spacing: 16) {
@@ -80,11 +80,11 @@ struct CustomizeView: View {
             Toggle("Show bookmarks bar", isOn: binding(\.layout.bookmarksBar))
             Toggle("Show status bar", isOn: binding(\.layout.statusBar))
             Divider()
-            Text("Layout presets").font(.headline)
+            Text("BrowserLayout presets").font(.headline)
             HStack {
-                Button("Classic") { change { $0.layout = Layout() } }
+                Button("Classic") { change { $0.layout = BrowserLayout() } }
                 Button("Sidebar") { change { $0.layout.tabs = .leading; $0.layout.sidebar = .trailing } }
-                Button("Minimal") { change { $0.layout = Layout(); $0.layout.sidebar = .hidden; $0.layout.statusBar = false; $0.layout.bookmarksBar = false } }
+                Button("Minimal") { change { $0.layout = BrowserLayout(); $0.layout.sidebar = .hidden; $0.layout.statusBar = false; $0.layout.bookmarksBar = false } }
             }
             Text("Drag tabs to reorder them, or use Move earlier / Move later in their context menu.").font(.caption).foregroundStyle(.secondary)
         }.padding(.vertical, 12)
@@ -98,7 +98,7 @@ struct CustomizeView: View {
                     guard !name.isEmpty else { return }
                     app.library.preferences.savedConfigurations.append(NamedConfiguration(name: String(name.prefix(100)), configuration: draft))
                 }.disabled(setupName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                Button("Export…") { app.perform { app.saveFile(try JSONEncoder().encode(SetupPack(name: setupName.isEmpty ? "My setup" : String(setupName.prefix(100)), configuration: draft)), name: "Radius Setup.json", type: .json) } }
+                Button("Export…") { app.perform { app.saveFile(try JSONEncoder().encode(SetupPack(name: setupName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "My setup" : String(setupName.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100)), configuration: draft)), name: "Radius Setup.json", type: .json) } }
                 Button("Import…") { importSetup() }
             }
             Text("Setup files contain appearance and layout only. No history, notes, cookies, or permission grants are shared.").font(.caption).foregroundStyle(.secondary)
@@ -138,7 +138,7 @@ struct CustomizeView: View {
 }
 struct LayoutPreview: View {
     let configuration: Configuration
-    private var layout: Layout { configuration.layout }
+    private var layout: BrowserLayout { configuration.layout }
     private var theme: Theme { configuration.theme }
     var body: some View {
         VStack(spacing: 0) {

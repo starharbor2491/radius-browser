@@ -32,13 +32,14 @@ public enum AddressResolver {
             if !value.contains("://"), isHostWithPort(value) {
                 return URL(string: "http://" + value)
             }
-            return nil
+            if ["javascript", "data", "file", "about", "vbscript"].contains(scheme.lowercased()) || value.contains("://") { return nil }
+            return search.searchURL(value)
         }
         if !value.contains(where: { $0.isWhitespace }),
            (value.contains(".") || value == "localhost" || value.hasPrefix("localhost/") || value.hasPrefix("[")),
            let parts = URLComponents(string: "https://" + value),
            let host = parts.host, !host.isEmpty, parts.user == nil, parts.password == nil {
-            let scheme = (host == "localhost" || host == "127.0.0.1" || host == "::1") ? "http://" : "https://"
+            let scheme = (host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]") ? "http://" : "https://"
             return URL(string: scheme + value)
         }
         return search.searchURL(value)
@@ -145,7 +146,7 @@ public struct Theme: Codable, Equatable, Sendable {
         cornerRadius = cornerRadius.isFinite ? min(24, max(0, cornerRadius)) : 10
     }
 }
-public struct Layout: Codable, Equatable, Sendable {
+public struct BrowserLayout: Codable, Equatable, Sendable {
     public var tabs: TabPlacement = .top
     public var navigation: BarPlacement = .top
     public var sidebar: SidebarPlacement = .leading
@@ -159,7 +160,7 @@ public struct Layout: Codable, Equatable, Sendable {
 }
 public struct Configuration: Codable, Equatable, Sendable {
     public var theme = Theme()
-    public var layout = Layout()
+    public var layout = BrowserLayout()
     public init() {}
     public mutating func normalize() { theme.normalize(); layout.normalize() }
 }

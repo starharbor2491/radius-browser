@@ -7,6 +7,7 @@ struct BrowserWindowRoot: View {
     @EnvironmentObject private var app: AppState
     let isPrivate: Bool
     @State private var model: BrowserModel?
+    @State private var pendingURLs: [URL] = []
     var body: some View {
         Group {
             if let model, app.ready { BrowserWindow(model: model) }
@@ -16,23 +17,35 @@ struct BrowserWindowRoot: View {
         .frame(minWidth: 760, minHeight: 520)
         .task {
             if !app.ready { await app.load() }
-            if app.ready && model == nil { model = BrowserModel(app: app, isPrivate: isPrivate) }
+            if app.ready && model == nil { createModel() }
+        }
+        .onOpenURL { url in
+            guard AddressResolver.isWebURL(url) else { return }
+            if let model { model.newTab(url: url) } else { pendingURLs.append(url) }
         }
         .onChange(of: app.ready) { _, ready in
-            if ready && model == nil { model = BrowserModel(app: app, isPrivate: isPrivate) }
+            if ready && model == nil { createModel() }
         }
+    }
+    private func createModel() {
+        let created = BrowserModel(app: app, isPrivate: isPrivate)
+        model = created
+        for url in pendingURLs { created.newTab(url: url) }
+        pendingURLs.removeAll()
     }
 }
 struct BrowserWindow: View {
     @ObservedObject var model: BrowserModel
     @EnvironmentObject private var app: AppState
     @FocusState private var addressFocused: Bool
+    @FocusState private var findFocused: Bool
     @State private var findVisible = false
     @State private var findText = ""
     @State private var reader: String?
     @State private var extracting = false
     @Environment(\.openWindow) private var openWindow
-    private var layout: Layout { app.configuration.layout }
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    private var layout: BrowserLayout { app.configuration.layout }
     private var theme: Theme { app.configuration.theme }
     private var visiblePanel: BrowserPanel? {
         guard let panel = model.panel else { return nil }
@@ -68,6 +81,7 @@ struct BrowserWindow: View {
         }
         .tint(theme.accent.color).preferredColorScheme(theme.scheme).controlSize(theme.controlSize)
         .focusedSceneObject(model)
+        .animation(theme.reducedMotion || systemReduceMotion ? nil : .easeOut(duration: 0.16), value: visiblePanel)
         .background(WindowCloseObserver(model: model))
         .sheet(item: $model.sheet) { sheet in
             switch sheet {
@@ -83,11 +97,14 @@ struct BrowserWindow: View {
                 ScrollView { Text(reader ?? "").font(.system(size: 18, design: .serif)).lineSpacing(7).textSelection(.enabled).frame(maxWidth: 660, alignment: .leading).padding(24).frame(maxWidth: .infinity) }
             }.padding(24).frame(width: 760, height: 640)
         }
-        .onReceive(NotificationCenter.default.publisher(for: .radiusFocusAddress)) { _ in addressFocused = true }
-        .onReceive(NotificationCenter.default.publisher(for: .radiusFind)) { _ in findVisible.toggle() }
+        .onReceive(NotificationCenter.default.publisher(for: .radiusFocusAddress)) { notification in if notification.object as? UUID == model.session.id { addressFocused = true } }
+        .onReceive(NotificationCenter.default.publisher(for: .radiusFind)) { notification in if notification.object as? UUID == model.session.id { findVisible = true; findFocused = true } }
         .onExitCommand { model.focusMode = false; findVisible = false; addressFocused = false }
         .onChange(of: app.installedModules) { _, _ in if !app.enabled(.focusMode) { model.focusMode = false } }
-        .onChange(of: model.session.selectedTabID) { _, _ in findVisible = false }
+        .onChange(of: model.session.selectedTabID) { _, _ in findVisible = false; addressFocused = false; model.addressEditing = false }
+        .onChange(of: addressFocused) { _, focused in model.addressEditing = focused }
+        .onChange(of: findVisible) { _, visible in if visible { findFocused = true } }
+        .onChange(of: app.library.preferences.blockPopups) { _, _ in model.updatePopupPolicy() }
     }
     private var navigation: some View {
         HStack(spacing: theme.spacing) {
@@ -96,7 +113,7 @@ struct BrowserWindow: View {
                 Image(systemName: model.isPrivate ? "hand.raised" : (model.selectedTab.url?.scheme == "https" ? "lock" : "globe"))
                     .foregroundStyle(.secondary).help(model.isPrivate ? "Private browsing" : (model.selectedTab.url?.scheme == "https" ? "HTTPS connection" : "Website address"))
                 TextField("Search or enter website", text: $model.address)
-                    .textFieldStyle(.plain).focused($addressFocused).onSubmit { model.navigate(model.address); addressFocused = false }
+                    .textFieldStyle(.plain).focused($addressFocused).onSubmit { model.addressEditing = false; model.navigate(model.address); addressFocused = false }
                     .accessibilityLabel("Website address or search")
                 if model.hasPage && !model.isPrivate {
                     IconButton(title: "Bookmark this page", icon: isBookmarked ? "star.fill" : "star", active: isBookmarked) { model.toggleBookmark() }
@@ -125,15 +142,7 @@ struct BrowserWindow: View {
             } label: { Image(systemName: "ellipsis").frame(width: 28, height: 28) }.menuStyle(.borderlessButton).fixedSize().accessibilityLabel("Browser menu")
         }.padding(.horizontal, 12).padding(.vertical, 6).modifier(ChromeSurface(theme: theme))
     }
-    private var navigationButtons: some View {
-        HStack(spacing: 2) {
-            IconButton(title: "Back", icon: "chevron.left") { model.activeWebTab.webView.goBack() }.disabled(!model.activeWebTab.canGoBack)
-            IconButton(title: "Forward", icon: "chevron.right") { model.activeWebTab.webView.goForward() }.disabled(!model.activeWebTab.canGoForward)
-            IconButton(title: model.activeWebTab.loading ? "Stop loading" : "Reload", icon: model.activeWebTab.loading ? "xmark" : "arrow.clockwise") {
-                if model.activeWebTab.loading { model.activeWebTab.webView.stopLoading() } else { model.activeWebTab.reload() }
-            }.disabled(!model.hasPage)
-        }
-    }
+    private var navigationButtons: some View { NavigationButtons(tab: model.activeWebTab, hasPage: model.hasPage) }
     private var isBookmarked: Bool { model.bookmarks.contains { $0.url == model.selectedTab.url } }
     private func available(_ panel: BrowserPanel) -> Bool {
         switch panel { case .notes: app.enabled(.notes); case .resources: app.enabled(.resourceMonitor); case .history: !model.isPrivate; default: true }
@@ -196,14 +205,14 @@ struct BrowserWindow: View {
         VStack(spacing: 0) {
             if findVisible {
                 HStack {
-                    TextField("Find on this page", text: $findText).textFieldStyle(.roundedBorder).onSubmit { model.activeWebTab.find(findText) }
+                    TextField("Find on this page", text: $findText).textFieldStyle(.roundedBorder).focused($findFocused).onSubmit { model.activeWebTab.find(findText) }
                     Button("Previous") { model.activeWebTab.find(findText, backwards: true) }
                     Button("Next") { model.activeWebTab.find(findText) }
                     IconButton(title: "Close find", icon: "xmark") { findVisible = false }
                 }.padding(10).background(.bar)
             }
             if model.hasPage {
-                BrowserPage(tab: model.activeWebTab).id(model.session.selectedTabID)
+                BrowserPage(tab: model.activeWebTab).id(ObjectIdentifier(model.activeWebTab))
             } else { startPage }
         }
         .overlay(alignment: .topTrailing) {
@@ -222,7 +231,7 @@ struct BrowserWindow: View {
                     Text("Bring your bookmarks").font(.headline)
                     Text("Export an HTML bookmarks file from your current browser, then import it here.").foregroundStyle(.secondary)
                     HStack {
-                        Button("Import bookmarks…") { app.importBookmarks(profileID: model.session.profileID); app.library.preferences.completedOnboarding = true }
+                        Button("Import bookmarks…") { if app.importBookmarks(profileID: model.session.profileID) { app.library.preferences.completedOnboarding = true } }
                         Button("Start browsing") { app.library.preferences.completedOnboarding = true; addressFocused = true }.buttonStyle(.borderedProminent)
                     }
                 }.padding(20).background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: theme.cornerRadius))
@@ -262,11 +271,7 @@ struct BrowserWindow: View {
             Image(systemName: model.isPrivate ? "hand.raised" : "globe")
             Text(model.isPrivate ? "Private · WebKit" : "\(model.profile.name) · WebKit")
             Spacer()
-            if model.hasPage {
-                Button("−") { model.activeWebTab.setZoom(model.activeWebTab.zoom - 0.1) }.buttonStyle(.plain).accessibilityLabel("Zoom out")
-                Text("\(Int(model.activeWebTab.zoom * 100))%")
-                Button("+") { model.activeWebTab.setZoom(model.activeWebTab.zoom + 0.1) }.buttonStyle(.plain).accessibilityLabel("Zoom in")
-            }
+            if model.hasPage { ZoomControls(tab: model.activeWebTab) }
         }.font(.caption).foregroundStyle(.secondary).padding(.horizontal, 14).padding(.vertical, 6).background(.bar)
     }
     private func openReader() {
@@ -299,6 +304,7 @@ struct WindowCloseObserver: NSViewRepresentable {
     @MainActor final class ObserverView: NSView {
         let model: BrowserModel
         private var observation: NSObjectProtocol?
+        private var delegateProxy: WindowDelegateProxy?
         init(model: BrowserModel) { self.model = model; super.init(frame: .zero) }
         required init?(coder: NSCoder) { fatalError("Not used") }
         override func viewDidMoveToWindow() {
@@ -306,8 +312,10 @@ struct WindowCloseObserver: NSViewRepresentable {
             guard let window, observation == nil else { return }
             window.title = model.isPrivate ? "Radius — Private" : "Radius"
             window.isRestorable = false
-            observation = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak model] _ in
-                Task { @MainActor in model?.closeWindow() }
+            let proxy = WindowDelegateProxy(original: window.delegate, model: model)
+            delegateProxy = proxy; window.delegate = proxy
+            observation = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [model] _ in
+                Task { @MainActor in model.closeWindow() }
             }
         }
         deinit { if let observation { NotificationCenter.default.removeObserver(observation) } }
@@ -316,4 +324,28 @@ struct WindowCloseObserver: NSViewRepresentable {
 extension Notification.Name {
     static let radiusFocusAddress = Notification.Name("radius.focusAddress")
     static let radiusFind = Notification.Name("radius.find")
+}
+
+struct NavigationButtons: View {
+    @ObservedObject var tab: WebTab
+    let hasPage: Bool
+    var body: some View {
+        HStack(spacing: 2) {
+            IconButton(title: "Back", icon: "chevron.left") { tab.webView.goBack() }.disabled(!tab.canGoBack)
+            IconButton(title: "Forward", icon: "chevron.right") { tab.webView.goForward() }.disabled(!tab.canGoForward)
+            IconButton(title: tab.loading ? "Stop loading" : "Reload", icon: tab.loading ? "xmark" : "arrow.clockwise") {
+                if tab.loading { tab.webView.stopLoading() } else { tab.reload() }
+            }.disabled(!hasPage)
+        }
+    }
+}
+struct ZoomControls: View {
+    @ObservedObject var tab: WebTab
+    var body: some View {
+        HStack(spacing: 8) {
+            Button("−") { tab.setZoom(tab.zoom - 0.1) }.buttonStyle(.plain).accessibilityLabel("Zoom out")
+            Button("\(Int((tab.zoom * 100).rounded()))%") { tab.setZoom(1) }.buttonStyle(.plain).help("Reset zoom")
+            Button("+") { tab.setZoom(tab.zoom + 0.1) }.buttonStyle(.plain).accessibilityLabel("Zoom in")
+        }
+    }
 }

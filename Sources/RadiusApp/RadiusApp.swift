@@ -21,7 +21,7 @@ struct BrowserCommands: Commands {
         CommandGroup(replacing: .newItem) {
             Button("New window") { openWindow(id: "browser") }.keyboardShortcut("n")
             Button("New private window") { openWindow(id: "private") }.keyboardShortcut("n", modifiers: [.command, .shift])
-            Button("New tab") { browser?.newTab(); NotificationCenter.default.post(name: .radiusFocusAddress, object: nil) }.keyboardShortcut("t").disabled(browser == nil)
+            Button("New tab") { browser?.newTab(); NotificationCenter.default.post(name: .radiusFocusAddress, object: browser?.session.id) }.keyboardShortcut("t").disabled(browser == nil)
             Button("Reopen closed tab") { browser?.reopenClosedTab() }.keyboardShortcut("t", modifiers: [.command, .shift]).disabled(browser?.closedTabs.isEmpty != false)
         }
         CommandGroup(replacing: .appSettings) {
@@ -30,13 +30,14 @@ struct BrowserCommands: Commands {
         CommandGroup(replacing: .saveItem) {
             Button("Bookmark this page") { browser?.toggleBookmark() }.keyboardShortcut("d").disabled(browser?.hasPage != true || browser?.isPrivate == true)
         }
-        CommandGroup(replacing: .windowSize) {
+        CommandGroup(after: .newItem) {
             Button("Close tab") { if let browser { browser.closeTab(browser.session.selectedTabID) } }.keyboardShortcut("w").disabled(browser == nil)
+            Button("Close window") { NSApp.keyWindow?.performClose(nil) }.keyboardShortcut("w", modifiers: [.command, .shift])
         }
         CommandMenu("Browse") {
-            Button("Open location…") { NotificationCenter.default.post(name: .radiusFocusAddress, object: nil) }.keyboardShortcut("l")
+            Button("Open location…") { NotificationCenter.default.post(name: .radiusFocusAddress, object: browser?.session.id) }.keyboardShortcut("l")
             Button("Reload page") { browser?.activeWebTab.reload() }.keyboardShortcut("r").disabled(browser?.hasPage != true)
-            Button("Find in page…") { NotificationCenter.default.post(name: .radiusFind, object: nil) }.keyboardShortcut("f").disabled(browser?.hasPage != true)
+            Button("Find in page…") { NotificationCenter.default.post(name: .radiusFind, object: browser?.session.id) }.keyboardShortcut("f").disabled(browser?.hasPage != true)
             Divider()
             Button("Previous tab") { browser?.selectRelativeTab(-1) }.keyboardShortcut("[", modifiers: [.command, .shift])
             Button("Next tab") { browser?.selectRelativeTab(1) }.keyboardShortcut("]", modifiers: [.command, .shift])

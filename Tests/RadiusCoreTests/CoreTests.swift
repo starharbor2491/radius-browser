@@ -117,3 +117,24 @@ import Testing
 }
 private func temporaryDirectory() -> URL { FileManager.default.temporaryDirectory.appendingPathComponent("radius-test-" + UUID().uuidString, isDirectory: true) }
 private func module(_ id: String, _ capability: ModuleCapability) -> ModuleManifest { ModuleManifest(id: id, name: "Test", summary: "Test module", capability: capability) }
+
+@Test func searchesWithColonsAndIPv6LoopbackWork() {
+    for text in ["site:example.com Swift", "C++: vector", "swift: actor"] {
+        let url = AddressResolver.resolve(text)
+        #expect(url?.host == "duckduckgo.com")
+        #expect(url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems?.first?.value } == text)
+    }
+    #expect(AddressResolver.resolve("[::1]:8080/test")?.scheme == "http")
+    #expect(AddressResolver.resolve("ftp://example.com") == nil)
+}
+@Test func updatesKeepDisabledModulesDisabled() throws {
+    let directory = temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let repository = try ModuleRepository(root: directory)
+    var manifest = module("org.radius.notes", .notes)
+    try repository.install(manifest); try repository.setEnabled(manifest.id, false)
+    manifest.version = 2
+    try repository.install(manifest)
+    #expect(try repository.installed().first?.manifest.version == 2)
+    #expect(try repository.installed().first?.enabled == false)
+}

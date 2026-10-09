@@ -15,13 +15,14 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
     @Published var errorMessage: String?
     @Published var zoom = 1.0
     var onChange: ((Bool) -> Void)?
-    var onNewTab: ((URL) -> Void)?
-    var allowPopups: (() -> Bool)?
+    var onCreateWindow: ((WKWebViewConfiguration, URL?) -> WKWebView?)?
+    var onClose: (() -> Void)?
+    var allowPopups: (() -> Bool)? { didSet { updatePopupPolicy() } }
     private let downloads: DownloadCenter
     private var observations: [NSKeyValueObservation] = []
-    init(dataStore: WKWebsiteDataStore, downloads: DownloadCenter) {
-        let config = WKWebViewConfiguration(); config.websiteDataStore = dataStore
-        config.preferences.javaScriptCanOpenWindowsAutomatically = false
+    init(dataStore: WKWebsiteDataStore, downloads: DownloadCenter, configuration: WKWebViewConfiguration? = nil) {
+        let config = configuration ?? WKWebViewConfiguration()
+        if configuration == nil { config.websiteDataStore = dataStore }
         webView = WKWebView(frame: .zero, configuration: config)
         self.downloads = downloads
         super.init()
@@ -38,13 +39,14 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
     }
     func load(_ url: URL) {
         guard AddressResolver.isWebURL(url) else { errorMessage = "This address is not supported."; return }
-        errorMessage = nil; webView.load(URLRequest(url: url))
+        errorMessage = nil; updatePopupPolicy(); webView.load(URLRequest(url: url))
     }
+    func updatePopupPolicy() { webView.configuration.preferences.javaScriptCanOpenWindowsAutomatically = allowPopups?() == true }
     func reload() { errorMessage = nil; webView.reload() }
     func setZoom(_ value: Double) { zoom = min(3, max(0.5, value)); webView.pageZoom = zoom }
     func dispose() {
         webView.stopLoading(); webView.navigationDelegate = nil; webView.uiDelegate = nil
-        observations.removeAll(); onChange = nil; onNewTab = nil; allowPopups = nil
+        observations.removeAll(); onChange = nil; onCreateWindow = nil; onClose = nil; allowPopups = nil
     }
     private func refresh(_ finished: Bool) {
         loading = webView.isLoading; canGoBack = webView.canGoBack; canGoForward = webView.canGoForward
@@ -63,9 +65,12 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         loading = false; errorMessage = "The website's process stopped. Reload the page to continue."; refresh(false)
     }
-    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
         guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
         if url.absoluteString == "about:blank" { decisionHandler(.allow); return }
+        if url.scheme?.lowercased() == "blob" {
+            decisionHandler(navigationAction.shouldPerformDownload ? .download : .allow); return
+        }
         guard AddressResolver.isWebURL(url) else {
             // Only a deliberate click may hand off common non-web protocols.
             if navigationAction.navigationType == .linkActivated, ["mailto", "tel"].contains(url.scheme?.lowercased() ?? "") {
@@ -79,25 +84,34 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
         if navigationAction.shouldPerformDownload { decisionHandler(.download) }
         else { decisionHandler(.allow) }
     }
-    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void) {
         decisionHandler(navigationResponse.canShowMIMEType ? .allow : .download)
     }
     func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) { downloads.track(download) }
     func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) { downloads.track(download) }
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        guard let url = navigationAction.request.url, AddressResolver.isWebURL(url) else { return nil }
-        if navigationAction.navigationType == .linkActivated || allowPopups?() == true { onNewTab?(url) }
-        else { errorMessage = "A pop-up was blocked. Allow pop-ups in Settings if this site needs them." }
-        return nil
+        let url = navigationAction.request.url
+        guard url == nil || url?.absoluteString == "about:blank" || url.map(AddressResolver.isWebURL) == true else { return nil }
+        // WebKit's javaScriptCanOpenWindowsAutomatically setting blocks unsolicited popups.
+        // Return a view using the supplied configuration; WebKit preserves the request and opener.
+        return onCreateWindow?(configuration, url)
     }
-    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+    func webViewDidClose(_ webView: WKWebView) { onClose?() }
+    func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor @Sendable ([URL]?) -> Void) {
+        let panel = NSOpenPanel()
+        panel.message = "Choose files to share with \(frame.securityOrigin.host)."
+        panel.allowsMultipleSelection = parameters.allowsMultipleSelection
+        panel.canChooseDirectories = parameters.allowsDirectories; panel.canChooseFiles = true
+        completionHandler(panel.runModal() == .OK ? panel.urls : nil)
+    }
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor @Sendable () -> Void) {
         let alert = siteAlert(frame, message); alert.addButton(withTitle: "OK"); alert.runModal(); completionHandler()
     }
-    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor @Sendable (Bool) -> Void) {
         let alert = siteAlert(frame, message); alert.addButton(withTitle: "OK"); alert.addButton(withTitle: "Cancel")
         completionHandler(alert.runModal() == .alertFirstButtonReturn)
     }
-    func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (String?) -> Void) {
+    func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor @Sendable (String?) -> Void) {
         let alert = siteAlert(frame, prompt); let input = NSTextField(string: defaultText ?? "")
         input.frame = NSRect(x: 0, y: 0, width: 320, height: 24); alert.accessoryView = input
         alert.addButton(withTitle: "OK"); alert.addButton(withTitle: "Cancel")
@@ -107,7 +121,7 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
         let alert = NSAlert(); alert.messageText = "\(frame.securityOrigin.host) says"
         alert.informativeText = String(message.prefix(4000)); return alert
     }
-    func webView(_ webView: WKWebView, requestMediaCapturePermissionFor origin: WKSecurityOrigin, initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType, decisionHandler: @escaping (WKPermissionDecision) -> Void) {
+    func webView(_ webView: WKWebView, requestMediaCapturePermissionFor origin: WKSecurityOrigin, initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType, decisionHandler: @escaping @MainActor @Sendable (WKPermissionDecision) -> Void) {
         guard origin.protocol == "https" else { decisionHandler(.deny); return }
         let alert = NSAlert(); alert.messageText = "Allow \(origin.host) to use your camera or microphone?"
         alert.informativeText = "This permission applies to this website. macOS may also ask for permission."

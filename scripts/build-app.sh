@@ -20,7 +20,8 @@ cp "$binary_directory/Radius" "$app_directory/Contents/MacOS/Radius"
 rm -rf "$app_directory/Contents/Resources/Modules"
 cp -R Sources/RadiusApp/Resources/Modules "$app_directory/Contents/Resources/Modules"
 cp Resources/Info.plist "$app_directory/Contents/Info.plist"
-if [[ -f Resources/AppIcon.icns ]]; then cp Resources/AppIcon.icns "$app_directory/Contents/Resources/AppIcon.icns"; fi
+swift scripts/build-icon.swift dist/AppIcon.iconset
+iconutil -c icns dist/AppIcon.iconset -o "$app_directory/Contents/Resources/AppIcon.icns"
 # Ad-hoc signing is for a local build only. It is not Developer ID signing or notarization.
 codesign --force --sign - "$app_directory"
 codesign --verify --strict "$app_directory"

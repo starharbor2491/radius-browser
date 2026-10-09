@@ -9,6 +9,7 @@ final class BrowserModel: ObservableObject {
     @Published var session: WindowSession { didSet { if !isPrivate { app.updateSession(session) } } }
     @Published var panel: BrowserPanel? = nil
     @Published var address = ""
+    var addressEditing = false
     @Published var focusMode = false
     @Published var sheet: BrowserSheet?
     @Published var closedTabs: [BrowserTab] = []
@@ -31,30 +32,43 @@ final class BrowserModel: ObservableObject {
         if let cached = webTabs[id] { return cached }
         let dataStore = privateDataStore ?? WKWebsiteDataStore(forIdentifier: session.profileID)
         let tab = WebTab(dataStore: dataStore, downloads: downloads)
+        attach(tab, id: id)
+        if let url = session.tabs.first(where: { $0.id == id })?.url { tab.load(url) }
+        return tab
+    }
+    private func attach(_ tab: WebTab, id: UUID) {
         tab.onChange = { [weak self, weak tab] finished in
             guard let self, let tab, let index = self.session.tabs.firstIndex(where: { $0.id == id }) else { return }
             if let url = tab.webView.url, AddressResolver.isWebURL(url) {
                 self.session.tabs[index].url = url
                 self.session.tabs[index].title = String((tab.webView.title ?? url.host ?? "Website").prefix(512))
-                if self.session.selectedTabID == id { self.address = url.absoluteString }
+                if self.session.selectedTabID == id && !self.addressEditing { self.address = url.absoluteString }
                 if finished && !self.isPrivate {
                     self.app.addHistory(url: url, title: self.session.tabs[index].title, profileID: self.session.profileID)
                 }
             }
         }
-        tab.onNewTab = { [weak self] url in self?.newTab(url: url) }
+        tab.onCreateWindow = { [weak self] configuration, url in
+            guard let self, self.session.tabs.count < 200 else { return nil }
+            let descriptor = BrowserTab(url: url ?? URL(string: "about:blank"))
+            let child = WebTab(dataStore: configuration.websiteDataStore, downloads: self.downloads, configuration: configuration)
+            self.attach(child, id: descriptor.id)
+            self.session.tabs.append(descriptor); self.selectTab(descriptor.id)
+            return child.webView
+        }
+        tab.onClose = { [weak self] in self?.closeTab(id) }
         tab.allowPopups = { [weak self] in self?.app.library.preferences.blockPopups == false }
         webTabs[id] = tab
-        if let url = session.tabs.first(where: { $0.id == id })?.url { tab.load(url) }
-        return tab
     }
+    func updatePopupPolicy() { webTabs.values.forEach { $0.updatePopupPolicy() } }
     func navigate(_ input: String) {
         guard let url = AddressResolver.resolve(input, search: app.library.preferences.search) else {
             app.notice = "Enter a website address or search. Only HTTP and HTTPS addresses are supported."; return
         }
+        let tab = activeWebTab
         session.tabs[session.tabs.firstIndex(where: { $0.id == session.selectedTabID })!].url = url
         address = url.absoluteString
-        activeWebTab.load(url)
+        tab.load(url)
     }
     func newTab(url: URL? = nil) {
         guard session.tabs.count < 200 else { app.notice = "This window has 200 tabs. Close a tab or open another window."; return }
@@ -75,7 +89,7 @@ final class BrowserModel: ObservableObject {
         if session.selectedTabID == id { selectTab(session.tabs[min(index, session.tabs.count - 1)].id) }
     }
     func reopenClosedTab() {
-        guard var tab = closedTabs.popLast() else { return }
+        guard session.tabs.count < 200, var tab = closedTabs.popLast() else { return }
         tab.id = UUID(); session.tabs.append(tab); selectTab(tab.id)
     }
     func selectRelativeTab(_ offset: Int) {

@@ -22,9 +22,9 @@ final class AppState: ObservableObject {
     var terminating = false
     var configuration: Configuration { previewConfiguration ?? library.preferences.configuration }
 
-    init() {
+    init(directory: URL? = nil) {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        dataDirectory = support.appendingPathComponent("org.radius.browser", isDirectory: true)
+        dataDirectory = directory ?? support.appendingPathComponent("org.radius.browser", isDirectory: true)
         AppDelegate.state = self
     }
     func load() async {
@@ -71,7 +71,8 @@ final class AppState: ObservableObject {
             guard let repository else { throw ValidationError("Open Recovery to repair module storage first.") }
             let plan = try repository.installationPlan(for: id, catalog: catalog)
             if !approveModules(plan) { return }
-            for manifest in plan { try repository.install(manifest) }
+            let activate = installedModules.first { $0.id == id }?.enabled ?? true
+            for manifest in plan { try repository.install(manifest, enabled: manifest.id != id && activate ? true : nil) }
             installedModules = try repository.installed()
         }
     }
@@ -149,17 +150,19 @@ final class AppState: ObservableObject {
             library.bookmarks.removeAll { $0.url == url && $0.profileID == profileID }
         } else { library.bookmarks.append(Bookmark(profileID: profileID, title: title, url: url)) }
     }
-    func importBookmarks(profileID: UUID) {
+    @discardableResult
+    func importBookmarks(profileID: UUID) -> Bool {
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.html]; panel.message = "Choose bookmarks exported from Safari, Chrome, or Firefox."
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        perform {
+        guard panel.runModal() == .OK, let url = panel.url else { return false }
+        do {
             guard (try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) <= 10 * 1024 * 1024 else { throw ValidationError("Bookmark files must be smaller than 10 MB.") }
             let imported = try BookmarkExchange.parse(Data(contentsOf: url), profileID: profileID)
             var urls = Set(library.bookmarks.filter { $0.profileID == profileID }.map(\.url))
             let additions = imported.filter { urls.insert($0.url).inserted }
             library.bookmarks.append(contentsOf: additions)
             notice = "Imported \(additions.count) bookmarks."
-        }
+            return true
+        } catch { notice = error.localizedDescription; return false }
     }
     func exportBookmarks(profileID: UUID) {
         saveFile(BookmarkExchange.export(library.bookmarks.filter { $0.profileID == profileID }), name: "Radius Bookmarks.html", type: .html)
