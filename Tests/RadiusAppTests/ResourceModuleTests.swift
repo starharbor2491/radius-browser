@@ -78,6 +78,35 @@ struct ResourceModuleTests {
         #expect(await app.flush())
     }
 
+    @Test func missingAndOversizedWorkersCanBeRepairedAfterRelaunch() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("radius-resource-repair-" + UUID().uuidString)
+        let initial = AppState(directory: directory)
+        let worker = ResourceWorker()
+        defer { worker.stop(); try? FileManager.default.removeItem(at: directory) }
+        await initial.load()
+        let package = try initial.resourceWorkerPackage()
+        #expect(await initial.flush())
+        for damage in ["missing", "empty", "oversized"] {
+            try FileManager.default.removeItem(at: package.url)
+            if damage != "missing" {
+                try Data(repeating: 0, count: damage == "empty" ? 0 : 8 * 1024 * 1024 + 1).write(to: package.url)
+            }
+            let reopened = AppState(directory: directory)
+            await reopened.load()
+            #expect(reopened.ready)
+            #expect(reopened.startupError == nil)
+            #expect(reopened.installedModules.contains { $0.id == package.id && $0.enabled })
+            #expect(throws: (any Error).self) { try reopened.resourceWorkerPackage() }
+            try reopened.reinstallApprovedWorker(package.id)
+            let repaired = try reopened.resourceWorkerPackage()
+            try worker.start(executable: repaired.url, moduleID: repaired.id)
+            try await waitForFrame(worker)
+            #expect(worker.frame?.title == "Resource Monitor")
+            worker.stop()
+            #expect(await reopened.flush())
+        }
+    }
+
     private func waitForFrame(_ worker: ResourceWorker) async throws {
         for _ in 0..<150 {
             if worker.frame != nil { return }

@@ -65,6 +65,12 @@ final class WebTab: BrowserEngineTab, WKNavigationDelegate, WKUIDelegate {
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
         guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
         if url.absoluteString == "about:blank" { decisionHandler(.allow); return }
+        // Websites can generate embedded documents without changing the browser's
+        // top-level address or gaining access to local files.
+        if navigationAction.targetFrame?.isMainFrame == false,
+           url.scheme?.lowercased() == "data" || url.absoluteString.components(separatedBy: "#").first == "about:srcdoc" {
+            decisionHandler(.allow); return
+        }
         if url.scheme?.lowercased() == "blob" {
             decisionHandler(navigationAction.shouldPerformDownload ? .download : .allow); return
         }

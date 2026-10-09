@@ -77,6 +77,33 @@ import Testing
     #expect(throws: (any Error).self) { try ResourceFrame.decode(Data(repeating: 0, count: 65_537)) }
 }
 
+@Test func damagedNativePayloadsStayVisibleAndRepairPreservesActivation() throws {
+    let directory = moduleTestDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let repository = try ModuleRepository(root: directory)
+    let manifest = resourceModule("org.radius.resource-monitor")
+    let trusted = Data("trusted test payload".utf8)
+    try repository.install(manifest, payload: trusted)
+    let url = try repository.workerURL(for: manifest.id)
+    for active in [true, false] {
+        try repository.setEnabled(manifest.id, active)
+        for damage in ["missing", "empty", "oversized"] {
+            try FileManager.default.removeItem(at: url)
+            if damage != "missing" {
+                try Data(repeating: 0, count: damage == "empty" ? 0 : 8 * 1024 * 1024 + 1).write(to: url)
+            }
+            let reopened = try ModuleRepository(root: directory)
+            let installed = try #require(reopened.installed().first)
+            #expect(installed.id == manifest.id)
+            #expect(installed.enabled == active)
+            #expect(throws: (any Error).self) { try reopened.workerURL(for: manifest.id) }
+            try reopened.install(manifest, enabled: installed.enabled, payload: trusted)
+            #expect(try reopened.installed().first?.enabled == active)
+            #expect(try Data(contentsOf: url) == trusted)
+        }
+    }
+}
+
 private func moduleTestDirectory() -> URL { FileManager.default.temporaryDirectory.appendingPathComponent("radius-module-test-" + UUID().uuidString) }
 private func resourceModule(_ id: String) -> ModuleManifest {
     ModuleManifest(id: id, name: id, summary: "Test resource worker", capability: .resourceMonitor, runtime: .nativeResourceWorker)

@@ -98,7 +98,15 @@ final class AppState: ObservableObject {
         guard let repository, let trusted = modulePayloads[module.id],
               catalog.contains(module.manifest) else { throw ValidationError("This worker is not a trusted package from this Radius build. Update it in Modules.") }
         let url = try repository.workerURL(for: module.id)
-        guard try Data(contentsOf: url) == trusted else {
+        let file = try FileHandle(forReadingFrom: url)
+        defer { try? file.close() }
+        let limit = 8 * 1024 * 1024
+        var payload = Data()
+        while let chunk = try file.read(upToCount: min(64 * 1024, limit + 1 - payload.count)), !chunk.isEmpty {
+            payload.append(chunk)
+            guard payload.count <= limit else { throw ValidationError("This worker exceeds the package size limit. Reinstall it in Modules.") }
+        }
+        guard payload == trusted else {
             throw ValidationError("This worker's code differs from the bundled first-party package. Reinstall it in Modules.")
         }
         return (module.id, url)

@@ -80,7 +80,6 @@ def build(work, arch):
         "CFBundleVersion": "1", "CFBundleShortVersionString": proof.VERSION,
     }))
     # Sign nested code before its containers, using local ad-hoc identities.
-    proof.checked(["codesign", "--force", "--sign", "-", binaries / "RadiusChromiumBridge.dylib"])
     for helper in frameworks.glob("RadiusChromium Helper*.app"):
         proof.checked(["codesign", "--force", "--sign", "-", helper])
         proof.checked(["codesign", "--verify", "--strict", helper])

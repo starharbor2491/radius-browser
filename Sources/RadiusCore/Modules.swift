@@ -90,9 +90,9 @@ public struct ModuleRepository: Sendable {
             let payloadBytes: Int
             if manifest.runtime != nil {
                 let payload = directory.appendingPathComponent("worker")
-                try rejectLink(payload)
-                payloadBytes = try boundedRead(payload, limit: 8 * 1024 * 1024).count
-                guard payloadBytes > 0 else { throw ValidationError("The module worker is empty.") }
+                // Inventory must stay readable when a regular payload is damaged or missing,
+                // so the native package's Reinstall action remains available after relaunch.
+                payloadBytes = try workerPayloadSize(payload) ?? 0
             } else { payloadBytes = 0 }
             return InstalledModule(manifest: manifest, enabled: receipt.enabled, diskBytes: data.count + receiptData.count + payloadBytes)
         }.sorted { $0.manifest.name < $1.manifest.name }
@@ -204,7 +204,10 @@ public struct ModuleRepository: Sendable {
         guard let module = try installed().first(where: { $0.id == id }), module.enabled,
               module.manifest.runtime == .nativeResourceWorker else { throw ValidationError("This resource worker is not enabled.") }
         let url = root.appendingPathComponent(id).appendingPathComponent("worker")
-        try rejectLink(url)
+        guard let size = try workerPayloadSize(url), size > 0, size <= 8 * 1024 * 1024,
+              FileManager.default.isExecutableFile(atPath: url.path) else {
+            throw ValidationError("This worker is missing, damaged, or not executable. Choose Reinstall bundled package in Modules.")
+        }
         return url
     }
     public func uninstall(_ id: String) throws {
@@ -279,6 +282,18 @@ public struct ModuleRepository: Sendable {
     }
     private func rejectLink(_ url: URL) throws {
         if try url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true { throw ValidationError("Symbolic links are not accepted in module packages.") }
+    }
+    private func workerPayloadSize(_ url: URL) throws -> Int? {
+        do {
+            // attributesOfItem inspects the link itself, including dangling symlinks.
+            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+            guard attributes[.type] as? FileAttributeType == .typeRegular else {
+                throw ValidationError("Module workers must be regular files, not links or directories. Reset modules in Recovery.")
+            }
+            return attributes[.size] as? Int ?? 0
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile || error.code == .fileNoSuchFile {
+            return nil
+        }
     }
     private func boundedRead(_ url: URL, limit: Int) throws -> Data {
         let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0

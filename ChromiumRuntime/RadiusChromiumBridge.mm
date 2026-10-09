@@ -4,6 +4,7 @@
 #import <objc/runtime.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <map>
 #include <memory>
 #include <string>
@@ -25,6 +26,15 @@ std::string last_error;
 std::string data_root;
 NSTimer* pump_timer = nil;
 bool pumping = false;
+bool diagnostics = false;
+unsigned pump_count = 0;
+
+void Trace(const char* message) {
+  if (diagnostics) { std::fprintf(stderr,"Radius Chromium: %s\n",message); std::fflush(stderr); }
+}
+void CancelPump() {
+  [pump_timer invalidate]; [pump_timer release]; pump_timer = nil;
+}
 
 void SchedulePump(int64_t delay);
 class EngineApp final : public CefApp, public CefBrowserProcessHandler {
@@ -40,19 +50,25 @@ CefRefPtr<EngineApp> engine_app;
 
 void SchedulePump(int64_t delay) {
   if (!initialized || stopped) return;
-  NSDate* date = [NSDate dateWithTimeIntervalSinceNow:std::max<int64_t>(delay, 0) / 1000.0];
+  // Match CEF's external-pump sample: delayed work needs an upper bound even
+  // when Chromium does not send another OnScheduleMessagePumpWork callback.
+  delay = std::clamp<int64_t>(delay,0,1000 / 30);
+  NSDate* date = [NSDate dateWithTimeIntervalSinceNow:delay / 1000.0];
   if (pump_timer && [[pump_timer fireDate] compare:date] != NSOrderedDescending) return;
-  [pump_timer invalidate];
-  pump_timer = [NSTimer timerWithTimeInterval:std::max<int64_t>(delay, 0) / 1000.0
+  CancelPump();
+  pump_timer = [[NSTimer timerWithTimeInterval:delay / 1000.0
                                     repeats:NO block:^(NSTimer*) {
-    pump_timer = nil;
+    CancelPump();
     if (!initialized || stopped) return;
     if (pumping) { SchedulePump(1); return; }
     pumping = true;
+    if (++pump_count <= 3) Trace("processing external message-pump work");
     CefDoMessageLoopWork();
     pumping = false;
-  }];
+    if (!pump_timer) SchedulePump(1000 / 30);
+  }] retain];
   [[NSRunLoop mainRunLoop] addTimer:pump_timer forMode:NSRunLoopCommonModes];
+  [[NSRunLoop mainRunLoop] addTimer:pump_timer forMode:NSEventTrackingRunLoopMode];
   [[NSRunLoop mainRunLoop] addTimer:pump_timer forMode:NSModalPanelRunLoopMode];
 }
 
@@ -128,6 +144,7 @@ class Client final : public CefClient, public CefLifeSpanHandler,
   CefRefPtr<CefDownloadHandler> GetDownloadHandler() override { return this; }
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
     if (!page_) return;
+    Trace("browser created");
     page_->browser = browser;
     page_->pending_popup = false;
     for (auto& entry : pages) entry.second->client->ForgetPopup(page_);
@@ -277,6 +294,7 @@ class ContextHandler final : public CefRequestContextHandler {
     // never create a browser, or initialize a replacement with the same key.
     // CEF gives callbacks fresh C++ wrappers; their pointer identity differs.
     if (stopped || context == contexts.end() || context->second.generation != generation_) return;
+    Trace("request context ready");
     context->second.ready = true;
     std::vector<Page*> waiting;
     for (auto& entry : pages)
@@ -304,6 +322,8 @@ bool EnsureDirectory(const std::string& path) {
 int Initialize(const char* package,const char* data,const char* main_bundle) {
   if (initialized) return 1;
   if (stopped) { last_error = "Restart Radius before using Chromium again."; return 0; }
+  diagnostics = [[[NSProcessInfo processInfo] arguments] containsObject:@"--smoke-test"] &&
+      [[[NSProcessInfo processInfo] environment] objectForKey:@"RADIUS_SMOKE_TEST_DATA"] != nil;
   if (![NSApp respondsToSelector:@selector(setHandlingSendEvent:)]) {
     last_error = "Radius application bootstrap is missing."; return 0;
   }
@@ -326,8 +346,7 @@ int Initialize(const char* package,const char* data,const char* main_bundle) {
   CefString(&settings.root_cache_path) = data_root + "/Profiles";
   CefString(&settings.log_file) = data_root + "/engine.log";
   settings.log_severity = LOGSEVERITY_DISABLE; // Never persist private page URLs in a diagnostic log.
-  if ([[[NSProcessInfo processInfo] arguments] containsObject:@"--smoke-test"] &&
-      [[[NSProcessInfo processInfo] environment] objectForKey:@"RADIUS_SMOKE_TEST_DATA"])
+  if (diagnostics)
     settings.log_severity = LOGSEVERITY_INFO; // Only isolated CI fixture browsing.
   std::string executable = std::string(main_bundle) + "/Contents/MacOS/Radius";
   char* argv[] = {executable.data()}; CefMainArgs args(1,argv);
@@ -336,6 +355,7 @@ int Initialize(const char* package,const char* data,const char* main_bundle) {
   if (!CefInitialize(args,settings,engine_app,nullptr)) {
     initialized = false; stopped = true; last_error = "CEF initialization failed; restart Radius before retrying."; return 0;
   }
+  Trace("CEF initialized");
   SchedulePump(0); return 1;
 }
 void* Create(const char* profile,const char* private_window) {
@@ -408,7 +428,7 @@ int Live() { return static_cast<int>(pages.size()); }
 int Shutdown() {
   if (!initialized) return 1;
   if (!pages.empty()) { last_error="Chromium pages are still closing."; return 0; }
-  stopped=true; [pump_timer invalidate]; pump_timer=nil;
+  stopped=true; CancelPump();
   contexts.clear(); CefShutdown(); engine_app=nullptr; initialized=false;
   // Never dlclose Chromium: runtime code may remain referenced by ObjC classes.
   return 1;

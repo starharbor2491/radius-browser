@@ -108,7 +108,7 @@ struct ResourcePanel: View {
                         VStack(alignment: .leading, spacing: 6) {
                             Text(metric.name).font(.caption).foregroundStyle(.secondary)
                             Text(metric.value).font(.system(size: 25, weight: .medium, design: .rounded)).monospacedDigit()
-                            if !metric.samples.isEmpty {
+                            if metric.samples.count > 1 {
                                 Sparkline(values: metric.samples).stroke(Color.accentColor, lineWidth: 2).frame(height: 52)
                                     .accessibilityLabel("Recent " + metric.name + " samples")
                             }

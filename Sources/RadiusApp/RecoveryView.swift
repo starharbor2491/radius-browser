@@ -24,7 +24,7 @@ struct RecoveryView: View {
     }
     private func recoveryAction(_ title: String, detail: String, button: String, action: @escaping () -> Void) -> some View {
         HStack(alignment: .top, spacing: 24) {
-            VStack(alignment: .leading, spacing: 6) { Text(title).font(.headline); Text(detail).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
+            VStack(alignment: .leading, spacing: 6) { Text(title).font(.headline); Text(detail).font(.callout).foregroundStyle(.primary).fixedSize(horizontal: false, vertical: true) }
             Spacer(); Button(button, action: action)
         }.padding(14).background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
     }

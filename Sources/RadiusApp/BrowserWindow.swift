@@ -347,7 +347,11 @@ struct BrowserWindow: View {
                       model.session.profileID == profileID, model.activeWebTab === source else { return }
                 readerTitle = descriptor.title; reader = text
             }
-            catch { app.notice = error.localizedDescription }
+            catch {
+                guard model.selectedTab.id == descriptor.id, model.selectedTab.url == descriptor.url,
+                      model.session.profileID == profileID, model.activeWebTab === source else { return }
+                app.notice = error.localizedDescription
+            }
         }
     }
 }

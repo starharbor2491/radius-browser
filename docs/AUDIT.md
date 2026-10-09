@@ -20,9 +20,9 @@ Repeated independent subagent reviews inspected the source, storage/import bound
 
 ## Evidence
 
-Portable validation passes 24 tests. Native CI must verify the 13 integration tests and the final app/worker packaging. Packaged screenshots establish native control rendering; reader/renderer assertions establish website behavior. AppKit bitmap capture does not always include separately composited web content; Chromium content PNG is checked separately.
+Independent portable validation passes 25 tests. Native CI must verify the 15 integration tests and the final app/worker packaging. Packaged screenshots establish native control rendering; reader/renderer assertions establish website behavior. AppKit bitmap capture does not always include separately composited web content; Chromium content PNG is checked separately.
 
-The last completed standard app run before the removable-worker/bundle-placement changes was [37954112344](https://github.com/starharbor2491/radius-browser/actions/runs/37954112344), source `f7fa5b593977eee8c1c9c111c9ef63269fde7caa`. It passed 20 portable tests, 10 native tests, universal build/signature verification, native screens, WebKit HTTP/split/reader/save/normal-quit checks. This earlier run does not certify the newer source.
+The standard app run [37957117357](https://github.com/starharbor2491/radius-browser/actions/runs/37957117357), source `edbac7821a2c11e54c14756625a6a6b67167c4fe`, passed 24 portable tests, 13 native tests (including real resource workers), universal build/signature verification, native screens, WebKit HTTP/split/reader/save/normal-quit checks. This earlier run does not certify the subsequent repair/subframe changes.
 
 The separate upstream CEF sample proof passed all four native ARM/Intel Chrome-style/Alloy renderer-and-quit probes in [37944960439](https://github.com/starharbor2491/radius-browser/actions/runs/37944960439). The actual Radius embedded-engine workflow is separate; sample success is not extension or Radius integration evidence.
 

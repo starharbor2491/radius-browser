@@ -8,6 +8,33 @@ import RadiusCore
 @Suite(.serialized)
 @MainActor
 struct BrowserIntegrationTests {
+    @Test func generatedSubframesLoadWithoutBecomingSavedTopLevelPages() async throws {
+        let (app, directory) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = BrowserModel(app: app, isPrivate: false)
+        let tab = try #require(browser.activeWebTab as? WebTab)
+        let embedded = Data("<script>parent.postMessage('data-loaded','*')</script>".utf8).base64EncodedString()
+        tab.webView.loadHTMLString("""
+            <html><title>Generated frames</title><body>
+            <script>window.loadedFrames = []; addEventListener('message', e => loadedFrames.push(e.data));</script>
+            <iframe srcdoc="<script>parent.postMessage('srcdoc-loaded','*')</script>"></iframe>
+            <iframe src="data:text/html;base64,\(embedded)"></iframe>
+            </body></html>
+            """, baseURL: URL(string: "https://fixture.invalid"))
+        try await waitUntil { tab.webView.title == "Generated frames" && !tab.webView.isLoading }
+        var frames: [String] = []
+        for _ in 0..<100 {
+            frames = try await tab.webView.evaluateJavaScript("window.loadedFrames") as? [String] ?? []
+            if frames.contains("srcdoc-loaded") && frames.contains("data-loaded") { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(frames.contains("srcdoc-loaded"))
+        #expect(frames.contains("data-loaded"))
+        #expect(browser.selectedTab.url?.scheme == "https")
+        #expect(!app.library.history.contains { ["data", "about"].contains($0.url.scheme ?? "") })
+        browser.closeWindow()
+        #expect(await app.flush())
+    }
     @Test func implicitNewTabsUseTheProfileDefaultEngine() async throws {
         let (app, directory) = try await fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
