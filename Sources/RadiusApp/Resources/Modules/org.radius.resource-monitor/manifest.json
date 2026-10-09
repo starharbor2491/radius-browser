@@ -1,11 +1,12 @@
 {
   "id": "org.radius.resource-monitor",
   "name": "Resource Monitor",
-  "version": 1,
-  "summary": "Live system CPU, memory, and Radius memory. Sampling stops when the panel closes.",
+  "version": 2,
+  "summary": "Live system CPU and memory from an independently removable worker. Sampling stops when the panel closes.",
   "publisher": "Radius",
   "source": "https://github.com/starharbor2491/radius-browser",
   "capability": "resourceMonitor",
   "dependencies": [],
-  "defaultInstalled": true
+  "defaultInstalled": true,
+  "runtime": "nativeResourceWorker"
 }

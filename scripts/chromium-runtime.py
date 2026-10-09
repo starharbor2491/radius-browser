@@ -10,6 +10,7 @@ import hashlib
 import importlib.util
 import json
 import platform
+import plistlib
 import shutil
 import subprocess
 import tarfile
@@ -72,20 +73,23 @@ def build(work, arch):
             shutil.copy2(notice, legal / notice.name)
     for name in ("LICENSE", "COPYING.MPL"):
         shutil.copy2(ROOT / name, legal / ("Radius-" + name))
-    # Sign leaf code before containing helpers; do not alter upstream framework signing.
+    # A proper nested code bundle can be sealed by the containing Radius app.
+    (package / "Contents/Info.plist").write_bytes(plistlib.dumps({
+        "CFBundleIdentifier": "org.radius.chromium", "CFBundlePackageType": "BNDL",
+        "CFBundleExecutable": "RadiusChromiumBridge.dylib", "CFBundleName": "Radius Chromium",
+        "CFBundleVersion": "1", "CFBundleShortVersionString": proof.VERSION,
+    }))
+    # Sign nested code before its containers, using local ad-hoc identities.
     proof.checked(["codesign", "--force", "--sign", "-", binaries / "RadiusChromiumBridge.dylib"])
     for helper in frameworks.glob("RadiusChromium Helper*.app"):
         proof.checked(["codesign", "--force", "--sign", "-", helper])
         proof.checked(["codesign", "--verify", "--strict", helper])
+    proof.checked(["codesign", "--force", "--sign", "-", packaged_framework])
     proof.checked(["lipo", binaries / "RadiusChromiumBridge.dylib", "-verify_arch", arch])
-    files = {}
-    for path in sorted(package.rglob("*")):
-        if path.is_symlink() or not path.is_file():
-            continue
-        with path.open("rb") as content:
-            files[str(path.relative_to(package))] = hashlib.file_digest(content, "sha256").hexdigest()
-    manifest = {"format": 1, "abi": 1, "architecture": arch, "cefVersion": proof.VERSION, "files": files}
-    (package / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    manifest = {"format": 2, "abi": 1, "architecture": arch, "cefVersion": proof.VERSION}
+    (package / "Contents/Resources/manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    proof.checked(["codesign", "--force", "--sign", "-", package])
+    proof.checked(["codesign", "--verify", "--deep", "--strict", package])
     source_files = [ROOT / "ChromiumRuntime/RadiusChromiumBridge.mm", ROOT / "ChromiumRuntime/Helper.cc",
                     ROOT / "ChromiumRuntime/CMakeLists.txt", ROOT / "ChromiumRuntime/Helper-Info.plist.in",
                     ROOT / "Sources/RadiusEngineABI/include/RadiusEngineABI.h", Path(__file__).resolve()]
@@ -104,9 +108,42 @@ def build(work, arch):
     print("Development package:", package, flush=True)
 
 
+def embed(package, app):
+    """Embed validated native code before the containing application is signed."""
+    proof.require_mac()
+    package = package.resolve(strict=True)
+    manifest_path = package / "Contents/Resources/manifest.json"
+    if manifest_path.stat().st_size > 4096 or not manifest_path.is_file():
+        raise ValueError("Invalid Chromium package manifest")
+    manifest = json.loads(manifest_path.read_text())
+    if (manifest.get("format") != 2 or manifest.get("abi") != 1 or
+            manifest.get("cefVersion") != proof.VERSION or manifest.get("architecture") not in proof.ARCHIVES):
+        raise ValueError("Incompatible Chromium development package")
+    for path in package.rglob("*"):
+        if not path.resolve(strict=True).is_relative_to(package):
+            raise ValueError("A Chromium package link escapes its bundle")
+    proof.checked(["codesign", "--verify", "--deep", "--strict", package])
+    destination = app.resolve(strict=True) / "Contents/Frameworks/Chromium.radiusengine"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        shutil.rmtree(destination)
+    proof.checked(["ditto", package, destination])
+    proof.checked(["codesign", "--verify", "--deep", "--strict", destination])
+    print("Embedded Chromium for " + manifest["architecture"] + "; other architectures use WebKit.", flush=True)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--arch", choices=proof.ARCHIVES, default=platform.machine())
-    parser.add_argument("--work-dir", type=Path, required=True)
+    parser.add_argument("--work-dir", type=Path)
+    parser.add_argument("--embed-package", type=Path)
+    parser.add_argument("--app", type=Path)
     args = parser.parse_args()
-    build(args.work_dir.resolve(), args.arch)
+    if args.embed_package:
+        if not args.app:
+            parser.error("--embed-package requires --app")
+        embed(args.embed_package, args.app)
+    else:
+        if not args.work_dir:
+            parser.error("building requires --work-dir")
+        build(args.work_dir.resolve(), args.arch)

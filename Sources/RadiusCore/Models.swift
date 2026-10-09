@@ -155,9 +155,9 @@ public struct WindowSession: Identifiable, Codable, Equatable, Sendable {
             if let index = tabs.firstIndex(where: { $0.id == ancestor }) { tabs[index].collapsed = false }
         }
     }
-    public mutating func enableSplit() {
+    public mutating func enableSplit(defaultEngine: BrowserEngineID = .webkit) {
         guard split == nil else { return }
-        let other = tabs.first(where: { $0.id != selectedTabID }) ?? BrowserTab()
+        let other = tabs.first(where: { $0.id != selectedTabID }) ?? BrowserTab(engineID: defaultEngine)
         if !tabs.contains(where: { $0.id == other.id }) { tabs.append(other) }
         split = TabSplit(first: selectedTabID, second: other.id)
     }

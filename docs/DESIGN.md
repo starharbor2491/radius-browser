@@ -19,4 +19,8 @@ CARP:
 
 Material and Liquid Glass presets adapt color and native material treatment while preserving the same information hierarchy. They do not claim to implement every part of Google's or Apple's design systems. Liquid Glass uses native translucent materials supported on macOS 14 rather than requiring a newer system API.
 
-The implementation follows the [Karpathy-inspired guidelines](https://github.com/multica-ai/andrej-karpathy-skills): explicit scope, narrow modules, no unused engine abstraction, and behavior-based verification. The exact consulted skill is preserved in KARPATHY_GUIDELINES.md with its upstream MIT provenance.
+Tree tabs use disclosure controls and indentation. Split panes use a visible active-pane indicator; keyboard focus, the address, and page actions follow that pane. Appearance previews do not create browsing tabs, and applying colors preserves a window's choice to return to one pane. Engine changes warn before a normal reload and identify the active engine in the status bar.
+
+Resource providers share a native metric presentation. Replacement uses an explicit action, stops the old worker before enabling the new package, and leaves unrelated saved data intact. Package descriptions distinguish an executable worker from a host capability descriptor and describe actual access without implying an OS sandbox.
+
+The implementation follows the [Karpathy-inspired guidelines](https://github.com/multica-ai/andrej-karpathy-skills): explicit scope, narrow modules, minimal interfaces used by both engines, and behavior-based verification. The exact consulted skill is preserved in KARPATHY_GUIDELINES.md with its upstream MIT provenance.

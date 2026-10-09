@@ -16,5 +16,9 @@ for path in sorted(root.glob("*/manifest.json")):
     assert manifest["version"] > 0 and manifest["publisher"] == "Radius", path
     assert manifest["source"].startswith("https://github.com/starharbor2491/radius-browser"), path
     assert not manifest["dependencies"], path
-assert len(found) == 5, f"Expected five official packages, found {len(found)}"
-print("Five official package manifests validated.")
+assert len(found) == 6, f"Expected six official packages, found {len(found)}"
+workers = [json.loads(path.read_text()) for path in root.glob("*/manifest.json") if json.loads(path.read_text()).get("runtime")]
+assert {item["id"] for item in workers} == {"org.radius.resource-monitor", "org.radius.memory-monitor"}
+assert all(item["runtime"] == "nativeResourceWorker" and item["capability"] == "resourceMonitor" for item in workers)
+assert sum(item["defaultInstalled"] for item in workers) == 1
+print("Six official package manifests validated (two native workers, four descriptors).")

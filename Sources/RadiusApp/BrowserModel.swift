@@ -80,13 +80,13 @@ final class BrowserModel: ObservableObject {
         address = url.absoluteString
         tab.load(url)
     }
-    func newTab(url: URL? = nil, parentID: UUID? = nil) {
+    func newTab(url: URL? = nil, parentID: UUID? = nil, engine: BrowserEngineID? = nil) {
         if let url, !AddressResolver.isWebURL(url) { app.notice = "This page cannot be reopened in a separate browsing context."; return }
         if let parentID, !session.tabs.contains(where: { $0.id == parentID }) || session.ancestors(of: parentID).count >= 8 {
             app.notice = "Tab trees support up to eight levels. Open this page as a top-level tab instead."; return
         }
         guard session.tabs.count < 200 else { app.notice = "This window has 200 tabs. Close a tab or open another window."; return }
-        let tab = BrowserTab(url: url, engineID: profile.engineID ?? .webkit)
+        let tab = BrowserTab(url: url, engineID: engine ?? profile.engineID ?? .webkit)
         session.tabs.append(tab)
         if let parentID { _ = session.setParent(tab.id, to: parentID) }
         selectTab(tab.id)
@@ -109,7 +109,7 @@ final class BrowserModel: ObservableObject {
         let otherPane = session.split.map { $0.first == id ? $0.second : $0.first }
         if session.split?.contains(id) == true { session.split = nil; session.splitSuppressed = true }
         session.tabs.remove(at: index)
-        if session.tabs.isEmpty { session.tabs = [BrowserTab()] }
+        if session.tabs.isEmpty { session.tabs = [BrowserTab(engineID: profile.engineID ?? .webkit)] }
         if session.selectedTabID == id { selectTab(otherPane ?? session.tabs[min(index, session.tabs.count - 1)].id) }
     }
     func reopenClosedTab() {
@@ -123,14 +123,15 @@ final class BrowserModel: ObservableObject {
     func moveTab(_ id: UUID, by offset: Int) {
         guard let index = session.tabs.firstIndex(where: { $0.id == id }) else { return }
         if app.configuration.layout.treeTabs == true {
-            let siblings = session.tabs.filter { $0.parentID == session.tabs[index].parentID }
+            let siblings = session.tabs.filter { $0.parentID == session.tabs[index].parentID && $0.pinned == session.tabs[index].pinned }
             guard let sibling = siblings.firstIndex(where: { $0.id == id }), siblings.indices.contains(sibling + offset),
                   let target = session.tabs.firstIndex(where: { $0.id == siblings[sibling + offset].id }) else { return }
             session.tabs.swapAt(index, target)
-        } else if session.tabs.indices.contains(index + offset) { session.tabs.swapAt(index, index + offset) }
+        } else if session.tabs.indices.contains(index + offset), session.tabs[index].pinned == session.tabs[index + offset].pinned { session.tabs.swapAt(index, index + offset) }
     }
     @discardableResult func moveTab(_ id: UUID, before target: UUID) -> Bool {
         guard id != target, let from = session.tabs.firstIndex(where: { $0.id == id }), let to = session.tabs.firstIndex(where: { $0.id == target }) else { return false }
+        guard session.tabs[from].pinned == session.tabs[to].pinned else { return false }
         if app.configuration.layout.treeTabs == true && session.tabs[from].parentID != session.tabs[to].parentID {
             guard session.setParent(id, to: session.tabs[to].parentID) else { return false }
         }
@@ -148,7 +149,7 @@ final class BrowserModel: ObservableObject {
         guard app.previewConfiguration == nil else { return }
         if app.configuration.layout.split != nil {
             if force { session.splitSuppressed = nil }
-            if session.splitSuppressed != true { session.enableSplit() }
+            if session.splitSuppressed != true { session.enableSplit(defaultEngine: profile.engineID ?? .webkit) }
         } else { session.split = nil; session.splitSuppressed = nil }
     }
     func beginSplit(_ axis: SplitAxis) {
@@ -201,7 +202,7 @@ final class BrowserModel: ObservableObject {
             app.notice = "Generated pages cannot be reopened in another engine. Open the original website instead."; return
         }
         if engine == .chromium && !ChromiumRuntime.shared.isInstalled(in: app.dataDirectory) {
-            app.notice = "Install a Chromium runtime in Settings → Browsing engines first."; return
+            app.notice = "Chromium requires the optional Radius development build with a runtime for this Mac's architecture. See Settings → Browsing engines."; return
         }
         if descriptor.url != nil {
             let alert = NSAlert(); alert.messageText = "Reopen this page in \(engine.label)?"

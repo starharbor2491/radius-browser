@@ -9,6 +9,7 @@ on:
       - 'Sources/RadiusApp/BrowserModel.swift'
       - 'Sources/RadiusApp/AppSmokeTest.swift'
       - 'scripts/chromium-runtime.py'
+      - 'scripts/build-app.sh'
       - '.github/workflows/chromium-runtime.yml'
 permissions:
   contents: read
@@ -34,14 +35,18 @@ jobs:
       - name: Test native shell
         run: ./scripts/test.sh
       - name: Build universal Radius application
+        env:
+          RADIUS_CHROMIUM_PACKAGE: ${{ runner.temp }}/radius-cef-runtime/Chromium-${{ matrix.arch }}.radiusengine
         run: ./scripts/build-app.sh
       - name: Verify installed Chromium renders inside Radius and quits normally
-        timeout-minutes: 5
+        timeout-minutes: 6
         env:
           RADIUS_CHROMIUM_PACKAGE: ${{ runner.temp }}/radius-cef-runtime/Chromium-${{ matrix.arch }}.radiusengine
         run: ./scripts/smoke-app.sh
       - name: Archive development runtime
-        run: ditto -c -k --sequesterRsrc --keepParent "$RUNNER_TEMP/radius-cef-runtime/Chromium-${{ matrix.arch }}.radiusengine" "dist/Chromium-${{ matrix.arch }}.radiusengine.zip"
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent "$RUNNER_TEMP/radius-cef-runtime/Chromium-${{ matrix.arch }}.radiusengine" "dist/Chromium-${{ matrix.arch }}.radiusengine.zip"
+          ditto -c -k --sequesterRsrc --keepParent dist/Radius.app "dist/Radius-Chromium-${{ matrix.arch }}.zip"
       - name: Record native runtime validation
         run: |
           python3 - <<'PY'
@@ -57,7 +62,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: Radius-Chromium-${{ matrix.arch }}-development-runtime
-          path: dist/Chromium-*.radiusengine.zip
+          path: |
+            dist/Chromium-*.radiusengine.zip
+            dist/Radius-Chromium-*.zip
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()

@@ -8,6 +8,29 @@ import RadiusCore
 @Suite(.serialized)
 @MainActor
 struct BrowserIntegrationTests {
+    @Test func implicitNewTabsUseTheProfileDefaultEngine() async throws {
+        let (app, directory) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        app.library.profiles[0].engineID = .chromium
+        let browser = BrowserModel(app: app, isPrivate: true)
+        #expect(browser.selectedTab.engineID == .chromium)
+        browser.closeTab(browser.session.selectedTabID)
+        #expect(browser.selectedTab.engineID == .chromium)
+        browser.beginSplit(.sideBySide)
+        #expect(browser.session.tabs.count == 2)
+        #expect(browser.session.tabs.allSatisfy { $0.engineID == .chromium })
+        browser.newTab(engine: .webkit)
+        let source = browser.selectedTab
+        browser.newTab(url: source.url, engine: source.engineID)
+        #expect(browser.selectedTab.engineID == .webkit)
+        let pinned = browser.session.tabs[0].id
+        browser.pinTab(pinned)
+        let unpinned = browser.session.selectedTabID
+        #expect(!browser.moveTab(unpinned, before: pinned))
+        browser.moveTab(pinned, by: 1)
+        #expect(browser.session.tabs[0].id == pinned)
+        browser.closeWindow(); #expect(await app.flush())
+    }
     @Test func splitPreviewAndAppearanceChangesPreserveBrowsingState() async throws {
         let (app, directory) = try await fixture()
         defer { try? FileManager.default.removeItem(at: directory) }

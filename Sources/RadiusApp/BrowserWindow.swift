@@ -42,6 +42,7 @@ struct BrowserWindow: View {
     @State private var findVisible = false
     @State private var findText = ""
     @State private var reader: String?
+    @State private var readerTitle = ""
     @State private var extracting = false
     @Environment(\.openWindow) private var openWindow
     @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
@@ -97,7 +98,7 @@ struct BrowserWindow: View {
         }
         .sheet(isPresented: Binding(get: { reader != nil }, set: { if !$0 { reader = nil } })) {
             VStack(alignment: .leading, spacing: 16) {
-                HStack { Text(model.selectedTab.title).font(.title2); Spacer(); Button("Done") { reader = nil }.keyboardShortcut(.defaultAction) }
+                HStack { Text(readerTitle).font(.title2); Spacer(); Button("Done") { reader = nil }.keyboardShortcut(.defaultAction) }
                 ScrollView { Text(reader ?? "").font(.system(size: 18, design: .serif)).lineSpacing(7).textSelection(.enabled).frame(maxWidth: 660, alignment: .leading).padding(24).frame(maxWidth: .infinity) }
             }.padding(24).frame(width: 760, height: 640).background(Color(nsColor: .windowBackgroundColor))
         }
@@ -199,7 +200,7 @@ struct BrowserWindow: View {
             Button(tab.pinned ? "Unpin tab" : "Pin tab") { model.pinTab(tab.id) }
             Button("Move earlier") { model.moveTab(tab.id, by: -1) }
             Button("Move later") { model.moveTab(tab.id, by: 1) }
-            Button("Duplicate tab") { model.newTab(url: tab.url) }
+            Button("Duplicate tab") { model.newTab(url: tab.url, engine: tab.engineID ?? .webkit) }
             Menu("Reopen with another engine") {
                 ForEach(BrowserEngineID.allCases, id: \.self) { engine in
                     Button(engine.label) { model.reopenTab(tab.id, with: engine) }.disabled(engine == (tab.engineID ?? .webkit))
@@ -248,9 +249,10 @@ struct BrowserWindow: View {
                 if axis == .sideBySide {
                     HSplitView { splitPane(pair.first); splitPane(pair.second) }
                 } else { VSplitView { splitPane(pair.first); splitPane(pair.second) } }
-            } else if model.hasPage {
-                BrowserPage(tab: model.activeWebTab, onUseWebKit: { model.reopenTab(model.session.selectedTabID, with: .webkit) }).id(ObjectIdentifier(model.activeWebTab))
-            } else { startPage }
+            } else {
+                BrowserTabContent(tab: model.activeWebTab, hasPage: model.hasPage, onUseWebKit: { model.reopenTab(model.session.selectedTabID, with: .webkit) }) { startPage }
+                    .id(ObjectIdentifier(model.activeWebTab))
+            }
         }
         .overlay(alignment: .topTrailing) {
             if model.focusMode { Button("Exit focus  esc") { model.focusMode = false }.padding(10).background(.regularMaterial, in: Capsule()).padding(12) }
@@ -270,14 +272,12 @@ struct BrowserWindow: View {
                 }.buttonStyle(.plain).accessibilityLabel("Select pane: \(descriptor?.title ?? "New tab")")
                 IconButton(title: "Return to one pane", icon: "rectangle") { model.selectTab(id); model.endSplit() }
             }.font(.caption).padding(.horizontal, 12).padding(.vertical, 8).background(.bar)
-            if descriptor?.url != nil {
-                BrowserPage(tab: model.webTab(id), onUseWebKit: { model.reopenTab(id, with: .webkit) }).id(ObjectIdentifier(model.webTab(id)))
-            } else {
+            BrowserTabContent(tab: model.webTab(id), hasPage: descriptor?.url != nil, onUseWebKit: { model.reopenTab(id, with: .webkit) }) {
                 VStack(spacing: 14) {
                     Text("New tab").font(.title2)
                     Button("Enter a website…") { model.selectTab(id); addressFocused = true }.buttonStyle(.borderedProminent)
                 }.frame(maxWidth: .infinity, maxHeight: .infinity).background(Color(nsColor: .textBackgroundColor))
-            }
+            }.id(ObjectIdentifier(model.webTab(id)))
         }.frame(minWidth: 180, minHeight: 120).frame(maxHeight: .infinity)
             .accessibilityElement(children: .contain).accessibilityLabel(selected ? "Active browsing pane" : "Browsing pane")
     }
@@ -337,12 +337,28 @@ struct BrowserWindow: View {
         }.font(.caption).foregroundStyle(.secondary).padding(.horizontal, 14).padding(.vertical, 6).background(.bar)
     }
     private func openReader() {
+        let source = model.activeWebTab, descriptor = model.selectedTab, profileID = model.session.profileID
         extracting = true
         Task {
-            do { reader = try await model.activeWebTab.readerText() }
+            defer { extracting = false }
+            do {
+                let text = try await source.readerText()
+                guard model.selectedTab.id == descriptor.id, model.selectedTab.url == descriptor.url,
+                      model.session.profileID == profileID, model.activeWebTab === source else { return }
+                readerTitle = descriptor.title; reader = text
+            }
             catch { app.notice = error.localizedDescription }
-            extracting = false
         }
+    }
+}
+struct BrowserTabContent<Placeholder: View>: View {
+    @ObservedObject var tab: BrowserEngineTab
+    var hasPage: Bool
+    var onUseWebKit: () -> Void
+    @ViewBuilder var placeholder: () -> Placeholder
+    var body: some View {
+        if hasPage || tab.errorMessage != nil { BrowserPage(tab: tab, onUseWebKit: onUseWebKit) }
+        else { placeholder() }
     }
 }
 struct BrowserPage: View {

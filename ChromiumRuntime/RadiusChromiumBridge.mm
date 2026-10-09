@@ -14,6 +14,7 @@
 #include "include/cef_client.h"
 #include "include/cef_parser.h"
 #include "include/cef_request_context.h"
+#include "include/cef_request_context_handler.h"
 #include "include/cef_devtools_message_observer.h"
 #include "include/wrapper/cef_library_loader.h"
 
@@ -55,7 +56,7 @@ void SchedulePump(int64_t delay) {
   [[NSRunLoop mainRunLoop] addTimer:pump_timer forMode:NSModalPanelRunLoopMode];
 }
 
-struct Context { CefRefPtr<CefRequestContext> value; size_t pages = 0; };
+struct Context { CefRefPtr<CefRequestContext> value; size_t pages = 0; bool ready = false; };
 std::map<std::string, Context> contexts;
 struct Page;
 class Client;
@@ -72,6 +73,8 @@ struct Page {
   bool closing = false;
   bool navigated = false;
   bool popups = false;
+  bool awaiting_context = true;
+  bool pending_popup = false;
   void* callback_context = nullptr;
   radius_cef_event_callback event = nullptr;
   radius_cef_popup_callback popup = nullptr;
@@ -107,11 +110,7 @@ bool Allowed(const std::string& url) {
   return [scheme isEqualToString:@"blob"] || [value isEqualToString:@"about:blank"] ||
          [value hasPrefix:@"about:blank#"];
 }
-void Destroy(Page* page) {
-  auto context = contexts.find(page->context_key);
-  if (context != contexts.end() && --context->second.pages == 0) contexts.erase(context);
-  pages.erase(page);
-}
+void Destroy(Page* page);
 Page* Allocate(const std::string& key);
 
 class Client final : public CefClient, public CefLifeSpanHandler,
@@ -120,6 +119,7 @@ class Client final : public CefClient, public CefLifeSpanHandler,
                      public CefDevToolsMessageObserver {
  public:
   explicit Client(Page* page) : page_(page) {}
+  void DetachPage() { page_ = nullptr; }
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
   CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
   CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
@@ -128,6 +128,7 @@ class Client final : public CefClient, public CefLifeSpanHandler,
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
     if (!page_) return;
     page_->browser = browser;
+    page_->pending_popup = false;
     for (auto& entry : pages) entry.second->client->ForgetPopup(page_);
     NSView* child = (NSView*)browser->GetHost()->GetWindowHandle();
     [child setFrame:[page_->view bounds]];
@@ -166,6 +167,8 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     const std::string url = target_url.ToString();
     if (!url.empty() && !Allowed(url)) return true;
     Page* child = Allocate(page_->context_key);
+    child->awaiting_context = false;
+    child->pending_popup = true;
     child->navigated = true;
     const bool adopted = page_->popup(page_->callback_context, child, url.c_str()) != 0;
     if (!adopted) { Destroy(child); return true; }
@@ -238,11 +241,61 @@ class Client final : public CefClient, public CefLifeSpanHandler,
 };
 Page::Page() { [view setWantsLayer:YES]; }
 Page::~Page() { [view release]; }
+void Destroy(Page* page) {
+  page->client->DetachPage();
+  auto context = contexts.find(page->context_key);
+  if (context != contexts.end() && --context->second.pages == 0) contexts.erase(context);
+  pages.erase(page);
+}
 Page* Allocate(const std::string& key) {
   auto value = std::make_unique<Page>(); Page* page = value.get();
   page->context_key = key; page->client = new Client(page);
   contexts.at(key).pages++;
   pages.emplace(page,std::move(value)); return page;
+}
+
+void CreateReadyPage(Page* page) {
+  page->awaiting_context = false;
+  CefWindowInfo window; window.SetAsChild(page->view,CefRect(0,0,800,600));
+  window.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
+  CefBrowserSettings settings;
+  // A synchronous result is essential: CreateBrowser queues an internal task
+  // whose later failure has no client callback and cannot be cancelled.
+  if (!CefBrowserHost::CreateBrowserSync(window,page->client,"about:blank",settings,nullptr,
+                                       contexts.at(page->context_key).value)) {
+    last_error = "Chromium could not create a browser view. Reopen this tab to retry.";
+    Message(page,RADIUS_CEF_ERROR,last_error);
+  }
+}
+class ContextHandler final : public CefRequestContextHandler {
+ public:
+  explicit ContextHandler(std::string key) : key_(std::move(key)) {}
+  void OnRequestContextInitialized(CefRefPtr<CefRequestContext> value) override {
+    const auto context = contexts.find(key_);
+    // Closing all waiting tabs removes this context. A stale completion must
+    // never create a browser, or initialize a replacement with the same key.
+    if (stopped || context == contexts.end() || context->second.value.get() != value.get()) return;
+    context->second.ready = true;
+    std::vector<Page*> waiting;
+    for (auto& entry : pages)
+      if (entry.second->context_key == key_ && entry.second->awaiting_context) waiting.push_back(entry.first);
+    for (Page* page : waiting) if (pages.count(page) && !page->closing) CreateReadyPage(page);
+  }
+ private:
+  std::string key_;
+  IMPLEMENT_REFCOUNTING(ContextHandler);
+};
+
+bool EnsureDirectory(const std::string& path) {
+  NSString* directory = [NSString stringWithUTF8String:path.c_str()];
+  NSError* error = nil;
+  if (![[NSFileManager defaultManager] createDirectoryAtPath:directory withIntermediateDirectories:YES
+      attributes:@{NSFilePosixPermissions:@0700} error:&error] ||
+      ![[NSFileManager defaultManager] isWritableFileAtPath:directory]) {
+    last_error = "Chromium could not create a writable website-data directory.";
+    return false;
+  }
+  return true;
 }
 
 int Initialize(const char* package,const char* data,const char* main_bundle) {
@@ -257,6 +310,7 @@ int Initialize(const char* package,const char* data,const char* main_bundle) {
     last_error = "Could not load the packaged Chromium framework."; return 0;
   }
   data_root = std::string(data) + "/Chromium";
+  if (!EnsureDirectory(data_root + "/Profiles")) return 0;
   CefSettings settings;
   settings.external_message_pump = true;
   settings.command_line_args_disabled = true;
@@ -264,7 +318,9 @@ int Initialize(const char* package,const char* data,const char* main_bundle) {
   CefString(&settings.resources_dir_path) = framework + "/Resources";
   CefString(&settings.browser_subprocess_path) = std::string(package)+"/Contents/Frameworks/RadiusChromium Helper.app/Contents/MacOS/RadiusChromium Helper";
   CefString(&settings.main_bundle_path) = main_bundle;
-  CefString(&settings.root_cache_path) = data_root;
+  // ChromeBrowserContext requires each persistent profile to be an immediate
+  // child of the user-data root; a deeper path silently falls back to OTR.
+  CefString(&settings.root_cache_path) = data_root + "/Profiles";
   CefString(&settings.log_file) = data_root + "/engine.log";
   settings.log_severity = LOGSEVERITY_DISABLE; // Never persist private page URLs in a diagnostic log.
   if ([[[NSProcessInfo processInfo] arguments] containsObject:@"--smoke-test"] &&
@@ -285,17 +341,19 @@ void* Create(const char* profile,const char* private_window) {
   const std::string key = ephemeral ? std::string("private:")+private_window+":"+profile : std::string("profile:")+profile;
   if (!contexts.count(key)) {
     CefRequestContextSettings settings;
-    if (!ephemeral) CefString(&settings.cache_path) = data_root + "/Profiles/" + profile;
-    auto context = CefRequestContext::CreateContext(settings,nullptr);
+    if (!ephemeral) {
+      const std::string path = data_root + "/Profiles/" + profile;
+      if (!EnsureDirectory(path)) return nullptr;
+      CefString(&settings.cache_path) = path;
+    }
+    auto context = CefRequestContext::CreateContext(settings,new ContextHandler(key));
     if (!context) { last_error="Chromium could not create an isolated website context."; return nullptr; }
     contexts.emplace(key,Context{context,0});
   }
   Page* page = Allocate(key);
-  CefWindowInfo window; window.SetAsChild(page->view,CefRect(0,0,800,600));
-  window.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
-  CefBrowserSettings settings;
-  if (!CefBrowserHost::CreateBrowser(window,page->client,"about:blank",settings,nullptr,contexts.at(key).value)) {
-    Destroy(page); last_error="Chromium could not create a browser view."; return nullptr;
+  if (contexts.at(key).ready) {
+    CreateReadyPage(page);
+    if (!page->browser) { Destroy(page); return nullptr; }
   }
   return page;
 }
@@ -340,6 +398,7 @@ void Close(void* opaque) {
   auto page=static_cast<Page*>(opaque); if (!pages.count(page)) return;
   page->event=nullptr; page->popup=nullptr; page->callback_context=nullptr; page->closing=true;
   if (page->browser) page->browser->GetHost()->CloseBrowser(true);
+  else if (!page->pending_popup) Destroy(page);
 }
 int Live() { return static_cast<int>(pages.size()); }
 int Shutdown() {

@@ -1,85 +1,134 @@
 // SPDX-License-Identifier: MPL-2.0
 import Darwin
 import SwiftUI
+import RadiusCore
 
+/// Only curated, byte-verified first-party executables reach start(). Native workers have
+/// normal same-user OS access; the display protocol is not an OS sandbox or permission grant.
 @MainActor
-final class ResourceSampler: ObservableObject {
-    @Published var cpu: Double?
-    @Published var memoryUsed: UInt64 = 0
-    @Published var residentMemory: UInt64 = 0
-    @Published var samples: [Double] = []
-    @Published var failure: String?
-    let totalMemory = ProcessInfo.processInfo.physicalMemory
-    private var previousTicks: [UInt64]?
-    func run() async {
-        previousTicks = nil
-        while !Task.isCancelled {
-            sample()
-            do { try await Task.sleep(for: .seconds(2)) } catch { break }
+final class ResourceWorker: ObservableObject {
+    @Published private(set) var frame: ResourceFrame?
+    @Published private(set) var failure: String?
+    private(set) var process: Process?
+    private(set) var moduleID: String?
+    private var input: Pipe?
+    private var output: Pipe?
+    private var buffer = Data()
+    private var generation = UUID()
+    private var watchdog: Task<Void, Never>?
+    private static var workers: [WeakResourceWorker] = []
+    deinit {
+        watchdog?.cancel()
+        try? input?.fileHandleForWriting.close()
+        if let process, process.isRunning { process.terminate() }
+    }
+
+    func start(executable: URL, moduleID: String) throws {
+        stop(); frame = nil; failure = nil
+        let process = Process(), input = Pipe(), output = Pipe()
+        let generation = UUID(); self.generation = generation
+        process.executableURL = executable
+        process.currentDirectoryURL = executable.deletingLastPathComponent()
+        process.environment = ["PATH": "/usr/bin:/bin"]
+        process.standardInput = input; process.standardOutput = output; process.standardError = FileHandle.nullDevice
+        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            Task { @MainActor in self?.receive(data, generation: generation) }
+        }
+        process.terminationHandler = { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.generation == generation else { return }
+                self.failure = "The resource provider stopped. Close and reopen the panel to retry."
+                self.stop()
+            }
+        }
+        self.process = process; self.input = input; self.output = output; self.moduleID = moduleID
+        do { try process.run() } catch { stop(); throw error }
+        Self.workers.removeAll { $0.value == nil || $0.value === self }
+        Self.workers.append(WeakResourceWorker(self))
+        resetWatchdog()
+    }
+    func showFailure(_ error: any Error) { stop(); failure = error.localizedDescription }
+    private func receive(_ data: Data, generation: UUID) {
+        guard self.generation == generation else { return }
+        guard !data.isEmpty else { return }
+        guard buffer.count + data.count <= 64 * 1024 else { fail("The resource provider exceeded its output limit."); return }
+        buffer.append(data)
+        while let end = buffer.firstIndex(of: 0x0a) {
+            let line = Data(buffer[..<end]); buffer.removeSubrange(...end)
+            do { frame = try ResourceFrame.decode(line); resetWatchdog() }
+            catch { fail(error.localizedDescription); return }
         }
     }
-    private func sample() {
-        let host = mach_host_self()
-        defer { mach_port_deallocate(mach_task_self_, host) }
-        var cpuInfo = host_cpu_load_info_data_t()
-        var cpuCount = mach_msg_type_number_t(MemoryLayout<host_cpu_load_info_data_t>.size / MemoryLayout<integer_t>.size)
-        let cpuResult = withUnsafeMutablePointer(to: &cpuInfo) { pointer in
-            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(cpuCount)) { host_statistics(host, HOST_CPU_LOAD_INFO, $0, &cpuCount) }
+    private func fail(_ message: String) { failure = message; stop() }
+    private func resetWatchdog() {
+        watchdog?.cancel()
+        watchdog = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(8)) } catch { return }
+            self?.fail("The resource provider stopped responding. Close and reopen the panel to retry.")
         }
-        if cpuResult == KERN_SUCCESS {
-            let ticks = [UInt64(cpuInfo.cpu_ticks.0), UInt64(cpuInfo.cpu_ticks.1), UInt64(cpuInfo.cpu_ticks.2), UInt64(cpuInfo.cpu_ticks.3)]
-            if let previousTicks {
-                // Mach counters are 32-bit and may wrap on long-running systems.
-                let differences = zip(ticks, previousTicks).map { Double(UInt32(truncatingIfNeeded: $0.0) &- UInt32(truncatingIfNeeded: $0.1)) }
-                let total = differences.reduce(0, +)
-                let value = total > 0 ? (total - differences[2]) / total * 100 : 0
-                cpu = value; samples.append(value); if samples.count > 30 { samples.removeFirst() }
-            }
-            previousTicks = ticks
-        } else { failure = "CPU statistics are unavailable." }
-        var vm = vm_statistics64_data_t()
-        var vmCount = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size)
-        let vmResult = withUnsafeMutablePointer(to: &vm) { pointer in
-            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(vmCount)) { host_statistics64(host, HOST_VM_INFO64, $0, &vmCount) }
+    }
+    /// Stop and reap before the caller removes/replaces the installed package. Normal workers
+    /// exit immediately; a separate dispatch timer bounds a stuck worker's shutdown to 250 ms.
+    func stop() {
+        generation = UUID(); watchdog?.cancel(); watchdog = nil
+        output?.fileHandleForReading.readabilityHandler = nil
+        process?.terminationHandler = nil
+        try? input?.fileHandleForWriting.close()
+        if let process, process.isRunning {
+            process.terminate()
+            let deadline = DispatchWorkItem { if process.isRunning { kill(process.processIdentifier, SIGKILL) } }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.25, execute: deadline)
+            process.waitUntilExit()
+            deadline.cancel()
         }
-        if vmResult == KERN_SUCCESS {
-            var pageSize: vm_size_t = 0
-            if host_page_size(host, &pageSize) == KERN_SUCCESS {
-                memoryUsed = min(totalMemory, (UInt64(vm.active_count) + UInt64(vm.wire_count) + UInt64(vm.compressor_page_count)) * UInt64(pageSize))
-            }
-        } else { failure = "Memory statistics are unavailable." }
-        var task = mach_task_basic_info_data_t()
-        var taskCount = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info_data_t>.size / MemoryLayout<integer_t>.size)
-        let taskResult = withUnsafeMutablePointer(to: &task) { pointer in
-            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(taskCount)) { task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &taskCount) }
-        }
-        if taskResult == KERN_SUCCESS { residentMemory = task.resident_size }
+        try? output?.fileHandleForReading.close()
+        process = nil; input = nil; output = nil; moduleID = nil; buffer.removeAll()
+    }
+    static func stopAll(moduleID: String? = nil) {
+        for worker in workers.compactMap(\.value) where moduleID == nil || worker.moduleID == moduleID { worker.stop() }
+        workers.removeAll { $0.value == nil }
     }
 }
+@MainActor
+private final class WeakResourceWorker {
+    weak var value: ResourceWorker?
+    init(_ value: ResourceWorker) { self.value = value }
+}
+
 struct ResourcePanel: View {
-    @StateObject private var sampler = ResourceSampler()
+    @EnvironmentObject private var app: AppState
+    @StateObject private var worker = ResourceWorker()
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                metric("System CPU", value: sampler.cpu.map { String(format: "%.1f%%", $0) } ?? "Sampling…")
-                Sparkline(values: sampler.samples).stroke(Color.accentColor, lineWidth: 2).frame(height: 52)
-                    .accessibilityLabel("CPU samples from the past minute")
-                metric("System memory in use", value: bytes(sampler.memoryUsed))
-                ProgressView(value: Double(sampler.memoryUsed), total: Double(sampler.totalMemory))
-                Text("of \(bytes(sampler.totalMemory)) · active, wired, and compressed pages").font(.caption).foregroundStyle(.secondary)
-                metric("Radius app memory", value: bytes(sampler.residentMemory))
-                Text("The native app process only. WebKit manages website processes separately.").font(.caption).foregroundStyle(.secondary)
-                Divider()
-                Label("Updates every 2 seconds", systemImage: "arrow.triangle.2.circlepath").font(.caption).foregroundStyle(.secondary)
-                Text("Sampling stops when this panel closes or the module is disabled.").font(.caption).foregroundStyle(.secondary)
-                if let failure = sampler.failure { Text(failure).font(.caption).foregroundStyle(.orange) }
-            }.padding(16)
-        }.task { await sampler.run() }
+                if let frame = worker.frame {
+                    Text(frame.title).font(.headline)
+                    ForEach(Array(frame.metrics.enumerated()), id: \.offset) { _, metric in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(metric.name).font(.caption).foregroundStyle(.secondary)
+                            Text(metric.value).font(.system(size: 25, weight: .medium, design: .rounded)).monospacedDigit()
+                            if !metric.samples.isEmpty {
+                                Sparkline(values: metric.samples).stroke(Color.accentColor, lineWidth: 2).frame(height: 52)
+                                    .accessibilityLabel("Recent " + metric.name + " samples")
+                            }
+                            if let fraction = metric.fraction { ProgressView(value: fraction) }
+                            if !metric.detail.isEmpty { Text(metric.detail).font(.caption).foregroundStyle(.secondary) }
+                        }
+                    }
+                    Text(frame.detail).font(.caption).foregroundStyle(.secondary)
+                } else if worker.failure == nil { ProgressView("Starting resource provider…") }
+                if let failure = worker.failure { Text(failure).font(.callout).foregroundStyle(.orange) }
+            }.frame(maxWidth: .infinity, alignment: .leading).padding(16)
+        }
+        .task(id: app.installedModules) {
+            do {
+                let package = try app.resourceWorkerPackage()
+                try worker.start(executable: package.url, moduleID: package.id)
+            } catch { worker.showFailure(error) }
+        }
+        .onDisappear { worker.stop() }
     }
-    private func metric(_ label: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) { Text(label).font(.caption).foregroundStyle(.secondary); Text(value).font(.system(size: 25, weight: .medium, design: .rounded)).monospacedDigit() }
-    }
-    private func bytes(_ value: UInt64) -> String { ByteCountFormatter.string(fromByteCount: Int64(value), countStyle: .memory) }
 }
 struct Sparkline: Shape {
     var values: [Double]
@@ -87,7 +136,7 @@ struct Sparkline: Shape {
         var path = Path()
         guard values.count > 1 else { return path }
         for (index, value) in values.enumerated() {
-            let point = CGPoint(x: rect.width * Double(index) / Double(values.count - 1), y: rect.height * (1 - min(100, max(0, value)) / 100))
+            let point = CGPoint(x: rect.width * Double(index) / Double(values.count - 1), y: rect.height * (1 - value))
             if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
         }
         return path

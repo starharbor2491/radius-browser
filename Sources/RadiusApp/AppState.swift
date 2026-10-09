@@ -13,6 +13,7 @@ final class AppState: ObservableObject {
     @Published var previewConfiguration: Configuration?
     let dataDirectory: URL
     private(set) var catalog: [ModuleManifest] = []
+    private var modulePayloads: [String: Data] = [:]
     private var startupTask: Task<Void, Never>?
     private var database: LibraryDatabase?
     private var repository: ModuleRepository?
@@ -50,7 +51,8 @@ final class AppState: ObservableObject {
             do {
                 let repo = try ModuleRepository(root: dataDirectory.appendingPathComponent("Modules", isDirectory: true))
                 repository = repo
-                try repo.seedDefaults(catalog)
+                let available = catalog.filter { $0.runtime == nil || modulePayloads[$0.id] != nil }
+                try repo.seedDefaults(available, payloads: modulePayloads)
                 installedModules = try repo.installed()
             } catch { notice = "Optional modules could not load: \(error.localizedDescription). Open Recovery to repair them." }
             ready = true; startupError = nil
@@ -58,25 +60,66 @@ final class AppState: ObservableObject {
     }
     private func loadCatalog() throws {
         let directory: URL
-        if let packaged = Bundle.main.url(forResource: "Modules", withExtension: nil) { directory = packaged }
-        else if let resources = Bundle.module.url(forResource: "Resources", withExtension: nil) { directory = resources.appendingPathComponent("Modules") }
+        let developmentWorkerDirectory: URL?
+        if let packaged = Bundle.main.url(forResource: "Modules", withExtension: nil) { directory = packaged; developmentWorkerDirectory = nil }
+        else if let resources = Bundle.module.url(forResource: "Resources", withExtension: nil) {
+            directory = resources.appendingPathComponent("Modules")
+            developmentWorkerDirectory = Bundle.module.bundleURL.deletingLastPathComponent()
+        }
         else { throw ValidationError("The application is missing its bundled resources. Rebuild or reinstall Radius.") }
         catalog = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
             .filter { $0.hasDirectoryPath }.map { try ModuleManifest.decode(Data(contentsOf: $0.appendingPathComponent("manifest.json"))) }
             .sorted { $0.name < $1.name }
+        modulePayloads = [:]
+        let workers = ["org.radius.resource-monitor": "RadiusResourceMonitor", "org.radius.memory-monitor": "RadiusMemoryMonitor"]
+        for manifest in catalog where manifest.runtime == .nativeResourceWorker {
+            do {
+                guard let product = workers[manifest.id] else { throw ValidationError("An unrecognized native worker is bundled with Radius.") }
+                let packaged = directory.appendingPathComponent(manifest.id).appendingPathComponent("worker")
+                // SwiftPM development builds put executable products beside their resource bundle.
+                let executable = developmentWorkerDirectory?.appendingPathComponent(product) ?? packaged
+                let size = try executable.resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey])
+                guard size.isSymbolicLink != true, (size.fileSize ?? 0) > 0, (size.fileSize ?? 0) <= 8 * 1024 * 1024 else { throw ValidationError("Invalid bundled worker payload.") }
+                modulePayloads[manifest.id] = try Data(contentsOf: executable)
+            } catch { notice = "\(manifest.name) is unavailable because its bundled worker could not load. Rebuild or reinstall Radius to use it. Browsing is still available." }
+        }
     }
     func enabled(_ capability: ModuleCapability) -> Bool {
         installedModules.contains { $0.enabled && $0.manifest.capability == capability }
+    }
+    func resourceWorkerPackage() throws -> (id: String, url: URL) {
+        guard let module = installedModules.first(where: { $0.enabled && $0.manifest.capability == .resourceMonitor }) else {
+            throw ValidationError("Enable a resource provider in Modules.")
+        }
+        guard module.manifest.runtime == .nativeResourceWorker else {
+            throw ValidationError("Update Resource Monitor in Modules to install its removable worker package.")
+        }
+        guard let repository, let trusted = modulePayloads[module.id],
+              catalog.contains(module.manifest) else { throw ValidationError("This worker is not a trusted package from this Radius build. Update it in Modules.") }
+        let url = try repository.workerURL(for: module.id)
+        guard try Data(contentsOf: url) == trusted else {
+            throw ValidationError("This worker's code differs from the bundled first-party package. Reinstall it in Modules.")
+        }
+        return (module.id, url)
     }
     func install(_ id: String) {
         perform {
             guard let repository else { throw ValidationError("Open Recovery to repair module storage first.") }
             let plan = try repository.installationPlan(for: id, catalog: catalog)
             if !approveModules(plan) { return }
-            let activate = installedModules.first { $0.id == id }?.enabled ?? true
-            for manifest in plan { try repository.install(manifest, enabled: manifest.id != id && activate ? true : nil) }
-            installedModules = try repository.installed()
+            try installApprovedModule(id)
         }
+    }
+    /// Called after the install dialog approves the bundled package and any dependencies.
+    func installApprovedModule(_ id: String) throws {
+        guard let repository else { throw ValidationError("Open Recovery to repair module storage first.") }
+        let plan = try repository.installationPlan(for: id, catalog: catalog)
+        let activate = installedModules.first { $0.id == id }?.enabled ?? true
+        for manifest in plan {
+            ResourceWorker.stopAll(moduleID: manifest.id)
+            try repository.install(manifest, enabled: manifest.id != id && activate ? true : nil, payload: modulePayloads[manifest.id])
+        }
+        installedModules = try repository.installed()
     }
     func importModule() {
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.json]; panel.canChooseDirectories = false
@@ -87,6 +130,9 @@ final class AppState: ObservableObject {
             let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
             guard size <= 32 * 1024 else { throw ValidationError("Module manifests must be smaller than 32 KB.") }
             let manifest = try ModuleManifest.decode(Data(contentsOf: url))
+            guard manifest.runtime == nil, manifest.capability != .resourceMonitor else {
+                throw ValidationError("Native resource workers must come from this Radius build. Install them from Discover; local native publisher verification is not available yet.")
+            }
             guard manifest.dependencies.isEmpty else { throw ValidationError("Local modules with dependencies are not supported yet.") }
             guard !catalog.contains(where: { $0.id == manifest.id }), !installedModules.contains(where: { $0.id == manifest.id }) else {
                 throw ValidationError("A module with that ID already exists. Use its official update instead.")
@@ -103,25 +149,51 @@ final class AppState: ObservableObject {
         let permissions = Set(manifests.compactMap { $0.capability.permission }).sorted()
         alert.informativeText = (local ? "Publisher information is self-reported. This package can only use Radius's listed declarative capabilities.\n\n" : "Packages are bundled with this Radius build.\n\n") +
             (permissions.isEmpty ? "No website or system permissions are requested." : permissions.joined(separator: "\n\n"))
+        if manifests.contains(where: { $0.runtime != nil }) {
+            alert.informativeText += "\n\nThis installs trusted first-party native code. Workers run outside the app while their panel is open, with the same macOS user access as Radius. They are not sandboxed by the permissions listed above."
+        }
         alert.addButton(withTitle: "Install"); alert.addButton(withTitle: "Cancel")
         return alert.runModal() == .alertFirstButtonReturn
     }
     func toggleModule(_ module: InstalledModule) {
+        if !module.enabled, module.manifest.runtime == .nativeResourceWorker,
+           let active = installedModules.first(where: { $0.enabled && $0.manifest.capability == .resourceMonitor && $0.id != module.id }) {
+            let alert = NSAlert(); alert.messageText = "Replace \(active.manifest.name) with \(module.manifest.name)?"
+            alert.informativeText = "The current worker will stop. The replacement will run when its panel is open. Your saved browser data is kept."
+            alert.addButton(withTitle: "Replace"); alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            perform { try replaceResourceProvider(with: module.id) }
+            return
+        }
         perform {
+            ResourceWorker.stopAll(moduleID: module.id)
             try repository?.setEnabled(module.id, !module.enabled)
             installedModules = try repository?.installed() ?? []
         }
     }
+    func replaceResourceProvider(with id: String) throws {
+        guard let repository else { throw ValidationError("Repair module storage first.") }
+        ResourceWorker.stopAll()
+        try repository.replaceResourceProvider(with: id)
+        installedModules = try repository.installed()
+    }
+    func removeModule(_ id: String) throws {
+        guard let repository else { throw ValidationError("Repair module storage first.") }
+        ResourceWorker.stopAll(moduleID: id)
+        try repository.uninstall(id)
+        installedModules = try repository.installed()
+    }
     func uninstall(_ module: InstalledModule) {
         let alert = NSAlert(); alert.messageText = "Uninstall \(module.manifest.name)?"
-        alert.informativeText = "The package descriptor will be deleted and its feature will stop. The implementation remains in Radius. Saved notes and settings are kept unless you choose to delete them."
+        alert.informativeText = module.manifest.runtime == nil ?
+            "The package descriptor will be deleted and its feature will stop. The implementation remains in Radius. Saved notes and settings are kept unless you choose to delete them." :
+            "The worker will stop and its installed executable package will be deleted. Saved browser data is kept. You can install this provider again from Discover."
         alert.addButton(withTitle: "Uninstall and keep data"); alert.addButton(withTitle: "Cancel")
         if module.manifest.capability == .notes { alert.addButton(withTitle: "Uninstall and delete all notes") }
         let response = alert.runModal()
         guard response != .alertSecondButtonReturn else { return }
         perform {
-            try repository?.uninstall(module.id)
-            installedModules = try repository?.installed() ?? []
+            try removeModule(module.id)
             if response == .alertThirdButtonReturn { library.notes.removeAll() }
         }
     }
@@ -180,6 +252,7 @@ final class AppState: ObservableObject {
     }
     func resetModules() {
         perform {
+            ResourceWorker.stopAll()
             let old = dataDirectory.appendingPathComponent("Modules", isDirectory: true)
             if FileManager.default.fileExists(atPath: old.path) {
                 try FileManager.default.moveItem(at: old, to: dataDirectory.appendingPathComponent("Modules-backup-" + UUID().uuidString))

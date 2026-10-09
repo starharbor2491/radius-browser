@@ -85,9 +85,9 @@ enum AppSmokeTest {
                 try png.write(to: output.appendingPathComponent("Radius-split.png"))
                 browser.selectOtherPane()
                 guard browser.session.selectedTabID == pair.first else { throw ValidationError("Switching panes did not update the address context.") }
-                if let packagePath = ProcessInfo.processInfo.environment["RADIUS_CHROMIUM_PACKAGE"] {
-                    trace("Installing optional Chromium runtime")
-                    try await ChromiumRuntime.shared.install(from: URL(fileURLWithPath: packagePath, isDirectory: true), dataDirectory: app.dataDirectory)
+                if ProcessInfo.processInfo.environment["RADIUS_CHROMIUM_PACKAGE"] != nil {
+                    trace("Verifying bundled optional Chromium runtime")
+                    guard ChromiumRuntime.shared.isInstalled(in: app.dataDirectory) else { throw ValidationError("The Chromium development variant has no bundled runtime.") }
                     let id = browser.session.selectedTabID
                     trace("Reopening an embedded tab in Chromium")
                     browser.changeEngine(id, to: .chromium)
@@ -102,6 +102,13 @@ enum AppSmokeTest {
                     }
                     guard try await browser.webTab(id).readerText().contains("Local browser check") else { throw ValidationError("Embedded Chromium did not execute the reader request.") }
                     guard let chromium = browser.webTab(id) as? ChromiumTab else { throw ValidationError("Chromium adapter is unavailable.") }
+                    trace("Cancelling a Chromium page before its new context is ready")
+                    let liveBeforeCancellation = ChromiumRuntime.shared.api?.live_pages()
+                    let pending = try ChromiumRuntime.shared.makeTab(profileID: UUID(), privateSessionID: UUID(), dataDirectory: app.dataDirectory)
+                    pending.dispose()
+                    guard ChromiumRuntime.shared.api?.live_pages() == liveBeforeCancellation else { throw ValidationError("An uninitialized Chromium page survived cancellation.") }
+                    try await Task.sleep(for: .milliseconds(250))
+                    guard ChromiumRuntime.shared.api?.live_pages() == liveBeforeCancellation else { throw ValidationError("A cancelled Chromium page was created later.") }
                     trace("Checking Chromium profile and private-window isolation")
                     let normalToken = "radiusNormal" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
                     _ = try await evaluate(chromium, "document.cookie = '\(normalToken)=1; path=/; max-age=60'; localStorage.setItem('\(normalToken)', '1'); document.cookie")

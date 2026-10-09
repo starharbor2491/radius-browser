@@ -32,7 +32,7 @@ struct ModulesView: View {
                     }
                 }
             }
-            Text("Packages control built-in features. Removing a package stops its feature; the implementation remains in Radius.")
+            Text("Resource providers contain removable native workers. The other four packages control features whose implementations remain built into Radius.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack { Button("Import local module…") { app.importModule() }; Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.defaultAction) }
         }.padding(28).frame(width: 760, height: 620)
@@ -49,12 +49,12 @@ struct ModuleCard: View {
                 VStack(alignment: .leading, spacing: 5) {
                     HStack { Text(manifest.name).font(.headline); Text("v\(manifest.version)").font(.caption).foregroundStyle(.secondary) }
                     Text(manifest.summary).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    HStack { Text(manifest.publisher); Text("· Native shell"); Link("Source", destination: manifest.source) }.font(.caption).foregroundStyle(.secondary)
+                    HStack { Text(manifest.publisher); Text(manifest.runtime == nil ? "· Built-in feature descriptor" : "· Removable native worker"); Link("Source", destination: manifest.source) }.font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
                 if let installed {
                     if manifest.version > installed.manifest.version { Button("Update") { app.install(manifest.id) } }
-                    else { Button(installed.enabled ? "Disable" : "Enable") { app.toggleModule(installed) } }
+                    else { Button(installed.enabled ? "Disable" : enableLabel) { app.toggleModule(installed) } }
                     Menu { Button("Uninstall…", role: .destructive) { app.uninstall(installed) } } label: { Image(systemName: "ellipsis") }.menuStyle(.borderlessButton).fixedSize()
                 } else { Button("Install") { app.install(manifest.id) }.buttonStyle(.borderedProminent) }
             }
@@ -65,10 +65,17 @@ struct ModuleCard: View {
                 if let installed { Text(ByteCountFormatter.string(fromByteCount: Int64(installed.diskBytes), countStyle: .file)) }
             }.font(.caption).foregroundStyle(.secondary)
             Text("No restart required").font(.caption).foregroundStyle(.secondary)
+            if manifest.runtime != nil {
+                Text("Trusted first-party native code · Same macOS user access as Radius · Runs only while its panel is open")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }.padding(16).background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(.primary.opacity(0.1)))
     }
     private var icon: String {
         switch manifest.capability { case .resourceMonitor: "gauge.with.dots.needle.33percent"; case .notes: "note.text"; case .reader: "doc.plaintext"; case .screenshot: "camera.viewfinder"; case .focusMode: "viewfinder" }
+    }
+    private var enableLabel: String {
+        manifest.runtime != nil && app.installedModules.contains { $0.enabled && $0.manifest.capability == .resourceMonitor && $0.id != manifest.id } ? "Replace current" : "Enable"
     }
 }
