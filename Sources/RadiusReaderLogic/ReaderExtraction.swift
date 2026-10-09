@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 import Foundation
+#if canImport(FoundationXML)
 import FoundationXML
+#endif
 import RadiusCore
 
 /// Best-effort article/main/body extraction from an engine's XMLSerializer snapshot.
