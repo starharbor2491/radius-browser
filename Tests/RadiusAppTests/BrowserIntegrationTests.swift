@@ -108,6 +108,10 @@ struct BrowserIntegrationTests {
         #expect(browser.activeWebTab.engineID == .webkit)
         #expect(browser.activeWebTab !== oldTab)
         #expect(browser.session.tabs.count == 1)
+        app.terminating = true; browser.disposeEngineTabs()
+        #expect(browser.activeWebTab is UnavailableEngineTab)
+        app.terminating = false
+        #expect(browser.activeWebTab is WebTab)
         browser.closeWindow(); #expect(await app.flush())
     }
     @Test func splitPanesNavigateIndependentlyAndClosingPromotesChildren() async throws {

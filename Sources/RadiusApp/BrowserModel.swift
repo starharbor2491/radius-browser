@@ -34,6 +34,9 @@ final class BrowserModel: ObservableObject {
     func webTab(_ id: UUID) -> BrowserEngineTab {
         if let cached = webTabs[id] { return cached }
         let engine = session.tabs.first(where: { $0.id == id })?.engineID ?? .webkit
+        // Quitting may be cancelled. Keep this placeholder out of the cache so
+        // live tabs can be recreated normally after AppKit keeps the app open.
+        if app.terminating { return UnavailableEngineTab(engine: engine, reason: "Radius is closing its browsing engines.") }
         guard !isClosed else {
             let tab = UnavailableEngineTab(engine: engine, reason: "This browser window is closed.")
             webTabs[id] = tab; return tab
