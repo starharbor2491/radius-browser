@@ -21,6 +21,8 @@ The implementation is a native WebKit browser development build. It is **not yet
 
 The 13 portable tests exercise input validation, SQLite round trips and stale saves, module lifecycles/dependencies/cycles, symlink rejection, interrupted updates, configuration sanitization, and bookmark import/export. Six native integration tests cover private persistence, profile context changes, popup openers, generated documents, tab limits, and real JavaScript confirmations. The packaged-app smoke check captures native screens and verifies HTTP browsing, reader extraction, saving, and normal termination. CI results apply to the tested commit; interactive clean-Mac checks remain separate gates. See [the review record](AUDIT.md).
 
+On 2026-10-09, [Radius run 37945866670](https://github.com/starharbor2491/radius-browser/actions/runs/37945866670) passed on source commit `14e6b5e262f1022c2a9b89b81b49607d63e6e1ff`: all 19 tests, the six native tests again in release mode, universal compilation/signature verification, and packaged browsing/screens/saving/shutdown. The downloadable development ZIP is [the tested app artifact](https://github.com/starharbor2491/radius-browser/actions/runs/37945866670/artifacts/11623299106). Its inner `Radius-macOS.zip` SHA-256 is `ad53bd44f3fa2f605ac479323a71fca2cc98b7ef13d5bcd96c02d3248825edf3`. CEF's separate native ARM/Intel sample results are in CHROMIUM.md; those do not make it a Radius engine.
+
 Before calling this a consumer v1 release:
 
 1. Pass the macOS CI compiler and core tests on the release commit.

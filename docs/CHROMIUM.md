@@ -114,8 +114,10 @@ correctly refused a non-macOS host. In [macOS proof run 37943490620](https://git
 both architectures compiled successfully. On the Apple Silicon host, both
 Chrome-style and native Alloy samples executed JavaScript in a loopback page
 and exited normally after an ordinary Cocoa quit request. Intel runtime probes
-were explicitly skipped on that ARM host. The dedicated workflow now uses
-`macos-15-intel` for native Intel execution; its result must be assessed separately.
+were explicitly skipped on that ARM host. [Native proof run 37944960439](https://github.com/starharbor2491/radius-browser/actions/runs/37944960439)
+then used `macos-15-intel` for Intel and `macos-15` for ARM. Both architectures
+built and both requested styles executed the renderer callback and quit normally
+on their matching hosts. All four native runtime probes passed.
 
 The bounded `probe` command writes JSON evidence and runtime logs. It verifies
 a tokenized renderer callback and normal process exit, without relaxing sandbox
@@ -144,7 +146,7 @@ view-hosting bridge or lift the runtime-style restriction.
 
 | Gate | Required evidence | Current result |
 | --- | --- | --- |
-| macOS build and lifecycle | Build both architectures; load framework/helpers; browse; close every browser; quit cleanly with sandbox enabled. | Both sample architectures compiled. ARM Chrome-style and Alloy renderer/quit probes passed with sandbox support requested. Native Intel runtime checks are a separate gate. Radius integration is unverified. |
+| macOS build and lifecycle | Build both architectures; load framework/helpers; browse; close every browser; quit cleanly with sandbox enabled. | Both sample architectures compiled. Chrome-style and Alloy renderer/quit probes passed on native ARM and Intel with sandbox support requested. Radius integration is unverified. |
 | Native Radius hosting | Render inside the chosen Radius window architecture; verify IME, focus, shortcuts, VoiceOver, drag/drop, popups, fullscreen, media, and multiple displays. | Not implemented. Native-parent CEF limitation confirmed. |
 | Consumer extension installation | Install from Chrome Web Store through its normal flow, without developer mode, unpacking, or command-line flags; restart; receive an extension update; remove it. | Not executed. |
 | Manifest V3 behavior | Exercise service-worker restart, content scripts, permissions and revocation, action popup anchoring, side panels, storage, and the declared browser API matrix. | Not executed. |
