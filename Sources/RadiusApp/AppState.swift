@@ -237,11 +237,19 @@ import UniformTypeIdentifiers
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static weak var state: AppState?
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.regular); NSApp.activate(ignoringOtherApps: true)
+        smokeTrace("applicationDidFinishLaunching: setting activation policy")
+        NSApp.setActivationPolicy(.regular)
+        smokeTrace("applicationDidFinishLaunching: activating application")
+        NSApp.activate(ignoringOtherApps: true)
+        smokeTrace("applicationDidFinishLaunching: activation returned")
         if CommandLine.arguments.contains("--smoke-test") { Task { await AppSmokeTest.run() } }
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let state = Self.state else { return .terminateNow }
+        smokeTrace("applicationShouldTerminate entered")
+        guard let state = Self.state else {
+            smokeTrace("No application state; returning terminateNow")
+            return .terminateNow
+        }
         let activeWindows = state.windows.values.compactMap(\.model).filter { $0.downloads.hasActive }
         if !activeWindows.isEmpty {
             let alert = NSAlert(); alert.messageText = "Cancel active downloads and quit Radius?"
@@ -251,17 +259,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         state.terminating = true
         Task {
+            self.smokeTrace("Termination task started; cancelling active downloads")
             for browser in activeWindows { await browser.downloads.cancelAllAndWait() }
-            if await state.flush() { sender.reply(toApplicationShouldTerminate: true) }
+            self.smokeTrace("Flushing application data before termination")
+            let saved = await state.flush()
+            self.smokeTrace("Termination flush completed: \(saved)")
+            if saved {
+                self.smokeTrace("Sending termination reply: true")
+                sender.reply(toApplicationShouldTerminate: true)
+            }
             else {
                 let alert = NSAlert(); alert.messageText = "Your latest changes could not be saved."
                 alert.informativeText = state.notice ?? "Retry saving from Recovery."
                 alert.addButton(withTitle: "Keep Radius open"); alert.addButton(withTitle: "Quit without saving")
                 let quit = alert.runModal() == .alertSecondButtonReturn
+                self.smokeTrace("Sending termination reply: \(quit)")
                 state.terminating = quit; sender.reply(toApplicationShouldTerminate: quit)
             }
         }
+        smokeTrace("Returning terminateLater")
         return .terminateLater
+    }
+    private func smokeTrace(_ message: String) {
+        guard CommandLine.arguments.contains("--smoke-test") else { return }
+        FileHandle.standardOutput.write(Data(("Radius app delegate: " + message + "\n").utf8))
     }
 }
 

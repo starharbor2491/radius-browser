@@ -31,7 +31,8 @@ enum AppSmokeTest {
                 var config = Configuration(); config.theme.design = design
                 if design == .graphite { config.layout.tabs = .leading; config.layout.sidebar = .trailing }
                 app.applyConfiguration(config)
-                try await Task.sleep(for: .milliseconds(500))
+                // Allow the monitor's second sample and native progress animation to settle.
+                try await Task.sleep(for: .milliseconds(2200))
                 guard let view = window.contentView, let image = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw ValidationError("Cannot capture the browser window.") }
                 view.cacheDisplay(in: view.bounds, to: image)
                 guard let png = image.representation(using: .png, properties: [:]), png.count > 1000 else { throw ValidationError("The browser screenshot was empty.") }
@@ -59,12 +60,15 @@ enum AppSmokeTest {
                     try await Task.sleep(for: .milliseconds(100))
                 }
                 guard browser.activeWebTab.webView.url?.scheme == "http" else { throw ValidationError("HTTP navigation did not reach the fixture.") }
+                trace("Extracting reader text")
                 let text = try await browser.activeWebTab.readerText()
                 guard text.contains("Local browser check") else { throw ValidationError("Reader could not read the HTTP fixture.") }
             }
+            trace("Saving browser data")
             guard await app.flush() else { throw ValidationError(app.notice ?? "App data could not be saved.") }
             trace("Radius packaged-app smoke test passed.")
-            NSApp.terminate(nil)
+            // Let this actor job return before AppKit enters its deferred-termination loop.
+            NSApp.perform(#selector(NSApplication.terminate(_:)), with: nil, afterDelay: 0)
         } catch { fail(error.localizedDescription) }
     }
     private static func trace(_ message: String) {

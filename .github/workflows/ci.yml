@@ -37,6 +37,14 @@ jobs:
           name: Radius-native-screenshots
           path: dist/screenshots/*.png
           if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Radius-launch-diagnostics
+          path: |
+            dist/smoke-*.log
+            dist/smoke-sample.txt
+          if-no-files-found: warn
   portable-core:
     runs-on: ubuntu-24.04
     container: swift:6.2.1

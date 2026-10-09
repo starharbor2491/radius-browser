@@ -84,18 +84,21 @@ struct BrowserWindow: View {
         .animation(theme.reducedMotion || systemReduceMotion ? nil : .easeOut(duration: 0.16), value: visiblePanel)
         .background(WindowCloseObserver(model: model))
         .sheet(item: $model.sheet) { sheet in
-            switch sheet {
-            case .modules: ModulesView()
-            case .customize: CustomizeView()
-            case .settings: SettingsView(model: model)
-            case .recovery: RecoveryView()
+            Group {
+                switch sheet {
+                case .modules: ModulesView()
+                case .customize: CustomizeView()
+                case .settings: SettingsView(model: model)
+                case .recovery: RecoveryView()
+                }
             }
+            .background(Color(nsColor: .windowBackgroundColor))
         }
         .sheet(isPresented: Binding(get: { reader != nil }, set: { if !$0 { reader = nil } })) {
             VStack(alignment: .leading, spacing: 16) {
                 HStack { Text(model.selectedTab.title).font(.title2); Spacer(); Button("Done") { reader = nil }.keyboardShortcut(.defaultAction) }
                 ScrollView { Text(reader ?? "").font(.system(size: 18, design: .serif)).lineSpacing(7).textSelection(.enabled).frame(maxWidth: 660, alignment: .leading).padding(24).frame(maxWidth: .infinity) }
-            }.padding(24).frame(width: 760, height: 640)
+            }.padding(24).frame(width: 760, height: 640).background(Color(nsColor: .windowBackgroundColor))
         }
         .onReceive(NotificationCenter.default.publisher(for: .radiusFocusAddress)) { notification in if notification.object as? UUID == model.session.id { addressFocused = true } }
         .onReceive(NotificationCenter.default.publisher(for: .radiusFind)) { notification in if notification.object as? UUID == model.session.id { findVisible = true; findFocused = true } }
