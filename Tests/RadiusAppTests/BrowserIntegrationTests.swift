@@ -147,6 +147,12 @@ struct BrowserIntegrationTests {
         #expect(!app.library.sessions.contains { $0.id == browser.session.id })
         #expect(!(try #require(browser.activeWebTab as? WebTab)).webView.configuration.websiteDataStore.isPersistent)
         browser.closeWindow()
+        #expect(browser.isClosed)
+        #expect(browser.activeWebTab is UnavailableEngineTab)
+        let closedTabs = browser.session.tabs
+        browser.newTab(url: URL(string: "https://closed.example"))
+        browser.navigate("https://closed.example")
+        #expect(browser.session.tabs == closedTabs)
         #expect(await app.flush())
         let database = try LibraryDatabase(url: directory.appendingPathComponent("library.sqlite"))
         let persisted = try await database.load()

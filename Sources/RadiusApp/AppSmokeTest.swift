@@ -34,24 +34,43 @@ enum AppSmokeTest {
                 app.applyConfiguration(config)
                 // Allow the monitor's second sample and native progress animation to settle.
                 try await Task.sleep(for: .milliseconds(2200))
-                guard let view = window.contentView, let image = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw ValidationError("Cannot capture the browser window.") }
-                view.cacheDisplay(in: view.bounds, to: image)
-                guard let png = image.representation(using: .png, properties: [:]), png.count > 1000 else { throw ValidationError("The browser screenshot was empty.") }
-                try png.write(to: output.appendingPathComponent("Radius-\(design.rawValue).png"))
+                guard let view = window.contentView else { throw ValidationError("The browser window has no content.") }
+                try capture(view, to: output.appendingPathComponent("Radius-\(design.rawValue).png"))
             }
+            let baseline = app.configuration
+            for design in DesignSystem.allCases {
+                trace("Capturing \(design.rawValue) dark appearance")
+                var config = baseline; config.theme.design = design; config.theme.colorMode = .dark
+                app.applyConfiguration(config)
+                try await Task.sleep(for: .milliseconds(400))
+                guard let view = window.contentView else { throw ValidationError("The browser window has no content.") }
+                try capture(view, to: output.appendingPathComponent("Radius-\(design.rawValue)-dark.png"))
+            }
+            app.applyConfiguration(baseline)
             // Verify native control surfaces render independently of a website engine.
             for sheet in [BrowserSheet.modules, .customize, .settings, .recovery] {
                 trace("Opening \(sheet.rawValue) screen")
                 browser.sheet = sheet
                 try await Task.sleep(for: .milliseconds(400))
-                guard let panel = window.attachedSheet, let view = panel.contentView,
-                      let image = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw ValidationError("The \(sheet.rawValue) screen did not open.") }
-                view.cacheDisplay(in: view.bounds, to: image)
-                guard let png = image.representation(using: .png, properties: [:]) else { throw ValidationError("Cannot capture \(sheet.rawValue).") }
-                try png.write(to: output.appendingPathComponent("Radius-\(sheet.rawValue).png"))
+                guard let view = window.attachedSheet?.contentView else { throw ValidationError("The \(sheet.rawValue) screen did not open.") }
+                try capture(view, to: output.appendingPathComponent("Radius-\(sheet.rawValue).png"))
                 browser.sheet = nil
                 try await Task.sleep(for: .milliseconds(300))
             }
+            for mode in [ColorMode.light, .dark] {
+                var config = baseline; config.theme.colorMode = mode; config.theme.accent = mode == .dark ? .teal : .orange
+                app.applyConfiguration(config)
+                for sheet in mode == .dark ? [BrowserSheet.customize, .recovery] : [.customize] {
+                    trace("Capturing \(sheet.rawValue) \(mode.rawValue) contrast")
+                    browser.sheet = sheet
+                    try await Task.sleep(for: .milliseconds(400))
+                    guard let view = window.attachedSheet?.contentView else { throw ValidationError("The \(sheet.rawValue) contrast screen did not open.") }
+                    try capture(view, to: output.appendingPathComponent("Radius-\(sheet.rawValue)-\(mode.rawValue).png"))
+                    browser.sheet = nil
+                    try await Task.sleep(for: .milliseconds(300))
+                }
+            }
+            app.applyConfiguration(baseline)
             if let address = ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_URL"] {
                 trace("Navigating to loopback HTTP fixture")
                 browser.navigate(address)
@@ -79,10 +98,8 @@ enum AppSmokeTest {
                 guard browser.webTab(pair.first) !== browser.webTab(pair.second), browser.session.split?.first == pair.first else { throw ValidationError("Browsing panes were not independent.") }
                 _ = browser.session.setParent(pair.second, to: pair.first)
                 try await Task.sleep(for: .milliseconds(500))
-                guard let view = window.contentView, let image = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw ValidationError("Cannot capture split panes.") }
-                view.cacheDisplay(in: view.bounds, to: image)
-                guard let png = image.representation(using: .png, properties: [:]) else { throw ValidationError("Cannot encode split panes.") }
-                try png.write(to: output.appendingPathComponent("Radius-split.png"))
+                guard let view = window.contentView else { throw ValidationError("Cannot capture split panes.") }
+                try capture(view, to: output.appendingPathComponent("Radius-split.png"))
                 browser.selectOtherPane()
                 guard browser.session.selectedTabID == pair.first else { throw ValidationError("Switching panes did not update the address context.") }
                 if ProcessInfo.processInfo.environment["RADIUS_CHROMIUM_PACKAGE"] != nil {
@@ -137,11 +154,21 @@ enum AppSmokeTest {
                           !app.library.sessions.flatMap(\.tabs).contains(where: { $0.url?.query?.contains("private-probe") == true }) else { throw ValidationError("Private Chromium browsing entered saved history or sessions.") }
                     for (model, window) in probes { model.closeWindow(); window.close() }; probes.removeAll()
                     trace("Checking Chromium popup opener and tab context")
+                    let blockedPopup = try await evaluate(chromium, "(() => { const w = window.open('about:blank'); if (w) { w.close(); return 'opened'; } return 'blocked'; })()")
+                    guard blockedPopup == "blocked" else { throw ValidationError("Chromium opened an unsolicited popup while Radius blocks popups.") }
                     app.library.preferences.blockPopups = false; browser.updatePopupPolicy()
-                    _ = try await evaluate(chromium, "(() => { const w = window.open('about:blank'); if (!w) return 'blocked'; w.document.write('<html><title>Radius Chromium popup</title><body>Popup</body></html>'); return 'opened'; })()")
+                    let popupResult = try await evaluate(chromium, "(() => { const w = window.open('about:blank'); if (!w) return 'blocked'; w.document.write('<html><title>Radius Chromium popup</title><body>Popup</body></html>'); w.document.close(); return 'opened'; })()")
+                    guard popupResult == "opened" else { throw ValidationError("Chromium rejected its popup request: \(popupResult).") }
                     let popupDeadline = Date().addingTimeInterval(10)
                     while browser.activeWebTab.title != "Radius Chromium popup" {
-                        if Date() > popupDeadline { throw ValidationError("Chromium popup did not open inside Radius.") }
+                        if Date() > popupDeadline {
+                            let selected = browser.selectedTab
+                            var actualTitle = "unavailable"
+                            if let popup = browser.activeWebTab as? ChromiumTab {
+                                actualTitle = (try? await evaluate(popup, "String(document.title)")) ?? "unavailable"
+                            }
+                            throw ValidationError("Chromium popup did not open inside Radius. Selected engine: \((selected.engineID ?? .webkit).label); title: \(browser.activeWebTab.title ?? "nil"); document title: \(actualTitle); error: \(browser.activeWebTab.errorMessage ?? "none").")
+                        }
                         try await Task.sleep(for: .milliseconds(100))
                     }
                     guard let popup = browser.activeWebTab as? ChromiumTab,
@@ -164,10 +191,8 @@ enum AppSmokeTest {
                     }
                     guard chromium.url?.scheme == "https", try await chromium.readerText().contains("Example Domain") else { throw ValidationError("Chromium HTTPS browsing failed.") }
                     try await Task.sleep(for: .milliseconds(500))
-                    guard let view = window.contentView, let image = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw ValidationError("Cannot capture embedded Chromium.") }
-                    view.cacheDisplay(in: view.bounds, to: image)
-                    guard let png = image.representation(using: .png, properties: [:]) else { throw ValidationError("Cannot encode embedded Chromium.") }
-                    try png.write(to: output.appendingPathComponent("Radius-chromium.png"))
+                    guard let view = window.contentView else { throw ValidationError("Cannot capture embedded Chromium.") }
+                    try capture(view, to: output.appendingPathComponent("Radius-chromium.png"))
                     trace("Closing Chromium while WebKit and Radius remain open")
                     browser.closeTab(id)
                     let closeDeadline = Date().addingTimeInterval(10)
@@ -185,6 +210,12 @@ enum AppSmokeTest {
             // Let this actor job return before AppKit enters its deferred-termination loop.
             NSApp.perform(#selector(NSApplication.terminate(_:)), with: nil, afterDelay: 0)
         } catch { fail(error.localizedDescription) }
+    }
+    private static func capture(_ view: NSView, to url: URL) throws {
+        guard let image = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw ValidationError("Cannot capture \(url.lastPathComponent).") }
+        view.cacheDisplay(in: view.bounds, to: image)
+        guard let png = image.representation(using: .png, properties: [:]), png.count > 1000 else { throw ValidationError("The \(url.lastPathComponent) screenshot was empty.") }
+        try png.write(to: url)
     }
     private static func evaluate(_ tab: ChromiumTab, _ source: String) async throws -> String {
         let data = try await tab.request("Runtime.evaluate", parameters: ["expression": source, "returnByValue": true])

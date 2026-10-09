@@ -144,7 +144,10 @@ class Client final : public CefClient, public CefLifeSpanHandler,
   CefRefPtr<CefDownloadHandler> GetDownloadHandler() override { return this; }
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
     if (!page_) return;
-    Trace("browser created");
+    if (diagnostics) {
+      std::fprintf(stderr,"Radius Chromium: browser created id=%d popup=%d\n",browser->GetIdentifier(),browser->IsPopup());
+      std::fflush(stderr);
+    }
     page_->browser = browser;
     page_->pending_popup = false;
     for (auto& entry : pages) entry.second->client->ForgetPopup(page_);
@@ -162,6 +165,7 @@ class Client final : public CefClient, public CefLifeSpanHandler,
   }
   void OnBeforeClose(CefRefPtr<CefBrowser>) override {
     if (!page_) return;
+    Trace("browser closing");
     Page* page = page_; page_ = nullptr;
     page->observer = nullptr;
     page->browser = nullptr;
@@ -189,6 +193,7 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     child->pending_popup = true;
     child->navigated = true;
     const bool adopted = page_->popup(page_->callback_context, child, url.c_str()) != 0;
+    Trace(adopted ? "popup adopted by native tab" : "popup rejected by native tab");
     if (!adopted) { Destroy(child); return true; }
     pending_popups_[popup_id] = child;
     window.SetAsChild(child->view, CefRect(0,0,800,600));
@@ -197,6 +202,7 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     return false;
   }
   void OnBeforePopupAborted(CefRefPtr<CefBrowser>, int popup_id) override {
+    Trace("popup creation aborted");
     auto found = pending_popups_.find(popup_id);
     if (found == pending_popups_.end()) return;
     Page* child = found->second; pending_popups_.erase(found);
@@ -204,8 +210,12 @@ class Client final : public CefClient, public CefLifeSpanHandler,
       Message(child, RADIUS_CEF_CLOSED, "Popup could not be created."); Destroy(child);
     }
   }
-  void OnTitleChange(CefRefPtr<CefBrowser>, const CefString& title) override {
+  void OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString& title) override {
     if (!page_ || !page_->navigated) return;
+    if (diagnostics && browser->IsPopup()) {
+      std::fprintf(stderr,"Radius Chromium: popup title id=%d length=%zu\n",browser->GetIdentifier(),title.length());
+      std::fflush(stderr);
+    }
     page_->title = title.ToString();
     auto value = CefDictionaryValue::Create(); value->SetString("title", title); Emit(page_,RADIUS_CEF_STATE,value);
   }
@@ -295,6 +305,11 @@ class ContextHandler final : public CefRequestContextHandler {
     // CEF gives callbacks fresh C++ wrappers; their pointer identity differs.
     if (stopped || context == contexts.end() || context->second.generation != generation_) return;
     Trace("request context ready");
+    // Chrome's popup blocker runs before CEF OnBeforePopup. Let requests reach
+    // our handler, which enforces Radius's popup toggle and user-gesture policy
+    // for every page, including private contexts and adopted popups.
+    context->second.value->SetContentSetting(CefString(),CefString(),
+        CEF_CONTENT_SETTING_TYPE_POPUPS,CEF_CONTENT_SETTING_VALUE_ALLOW);
     context->second.ready = true;
     std::vector<Page*> waiting;
     for (auto& entry : pages)

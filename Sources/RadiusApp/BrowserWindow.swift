@@ -17,11 +17,12 @@ struct BrowserWindowRoot: View {
         .frame(minWidth: 760, minHeight: 520)
         .task {
             if !app.ready { await app.load() }
-            if app.ready && model == nil { createModel() }
+            if app.ready && (model == nil || model?.isClosed == true) { createModel() }
         }
         .onOpenURL { url in
             guard AddressResolver.isWebURL(url) else { return }
-            if let model { model.newTab(url: url) } else { pendingURLs.append(url) }
+            if let model, !model.isClosed { model.newTab(url: url) }
+            else { pendingURLs.append(url); if app.ready { createModel() } }
         }
         .onChange(of: app.ready) { _, ready in
             if ready && model == nil { createModel() }
@@ -55,6 +56,10 @@ struct BrowserWindow: View {
         return panel
     }
     var body: some View {
+        if model.isClosed { Color.clear }
+        else { content }
+    }
+    private var content: some View {
         VStack(spacing: 0) {
             if !model.focusMode {
                 if layout.tabs == .top { tabs(vertical: false) }

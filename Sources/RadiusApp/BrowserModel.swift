@@ -6,7 +6,8 @@ import RadiusCore
 
 @MainActor
 final class BrowserModel: ObservableObject {
-    @Published var session: WindowSession { didSet { if !isPrivate { app.updateSession(session) } } }
+    @Published var session: WindowSession { didSet { if !isPrivate && !isClosed { app.updateSession(session) } } }
+    @Published private(set) var isClosed = false
     @Published var panel: BrowserPanel? = nil
     @Published var address = ""
     var addressEditing = false
@@ -33,6 +34,10 @@ final class BrowserModel: ObservableObject {
     func webTab(_ id: UUID) -> BrowserEngineTab {
         if let cached = webTabs[id] { return cached }
         let engine = session.tabs.first(where: { $0.id == id })?.engineID ?? .webkit
+        guard !isClosed else {
+            let tab = UnavailableEngineTab(engine: engine, reason: "This browser window is closed.")
+            webTabs[id] = tab; return tab
+        }
         let tab: BrowserEngineTab
         if engine == .chromium {
             do { tab = try ChromiumRuntime.shared.makeTab(profileID: session.profileID, privateSessionID: isPrivate ? session.id : nil, dataDirectory: app.dataDirectory) }
@@ -47,7 +52,7 @@ final class BrowserModel: ObservableObject {
     }
     private func attach(_ tab: BrowserEngineTab, id: UUID) {
         tab.onChange = { [weak self, weak tab] finished in
-            guard let self, let tab, let index = self.session.tabs.firstIndex(where: { $0.id == id }) else { return }
+            guard let self, !self.isClosed, let tab, let index = self.session.tabs.firstIndex(where: { $0.id == id }) else { return }
             if let url = tab.url, AddressResolver.isWebURL(url) || url.scheme == "blob" || url.absoluteString == "about:blank" {
                 self.session.tabs[index].url = url
                 self.session.tabs[index].title = String((tab.title ?? url.host ?? "Website").prefix(512))
@@ -72,6 +77,7 @@ final class BrowserModel: ObservableObject {
     }
     func updatePopupPolicy() { webTabs.values.forEach { $0.updatePopupPolicy() } }
     func navigate(_ input: String) {
+        guard !isClosed else { return }
         guard let url = AddressResolver.resolve(input, search: app.library.preferences.search) else {
             app.notice = "Enter a website address or search. Only HTTP and HTTPS addresses are supported."; return
         }
@@ -81,6 +87,7 @@ final class BrowserModel: ObservableObject {
         tab.load(url)
     }
     func newTab(url: URL? = nil, parentID: UUID? = nil, engine: BrowserEngineID? = nil) {
+        guard !isClosed else { return }
         if let url, !AddressResolver.isWebURL(url) { app.notice = "This page cannot be reopened in a separate browsing context."; return }
         if let parentID, !session.tabs.contains(where: { $0.id == parentID }) || session.ancestors(of: parentID).count >= 8 {
             app.notice = "Tab trees support up to eight levels. Open this page as a top-level tab instead."; return
@@ -146,7 +153,7 @@ final class BrowserModel: ObservableObject {
     }
     func synchronizeSplit(force: Bool = false) {
         // A layout preview must not create or persist browsing tabs.
-        guard app.previewConfiguration == nil else { return }
+        guard !isClosed, app.previewConfiguration == nil else { return }
         if app.configuration.layout.split != nil {
             if force { session.splitSuppressed = nil }
             if session.splitSuppressed != true { session.enableSplit(defaultEngine: profile.engineID ?? .webkit) }
@@ -185,7 +192,7 @@ final class BrowserModel: ObservableObject {
         changeProfile(id)
     }
     func changeProfile(_ id: UUID) {
-        guard app.library.profiles.contains(where: { $0.id == id }) else { return }
+        guard !isClosed, app.library.profiles.contains(where: { $0.id == id }) else { return }
         webTabs.values.forEach { $0.dispose() }; webTabs.removeAll(); closedTabs.removeAll()
         session.profileID = id; panel = nil
         for i in session.tabs.indices {
@@ -213,7 +220,7 @@ final class BrowserModel: ObservableObject {
         changeEngine(id, to: engine)
     }
     func changeEngine(_ id: UUID, to engine: BrowserEngineID) {
-        guard let index = session.tabs.firstIndex(where: { $0.id == id }) else { return }
+        guard !isClosed, let index = session.tabs.firstIndex(where: { $0.id == id }) else { return }
         if let url = session.tabs[index].url, !AddressResolver.isWebURL(url) { return }
         webTabs.removeValue(forKey: id)?.dispose()
         session.tabs[index].engineID = engine
@@ -231,6 +238,8 @@ final class BrowserModel: ObservableObject {
         }
     }
     func closeWindow() {
+        guard !isClosed else { return }
+        isClosed = true
         disposeEngineTabs()
         downloads.cancelAll()
         if !isPrivate { app.closeSession(session.id) }
