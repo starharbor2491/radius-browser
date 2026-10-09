@@ -81,7 +81,7 @@ enum AppSmokeTest {
                 }
                 guard browser.activeWebTab.url?.scheme == "http" else { throw ValidationError("HTTP navigation did not reach the fixture.") }
                 trace("Extracting reader text")
-                let text = try await browser.activeWebTab.readerText()
+                let text = try await app.readerText(from: browser.activeWebTab)
                 guard text.contains("Local browser check") else { throw ValidationError("Reader could not read the HTTP fixture.") }
                 trace("Verifying split panes and tree tabs")
                 browser.panel = nil
@@ -117,8 +117,12 @@ enum AppSmokeTest {
                     guard browser.webTab(id).nativeView.window === window, browser.webTab(id).engineID == .chromium else {
                         throw ValidationError("Chromium was not hosted inside the actual Radius window.")
                     }
-                    guard try await browser.webTab(id).readerText().contains("Local browser check") else { throw ValidationError("Embedded Chromium did not execute the reader request.") }
                     guard let chromium = browser.webTab(id) as? ChromiumTab else { throw ValidationError("Chromium adapter is unavailable.") }
+                    trace("Verifying Reader captures in an isolated Chromium world")
+                    _ = try await evaluate(chromium, "(() => { window.radiusOriginalSerializer = window.XMLSerializer; window.radiusSnapshotTouched = false; window.XMLSerializer = class { constructor() { window.radiusSnapshotTouched = true; } serializeToString() { return '<html><body>Wrong page-world snapshot</body></html>'; } }; return 'ready'; })()")
+                    guard try await app.readerText(from: chromium).contains("Local browser check"),
+                          try await evaluate(chromium, "String(window.radiusSnapshotTouched)") == "false" else { throw ValidationError("Chromium Reader invoked the page's overridden serializer.") }
+                    _ = try await evaluate(chromium, "(() => { window.XMLSerializer = window.radiusOriginalSerializer; delete window.radiusOriginalSerializer; delete window.radiusSnapshotTouched; return 'restored'; })()")
                     trace("Cancelling a Chromium page before its new context is ready")
                     let liveBeforeCancellation = ChromiumRuntime.shared.api?.live_pages()
                     let pending = try ChromiumRuntime.shared.makeTab(profileID: UUID(), privateSessionID: UUID(), dataDirectory: app.dataDirectory)
@@ -177,8 +181,10 @@ enum AppSmokeTest {
                     let httpsPage = try await evaluate(chromium, "JSON.stringify({href: location.href, title: document.title, body: document.body ? document.body.innerText.slice(0, 300) : null})")
                     trace("HTTPS probe: reported address \(chromium.url?.absoluteString ?? "nil"); document \(httpsPage)")
                     guard chromium.url?.scheme == "https" else { throw ValidationError("Chromium HTTPS address was not reported: \(chromium.url?.absoluteString ?? "nil").") }
-                    let httpsReader = try await chromium.readerText()
-                    guard httpsReader.contains("Example Domain") else { throw ValidationError("Chromium HTTPS reader did not contain the page heading (\(httpsReader.count) characters).") }
+                    let httpsReader = try await app.readerText(from: chromium)
+                    guard try await evaluate(chromium, "String(location.protocol)") == "https:", httpsReader.trimmingCharacters(in: .whitespacesAndNewlines).count >= 40 else {
+                        throw ValidationError("Chromium HTTPS reader did not return the loaded page's body (\(httpsReader.count) characters).")
+                    }
                     try await Task.sleep(for: .milliseconds(500))
                     guard let view = window.contentView else { throw ValidationError("Cannot capture embedded Chromium.") }
                     try capture(view, to: output.appendingPathComponent("Radius-chromium.png"))

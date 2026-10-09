@@ -21,3 +21,9 @@ Run `./scripts/test.sh` on macOS or Linux with Swift 6 and SQLite development he
 - Simulate web-content process termination. Native browser controls, settings, Modules, Customize, and Recovery must remain usable.
 
 For the optional Chromium development build, reopen an HTTP/HTTPS tab explicitly in each engine, confirm the reload notice and separate sign-ins, and change the default for new tabs. Closing the last tab and opening the second split pane must honor that default; Duplicate must retain the source engine. Check per-profile and separate-private-window cookies/local storage, popup openers, reader, capture, errors, reload/back/forward, and close/quit while both engines are mounted. Downloads and media are disclosed as unavailable in Chromium. A missing runtime must show native recovery even on a blank tab. Clear website data after restarting to close Chromium. Consumer engine and extension acceptance is in CHROMIUM.md.
+
+## Reader package
+
+Reader captures at most 1 MB of serialized page HTML. The trusted one-shot worker parses text without executing scripts, rejects DTD/entity declarations, bounds traversal/output, and exits. This is best-effort article/main/body extraction; it does not promise Mozilla Readability compatibility.
+
+Verify that disabling or uninstalling Reader cancels an extraction and removes its installed worker, and that reinstalling restores operation. Dismiss the sheet or close/change its source tab during extraction; no worker should remain running and no old result should appear under a new page title. Private extraction should leave no saved reader document, history entry, session, or notes. Test complex, malformed, multilingual, and dynamically generated pages. Oversized pages should show a usable explanation while browsing remains available.

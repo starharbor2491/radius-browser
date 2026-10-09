@@ -14,6 +14,7 @@ final class WebTab: BrowserEngineTab, WKNavigationDelegate, WKUIDelegate {
     override var engineID: BrowserEngineID { .webkit }
     private let downloads: DownloadCenter
     private var observations: [NSKeyValueObservation] = []
+    private var pageSnapshots: [UUID: WebPageSnapshotRequest] = [:]
     init(dataStore: WKWebsiteDataStore, downloads: DownloadCenter, configuration: WKWebViewConfiguration? = nil) {
         let config = configuration ?? WKWebViewConfiguration()
         if configuration == nil { config.websiteDataStore = dataStore }
@@ -42,6 +43,7 @@ final class WebTab: BrowserEngineTab, WKNavigationDelegate, WKUIDelegate {
     override func goForward() { webView.goForward() }
     override func setZoom(_ value: Double) { super.setZoom(value); webView.pageZoom = zoom }
     override func dispose() {
+        pageSnapshots.values.forEach { $0.cancel() }; pageSnapshots.removeAll()
         webView.stopLoading(); webView.navigationDelegate = nil; webView.uiDelegate = nil
         observations.removeAll(); super.dispose()
     }
@@ -49,7 +51,11 @@ final class WebTab: BrowserEngineTab, WKNavigationDelegate, WKUIDelegate {
         loading = webView.isLoading; canGoBack = webView.canGoBack; canGoForward = webView.canGoForward
         onChange?(finished)
     }
-    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) { errorMessage = nil; loading = true; refresh(false) }
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        didStartNavigation()
+        pageSnapshots.values.forEach { $0.cancel() }; pageSnapshots.removeAll()
+        errorMessage = nil; loading = true; refresh(false)
+    }
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) { refresh(false) }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { loading = false; refresh(true) }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { failed(error) }
@@ -60,6 +66,7 @@ final class WebTab: BrowserEngineTab, WKNavigationDelegate, WKUIDelegate {
         refresh(false)
     }
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        pageSnapshots.values.forEach { $0.cancel() }; pageSnapshots.removeAll()
         loading = false; errorMessage = "The website's process stopped. Reload the page to continue."; refresh(false)
     }
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
@@ -144,16 +151,63 @@ final class WebTab: BrowserEngineTab, WKNavigationDelegate, WKUIDelegate {
             }
         }
     }
-    override func readerText() async throws -> String {
-        let script = "(() => { const e = document.querySelector('article') || document.querySelector('main') || document.body; return e ? e.innerText.slice(0, 200000) : ''; })()"
-        let result = try await webView.evaluateJavaScript(script)
-        guard let text = result as? String, !text.isEmpty else { throw ValidationError("This page has no readable text.") }
-        return text
+    override func pageHTML() async throws -> String {
+        let script = "(() => { const html = document.documentElement ? new XMLSerializer().serializeToString(document.documentElement) : ''; if (html.length > 1048576) throw new Error('Page snapshot exceeds 1 MB.'); return html; })()"
+        let id = UUID(), request = WebPageSnapshotRequest()
+        pageSnapshots[id] = request
+        defer { pageSnapshots.removeValue(forKey: id) }
+        return try await request.capture { completion in
+            // The isolated client world uses native DOM primitives even if a page
+            // replaces XMLSerializer in its own JavaScript world.
+            webView.evaluateJavaScript(script, in: nil, in: .defaultClient, completionHandler: completion)
+        }
     }
     override func find(_ text: String, backwards: Bool = false) {
         guard !text.isEmpty else { return }
         let config = WKFindConfiguration(); config.backwards = backwards; config.wraps = true
         webView.find(text, configuration: config) { _ in }
+    }
+}
+
+/// WebKit cannot cancel an individual JavaScript evaluation. Release the host's
+/// wait on cancellation/deadline, and let late callbacks address only this request.
+@MainActor
+final class WebPageSnapshotRequest {
+    private let timeout: Duration
+    private var continuation: CheckedContinuation<String, any Error>?
+    private var watchdog: Task<Void, Never>?
+    private var hasStarted = false
+    private var cancelled = false
+    init(timeout: Duration = .seconds(8)) { self.timeout = timeout }
+
+    func capture(using evaluate: (@escaping @MainActor @Sendable (Result<Any, any Error>) -> Void) -> Void) async throws -> String {
+        guard !hasStarted else { throw ValidationError("A page snapshot request can only be used once.") }
+        hasStarted = true
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            guard !cancelled else { throw CancellationError() }
+            return try await withCheckedThrowingContinuation { continuation in
+                self.continuation = continuation
+                watchdog = Task { [weak self, timeout] in
+                    do { try await Task.sleep(for: timeout) } catch { return }
+                    self?.finish(.failure(ValidationError("The page did not respond to Reader in time. Try reloading it.")))
+                }
+                evaluate { [weak self] result in self?.finish(result) }
+            }
+        } onCancel: { Task { @MainActor [weak self] in self?.cancel() } }
+    }
+    func cancel() { cancelled = true; finish(.failure(CancellationError())) }
+    private func finish(_ result: Result<Any, any Error>) {
+        guard let continuation else { return }
+        self.continuation = nil; watchdog?.cancel(); watchdog = nil
+        switch result {
+        case .failure(let error): continuation.resume(throwing: error)
+        case .success(let value):
+            guard let html = value as? String, html.utf8.count <= ReaderRequest.maximumHTMLBytes else {
+                continuation.resume(throwing: ValidationError("The page snapshot exceeds 1 MB.")); return
+            }
+            continuation.resume(returning: html)
+        }
     }
 }
 struct WebViewHost: NSViewRepresentable {

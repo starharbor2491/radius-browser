@@ -13,7 +13,7 @@ public enum ModuleCapability: String, Codable, CaseIterable, Sendable {
     }
 }
 public enum ModuleRuntime: String, Codable, Sendable {
-    case nativeResourceWorker
+    case nativeResourceWorker, nativeReaderWorker
 }
 public struct ModuleManifest: Identifiable, Codable, Equatable, Sendable {
     public var id: String
@@ -41,7 +41,8 @@ public struct ModuleManifest: Identifiable, Codable, Equatable, Sendable {
               source.scheme == "https", source.host != nil, source.user == nil, source.password == nil else {
             throw ValidationError("The module manifest contains invalid metadata.")
         }
-        guard runtime == nil || capability == .resourceMonitor else { throw ValidationError("This native worker role is not supported.") }
+        guard runtime == nil || (runtime == .nativeResourceWorker && capability == .resourceMonitor) ||
+              (runtime == .nativeReaderWorker && capability == .reader) else { throw ValidationError("This native worker role is not supported.") }
     }
     public static func validID(_ id: String) -> Bool {
         !id.isEmpty && id == id.lowercased() && id.count <= 80 && !id.hasPrefix(".") && !id.contains("..") &&
@@ -63,7 +64,7 @@ public struct InstalledModule: Identifiable, Equatable, Sendable {
 private struct ModuleReceipt: Codable { var enabled: Bool }
 private struct ModuleTransaction: Codable { let id: String; let stage: String; let backup: String }
 
-/// Native resource packages contain their executable payload. Other capabilities remain descriptors.
+/// Native packages contain their executable payload. Other capabilities remain descriptors.
 /// Execution trust is checked by the application against its bundled first-party worker bytes.
 public struct ModuleRepository: Sendable {
     public let root: URL
@@ -133,7 +134,7 @@ public struct ModuleRepository: Sendable {
         try manifest.validate()
         if manifest.runtime != nil {
             guard let payload, !payload.isEmpty, payload.count <= 8 * 1024 * 1024 else {
-                throw ValidationError("A native resource package needs its executable payload (up to 8 MB).")
+                throw ValidationError("A native package needs its executable payload (up to 8 MB).")
             }
         } else if payload != nil { throw ValidationError("Descriptor packages cannot contain executable payloads.") }
         try recoverInterruptedInstallation()
@@ -200,9 +201,9 @@ public struct ModuleRepository: Sendable {
         }
         try writeResourceProviderSelection(id)
     }
-    public func workerURL(for id: String) throws -> URL {
-        guard let module = try installed().first(where: { $0.id == id }), module.enabled,
-              module.manifest.runtime == .nativeResourceWorker else { throw ValidationError("This resource worker is not enabled.") }
+    public func workerURL(for id: String, requireEnabled: Bool = true) throws -> URL {
+        guard let module = try installed().first(where: { $0.id == id }), !requireEnabled || module.enabled,
+              module.manifest.runtime != nil else { throw ValidationError("This native worker is not enabled.") }
         let url = root.appendingPathComponent(id).appendingPathComponent("worker")
         guard let size = try workerPayloadSize(url), size > 0, size <= 8 * 1024 * 1024,
               FileManager.default.isExecutableFile(atPath: url.path) else {

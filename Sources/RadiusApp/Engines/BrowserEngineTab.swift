@@ -12,6 +12,7 @@ class BrowserEngineTab: NSObject, ObservableObject {
     @Published var canGoForward = false
     @Published var errorMessage: String?
     @Published var zoom = 1.0
+    @Published private(set) var navigationRevision = UUID()
     var onChange: ((Bool) -> Void)?
     var onCreateWindow: ((BrowserEngineTab, URL?) -> Bool)?
     var onClose: (() -> Void)?
@@ -26,11 +27,12 @@ class BrowserEngineTab: NSObject, ObservableObject {
     func stop() { preconditionFailure("An engine must implement stop") }
     func goBack() { preconditionFailure("An engine must implement back navigation") }
     func goForward() { preconditionFailure("An engine must implement forward navigation") }
+    func didStartNavigation() { navigationRevision = UUID() }
     func setZoom(_ value: Double) { zoom = min(3, max(0.5, value)) }
     func updatePopupPolicy() {}
     func focus() { nativeView.window?.makeFirstResponder(nativeView) }
     func find(_ text: String, backwards: Bool = false) { preconditionFailure("An engine must implement find") }
-    func readerText() async throws -> String { throw ValidationError("This engine cannot extract page text.") }
+    func pageHTML() async throws -> String { throw ValidationError("This engine cannot capture page HTML.") }
     func saveScreenshot(app: AppState) { app.notice = "This engine cannot capture the page." }
     func dispose() { onChange = nil; onCreateWindow = nil; onClose = nil; onNotice = nil; allowPopups = nil }
 }

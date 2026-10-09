@@ -23,7 +23,7 @@ You can also open `Package.swift` in Xcode and run the Radius executable. CI pro
 - Navigation, search, find, page zoom, popup controls, JavaScript dialogs, and web-process crash recovery.
 - Profile-separated website storage, bookmarks, history, and notes; private windows with temporary website storage and no saved browsing metadata.
 - Bookmark HTML import/export and WebKit downloads with a native destination picker.
-- Resource Monitor and Memory Breakdown as real executable packages: install, disable, replace the active provider, or uninstall its code. Sampling runs only while the Resources panel is open. Notes, Reader, Page Capture, and Focus Mode use removable descriptors whose implementations remain in the native host.
+- Resource Monitor, Memory Breakdown, and Reader as real executable packages: install, disable, repair, or uninstall their code. Resource providers are replaceable and sample only while their panel is open. Reader receives a bounded HTML snapshot, extracts text on request, and exits. Notes, Page Capture, and Focus Mode use removable descriptors whose implementations remain in the native host.
 - macOS, Material-inspired, Liquid Glass-inspired, and Graphite appearance; light/dark/system modes, accent, density, corners, transparency, and accessibility preferences.
 - Navigation at top/bottom, left/right/hidden sidebar, adjustable width, bookmarks and status bars.
 - Preview, undo, named setups, configuration-only import/export, and native recovery independent of website engines.

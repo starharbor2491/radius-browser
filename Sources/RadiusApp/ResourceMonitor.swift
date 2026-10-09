@@ -118,7 +118,7 @@ struct ResourcePanel: View {
                     }
                     Text(frame.detail).font(.caption).foregroundStyle(.secondary)
                 } else if worker.failure == nil { ProgressView("Starting resource provider…") }
-                if let failure = worker.failure { Text(failure).font(.callout).foregroundStyle(.orange) }
+                if let failure = worker.failure { Label(failure, systemImage: "exclamationmark.triangle").font(.callout).foregroundStyle(.primary) }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(16)
         }
         .task(id: app.resourceWorkerGeneration) {

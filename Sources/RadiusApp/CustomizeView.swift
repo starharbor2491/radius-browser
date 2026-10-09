@@ -56,6 +56,7 @@ struct CustomizeView: View {
                             Circle().fill(accent.color).frame(width: 28, height: 28)
                                 .overlay { if draft.theme.accent == accent { Image(systemName: "checkmark").font(.caption.bold()).foregroundStyle(accent == .teal || accent == .orange ? Color.black : Color.white) } }
                                 .overlay { if draft.theme.accent == accent { Circle().stroke(.primary, lineWidth: 2).padding(-3) } }
+                                .padding(4).contentShape(Rectangle())
                         }.buttonStyle(.plain).help(accent.rawValue.capitalized).accessibilityLabel("\(accent.rawValue.capitalized) accent")
                             .accessibilityAddTraits(draft.theme.accent == accent ? .isSelected : [])
                     }

@@ -11,6 +11,7 @@ if [[ "$(uname -s)" == Darwin ]]; then
   done
   swift build -c "$configuration" --product RadiusResourceMonitor
   swift build -c "$configuration" --product RadiusMemoryMonitor
+  swift build -c "$configuration" --product RadiusReaderWorker
 fi
 swift test "$@"
 python3 scripts/validate-packages.py

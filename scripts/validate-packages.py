@@ -18,7 +18,7 @@ for path in sorted(root.glob("*/manifest.json")):
     assert not manifest["dependencies"], path
 assert len(found) == 6, f"Expected six official packages, found {len(found)}"
 workers = [json.loads(path.read_text()) for path in root.glob("*/manifest.json") if json.loads(path.read_text()).get("runtime")]
-assert {item["id"] for item in workers} == {"org.radius.resource-monitor", "org.radius.memory-monitor"}
-assert all(item["runtime"] == "nativeResourceWorker" and item["capability"] == "resourceMonitor" for item in workers)
-assert sum(item["defaultInstalled"] for item in workers) == 1
-print("Six official package manifests validated (two native workers, four descriptors).")
+assert {item["id"] for item in workers} == {"org.radius.resource-monitor", "org.radius.memory-monitor", "org.radius.reader"}
+assert all((item["runtime"], item["capability"]) in {("nativeResourceWorker", "resourceMonitor"), ("nativeReaderWorker", "reader")} for item in workers)
+assert sum(item["defaultInstalled"] for item in workers if item["capability"] == "resourceMonitor") == 1
+print("Six official package manifests validated (three native workers, three descriptors).")

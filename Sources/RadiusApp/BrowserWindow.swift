@@ -45,6 +45,7 @@ struct BrowserWindow: View {
     @State private var reader: String?
     @State private var readerTitle = ""
     @State private var extracting = false
+    @State private var readerTask: Task<Void, Never>?
     @Environment(\.openWindow) private var openWindow
     @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
     private var layout: BrowserLayout { app.configuration.layout }
@@ -101,17 +102,25 @@ struct BrowserWindow: View {
             }
             .background(Color(nsColor: .windowBackgroundColor))
         }
-        .sheet(isPresented: Binding(get: { reader != nil }, set: { if !$0 { reader = nil } })) {
+        .sheet(isPresented: Binding(get: { reader != nil }, set: { if !$0 { readerTask?.cancel(); reader = nil } })) {
             VStack(alignment: .leading, spacing: 16) {
-                HStack { Text(readerTitle).font(.title2); Spacer(); Button("Done") { reader = nil }.keyboardShortcut(.defaultAction) }
+                HStack { Text(readerTitle).font(.title2); Spacer(); Button("Done") { readerTask?.cancel(); reader = nil }.keyboardShortcut(.defaultAction) }
                 ScrollView { Text(reader ?? "").font(.system(size: 18, design: .serif)).lineSpacing(7).textSelection(.enabled).frame(maxWidth: 660, alignment: .leading).padding(24).frame(maxWidth: .infinity) }
             }.padding(24).frame(width: 760, height: 640).background(Color(nsColor: .windowBackgroundColor))
         }
         .onReceive(NotificationCenter.default.publisher(for: .radiusFocusAddress)) { notification in if notification.object as? UUID == model.session.id { addressFocused = true } }
         .onReceive(NotificationCenter.default.publisher(for: .radiusFind)) { notification in if notification.object as? UUID == model.session.id { findVisible = true; findFocused = true } }
-        .onExitCommand { model.focusMode = false; findVisible = false; addressFocused = false }
-        .onChange(of: app.installedModules) { _, _ in if !app.enabled(.focusMode) { model.focusMode = false } }
-        .onChange(of: model.session.selectedTabID) { _, _ in findVisible = false; model.addressEditing = addressFocused }
+        .onExitCommand { model.focusMode = false; findVisible = false; addressFocused = false; readerTask?.cancel(); reader = nil }
+        .onChange(of: app.installedModules) { _, _ in
+            if !app.enabled(.focusMode) { model.focusMode = false }
+            if !app.enabled(.reader) { readerTask?.cancel(); reader = nil }
+        }
+        .onChange(of: model.session.selectedTabID) { _, _ in findVisible = false; model.addressEditing = addressFocused; readerTask?.cancel(); reader = nil }
+        .onChange(of: model.session.profileID) { _, _ in readerTask?.cancel(); reader = nil }
+        .onChange(of: model.selectedTab.url) { _, _ in readerTask?.cancel(); reader = nil }
+        .onReceive(model.activeWebTab.$navigationRevision.dropFirst()) { _ in readerTask?.cancel(); reader = nil }
+        .onChange(of: model.sheet) { _, sheet in if sheet != nil { readerTask?.cancel(); reader = nil } }
+        .onDisappear { readerTask?.cancel(); reader = nil }
         .onChange(of: addressFocused) { _, focused in model.addressEditing = focused }
         .onChange(of: findVisible) { _, visible in if visible { findFocused = true } }
         .onChange(of: app.library.preferences.blockPopups) { _, _ in model.updatePopupPolicy() }
@@ -343,18 +352,21 @@ struct BrowserWindow: View {
     }
     private func openReader() {
         let source = model.activeWebTab, descriptor = model.selectedTab, profileID = model.session.profileID
+        let revision = source.navigationRevision
         extracting = true
-        Task {
+        readerTask = Task {
             defer { extracting = false }
             do {
-                let text = try await source.readerText()
+                let text = try await app.readerText(from: source)
+                try Task.checkCancellation()
                 guard model.selectedTab.id == descriptor.id, model.selectedTab.url == descriptor.url,
-                      model.session.profileID == profileID, model.activeWebTab === source else { return }
+                      model.session.profileID == profileID, model.activeWebTab === source, source.navigationRevision == revision else { return }
                 readerTitle = descriptor.title; reader = text
             }
+            catch is CancellationError { }
             catch {
                 guard model.selectedTab.id == descriptor.id, model.selectedTab.url == descriptor.url,
-                      model.session.profileID == profileID, model.activeWebTab === source else { return }
+                      model.session.profileID == profileID, model.activeWebTab === source, source.navigationRevision == revision else { return }
                 app.notice = error.localizedDescription
             }
         }

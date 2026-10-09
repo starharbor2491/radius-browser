@@ -107,6 +107,30 @@ struct ResourceModuleTests {
         }
     }
 
+    @Test func damagedReplacementDoesNotStopTheWorkingProvider() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("radius-resource-preflight-" + UUID().uuidString)
+        let app = AppState(directory: directory), worker = ResourceWorker()
+        defer { worker.stop(); try? FileManager.default.removeItem(at: directory) }
+        await app.load()
+        let original = try app.resourceWorkerPackage()
+        try worker.start(executable: original.url, moduleID: original.id)
+        let process = try #require(worker.process)
+        try await waitForFrame(worker)
+        try app.installApprovedModule("org.radius.memory-monitor")
+        let replacement = directory.appendingPathComponent("Modules/org.radius.memory-monitor/worker")
+        try FileManager.default.removeItem(at: replacement)
+        let generation = app.resourceWorkerGeneration
+        #expect(throws: (any Error).self) { try app.replaceResourceProvider(with: "org.radius.memory-monitor") }
+        #expect(app.resourceWorkerGeneration == generation)
+        #expect(process.isRunning)
+        #expect(try app.resourceWorkerPackage().id == original.id)
+        try app.reinstallApprovedWorker("org.radius.memory-monitor")
+        try app.replaceResourceProvider(with: "org.radius.memory-monitor")
+        #expect(!process.isRunning)
+        #expect(try app.resourceWorkerPackage().id == "org.radius.memory-monitor")
+        #expect(await app.flush())
+    }
+
     private func waitForFrame(_ worker: ResourceWorker) async throws {
         for _ in 0..<150 {
             if worker.frame != nil { return }

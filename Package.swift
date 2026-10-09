@@ -2,11 +2,15 @@
 // SPDX-License-Identifier: MPL-2.0
 import PackageDescription
 
-var products: [Product] = [.library(name: "RadiusCore", targets: ["RadiusCore"])]
+var products: [Product] = [.library(name: "RadiusCore", targets: ["RadiusCore"]),
+    .executable(name: "RadiusReaderWorker", targets: ["RadiusReaderWorker"])]
 var targets: [Target] = [
     .systemLibrary(name: "CSQLite", pkgConfig: "sqlite3", providers: [.apt(["libsqlite3-dev"])]),
     .target(name: "RadiusCore", dependencies: ["CSQLite"]),
-    .testTarget(name: "RadiusCoreTests", dependencies: ["RadiusCore"])
+    .testTarget(name: "RadiusCoreTests", dependencies: ["RadiusCore"]),
+    .target(name: "RadiusReaderLogic", dependencies: ["RadiusCore"]),
+    .executableTarget(name: "RadiusReaderWorker", dependencies: ["RadiusCore", "RadiusReaderLogic"]),
+    .testTarget(name: "RadiusReaderTests", dependencies: ["RadiusCore", "RadiusReaderLogic"])
 ]
 #if os(macOS)
 products.append(.executable(name: "Radius", targets: ["RadiusApp"]))

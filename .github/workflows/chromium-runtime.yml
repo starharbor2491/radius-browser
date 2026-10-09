@@ -56,7 +56,7 @@ jobs:
           evidence = json.loads(path.read_text())
           evidence['radiusEmbeddedRuntimeValidated'] = True
           evidence['testedSource'] = os.environ['GITHUB_SHA']
-          evidence['nativeChecks'] = ['HTTP', 'HTTPS', 'reader', 'PNG capture', 'profiles', 'private windows', 'popup opener', 'tab close', 'normal quit']
+          evidence['nativeChecks'] = ['HTTP', 'HTTPS', 'reader', 'PNG capture', 'profiles', 'private windows', 'normal/private popup policy and opener', 'tab close', 'normal quit']
           path.write_text(json.dumps(evidence, indent=2) + '\n')
           PY
       - uses: actions/upload-artifact@v4

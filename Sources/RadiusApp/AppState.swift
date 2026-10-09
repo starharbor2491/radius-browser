@@ -15,6 +15,7 @@ final class AppState: ObservableObject {
     let dataDirectory: URL
     private(set) var catalog: [ModuleManifest] = []
     private var modulePayloads: [String: Data] = [:]
+    private var readerRequests: [UUID: (moduleID: String, task: Task<String, any Error>)] = [:]
     private var startupTask: Task<Void, Never>?
     private var database: LibraryDatabase?
     private var repository: ModuleRepository?
@@ -72,8 +73,8 @@ final class AppState: ObservableObject {
             .filter { $0.hasDirectoryPath }.map { try ModuleManifest.decode(Data(contentsOf: $0.appendingPathComponent("manifest.json"))) }
             .sorted { $0.name < $1.name }
         modulePayloads = [:]
-        let workers = ["org.radius.resource-monitor": "RadiusResourceMonitor", "org.radius.memory-monitor": "RadiusMemoryMonitor"]
-        for manifest in catalog where manifest.runtime == .nativeResourceWorker {
+        let workers = ["org.radius.resource-monitor": "RadiusResourceMonitor", "org.radius.memory-monitor": "RadiusMemoryMonitor", "org.radius.reader": "RadiusReaderWorker"]
+        for manifest in catalog where manifest.runtime != nil {
             do {
                 guard let product = workers[manifest.id] else { throw ValidationError("An unrecognized native worker is bundled with Radius.") }
                 let packaged = directory.appendingPathComponent(manifest.id).appendingPathComponent("worker")
@@ -86,7 +87,9 @@ final class AppState: ObservableObject {
         }
     }
     func enabled(_ capability: ModuleCapability) -> Bool {
-        installedModules.contains { $0.enabled && $0.manifest.capability == capability }
+        installedModules.contains {
+            $0.enabled && $0.manifest.capability == capability && (capability != .reader || $0.manifest.runtime == .nativeReaderWorker)
+        }
     }
     func resourceWorkerPackage() throws -> (id: String, url: URL) {
         guard let module = installedModules.first(where: { $0.enabled && $0.manifest.capability == .resourceMonitor }) else {
@@ -95,9 +98,13 @@ final class AppState: ObservableObject {
         guard module.manifest.runtime == .nativeResourceWorker else {
             throw ValidationError("Update Resource Monitor in Modules to install its removable worker package.")
         }
-        guard let repository, let trusted = modulePayloads[module.id],
+        return try validatedWorkerPackage(id: module.id)
+    }
+    private func validatedWorkerPackage(id: String, requireEnabled: Bool = true) throws -> (id: String, url: URL) {
+        guard let module = installedModules.first(where: { $0.id == id }), module.manifest.runtime != nil,
+              let repository, let trusted = modulePayloads[id],
               catalog.contains(module.manifest) else { throw ValidationError("This worker is not a trusted package from this Radius build. Update it in Modules.") }
-        let url = try repository.workerURL(for: module.id)
+        let url = try repository.workerURL(for: id, requireEnabled: requireEnabled)
         let file = try FileHandle(forReadingFrom: url)
         defer { try? file.close() }
         let limit = 8 * 1024 * 1024
@@ -111,6 +118,39 @@ final class AppState: ObservableObject {
         }
         return (module.id, url)
     }
+    func readerText(from tab: BrowserEngineTab) async throws -> String {
+        try Task.checkCancellation()
+        guard let module = installedModules.first(where: { $0.enabled && $0.manifest.runtime == .nativeReaderWorker }) else {
+            throw ValidationError("Install or update Reader in Modules to read this page.")
+        }
+        let generation = resourceWorkerGeneration
+        let navigation = tab.navigationRevision
+        _ = try validatedWorkerPackage(id: module.id)
+        let id = UUID()
+        let task = Task {
+            try Task.checkCancellation()
+            guard self.resourceWorkerGeneration == generation, tab.navigationRevision == navigation, !self.terminating else { throw CancellationError() }
+            let html = try await tab.pageHTML()
+            try Task.checkCancellation()
+            guard self.resourceWorkerGeneration == generation, tab.navigationRevision == navigation, !self.terminating else { throw CancellationError() }
+            let package = try self.validatedWorkerPackage(id: module.id)
+            let text = try await ReaderWorker().extract(html: html, executable: package.url, moduleID: package.id)
+            try Task.checkCancellation()
+            guard self.resourceWorkerGeneration == generation, tab.navigationRevision == navigation, !self.terminating else { throw CancellationError() }
+            return text
+        }
+        readerRequests[id] = (module.id, task)
+        defer { readerRequests.removeValue(forKey: id) }
+        let text = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+        try Task.checkCancellation()
+        guard resourceWorkerGeneration == generation, tab.navigationRevision == navigation, !terminating else { throw CancellationError() }
+        return text
+    }
+    func cancelReaderRequests(moduleID: String? = nil) {
+        for request in readerRequests.values where moduleID == nil || request.moduleID == moduleID { request.task.cancel() }
+        ReaderWorker.stopAll(moduleID: moduleID)
+    }
+    func resumeResourceWorkerAfterCancelledQuit() { resourceWorkerGeneration = UUID() }
     func install(_ id: String) {
         perform {
             guard let repository else { throw ValidationError("Open Recovery to repair module storage first.") }
@@ -127,13 +167,14 @@ final class AppState: ObservableObject {
         let activate = installedModules.first { $0.id == id }?.enabled ?? true
         for manifest in plan {
             ResourceWorker.stopAll(moduleID: manifest.id)
+            cancelReaderRequests(moduleID: manifest.id)
             try repository.install(manifest, enabled: manifest.id != id && activate ? true : nil, payload: modulePayloads[manifest.id])
         }
         installedModules = try repository.installed()
     }
     func reinstallWorker(_ module: InstalledModule) {
         perform {
-            guard let bundled = catalog.first(where: { $0.id == module.id && $0.runtime == .nativeResourceWorker }) else {
+            guard let bundled = catalog.first(where: { $0.id == module.id && $0.runtime != nil }) else {
                 throw ValidationError("This worker has no bundled replacement.")
             }
             guard approveModules([bundled]) else { return }
@@ -141,10 +182,11 @@ final class AppState: ObservableObject {
         }
     }
     func reinstallApprovedWorker(_ id: String) throws {
-        guard let repository, let bundled = catalog.first(where: { $0.id == id && $0.runtime == .nativeResourceWorker }),
+        guard let repository, let bundled = catalog.first(where: { $0.id == id && $0.runtime != nil }),
               let current = installedModules.first(where: { $0.id == id }) else { throw ValidationError("This worker has no bundled replacement.") }
         defer { resourceWorkerGeneration = UUID() }
         ResourceWorker.stopAll(moduleID: id)
+        cancelReaderRequests(moduleID: id)
         try repository.install(bundled, enabled: current.enabled, payload: modulePayloads[id])
         installedModules = try repository.installed()
     }
@@ -157,8 +199,8 @@ final class AppState: ObservableObject {
             let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
             guard size <= 32 * 1024 else { throw ValidationError("Module manifests must be smaller than 32 KB.") }
             let manifest = try ModuleManifest.decode(Data(contentsOf: url))
-            guard manifest.runtime == nil, manifest.capability != .resourceMonitor else {
-                throw ValidationError("Native resource workers must come from this Radius build. Install them from Discover; local native publisher verification is not available yet.")
+            guard manifest.runtime == nil, manifest.capability != .resourceMonitor, manifest.capability != .reader else {
+                throw ValidationError("Native workers must come from this Radius build. Install them from Discover; local native publisher verification is not available yet.")
             }
             guard manifest.dependencies.isEmpty else { throw ValidationError("Local modules with dependencies are not supported yet.") }
             guard !catalog.contains(where: { $0.id == manifest.id }), !installedModules.contains(where: { $0.id == manifest.id }) else {
@@ -177,7 +219,7 @@ final class AppState: ObservableObject {
         alert.informativeText = (local ? "Publisher information is self-reported. This package can only use Radius's listed declarative capabilities.\n\n" : "Packages are bundled with this Radius build.\n\n") +
             (permissions.isEmpty ? "No website or system permissions are requested." : permissions.joined(separator: "\n\n"))
         if manifests.contains(where: { $0.runtime != nil }) {
-            alert.informativeText += "\n\nThis installs trusted first-party native code. Workers run outside the app while their panel is open, with the same macOS user access as Radius. They are not sandboxed by the permissions listed above."
+            alert.informativeText += "\n\nThis installs trusted first-party native code. Reader workers run for one requested extraction; resource workers run while their panel is open. Both run outside the app with the same macOS user access as Radius. They are not sandboxed by the permissions listed above."
         }
         alert.addButton(withTitle: "Install"); alert.addButton(withTitle: "Cancel")
         return alert.runModal() == .alertFirstButtonReturn
@@ -193,14 +235,18 @@ final class AppState: ObservableObject {
             return
         }
         perform {
+            if !module.enabled, module.manifest.runtime != nil { _ = try validatedWorkerPackage(id: module.id, requireEnabled: false) }
             defer { resourceWorkerGeneration = UUID() }
             ResourceWorker.stopAll(moduleID: module.id)
+            cancelReaderRequests(moduleID: module.id)
             try repository?.setEnabled(module.id, !module.enabled)
             installedModules = try repository?.installed() ?? []
         }
     }
     func replaceResourceProvider(with id: String) throws {
         guard let repository else { throw ValidationError("Repair module storage first.") }
+        guard installedModules.contains(where: { $0.id == id && $0.manifest.runtime == .nativeResourceWorker }) else { throw ValidationError("Choose an installed resource provider.") }
+        _ = try validatedWorkerPackage(id: id, requireEnabled: false)
         defer { resourceWorkerGeneration = UUID() }
         ResourceWorker.stopAll()
         try repository.replaceResourceProvider(with: id)
@@ -210,12 +256,14 @@ final class AppState: ObservableObject {
         guard let repository else { throw ValidationError("Repair module storage first.") }
         defer { resourceWorkerGeneration = UUID() }
         ResourceWorker.stopAll(moduleID: id)
+        cancelReaderRequests(moduleID: id)
         try repository.uninstall(id)
         installedModules = try repository.installed()
     }
     func uninstall(_ module: InstalledModule) {
         let alert = NSAlert(); alert.messageText = "Uninstall \(module.manifest.name)?"
-        alert.informativeText = module.manifest.runtime == nil ?
+        alert.informativeText = module.manifest.capability == .reader && module.manifest.runtime == nil ?
+            "The legacy Reader descriptor will be deleted. Saved browser data and separately installed Reader packages are kept." : module.manifest.runtime == nil ?
             "The package descriptor will be deleted and its feature will stop. The implementation remains in Radius. Saved notes and settings are kept unless you choose to delete them." :
             "The worker will stop and its installed executable package will be deleted. Saved browser data is kept. You can install this provider again from Discover."
         alert.addButton(withTitle: "Uninstall and keep data"); alert.addButton(withTitle: "Cancel")
@@ -284,6 +332,7 @@ final class AppState: ObservableObject {
         perform {
             defer { resourceWorkerGeneration = UUID() }
             ResourceWorker.stopAll()
+            cancelReaderRequests()
             let old = dataDirectory.appendingPathComponent("Modules", isDirectory: true)
             if FileManager.default.fileExists(atPath: old.path) {
                 try FileManager.default.moveItem(at: old, to: dataDirectory.appendingPathComponent("Modules-backup-" + UUID().uuidString))
@@ -371,6 +420,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let saved = await state.flush()
             self.smokeTrace("Termination flush completed: \(saved)")
             var quit = saved
+            var stoppedWorkersForQuit = false
             if !saved {
                 let alert = NSAlert(); alert.messageText = "Your latest changes could not be saved."
                 alert.informativeText = state.notice ?? "Retry saving from Recovery."
@@ -378,12 +428,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 quit = alert.runModal() == .alertSecondButtonReturn
             }
             if quit {
+                state.cancelReaderRequests()
+                ResourceWorker.stopAll()
+                stoppedWorkersForQuit = true
                 for browser in state.windows.values.compactMap(\.model) { browser.disposeEngineTabs() }
                 quit = await ChromiumRuntime.shared.shutdown()
                 if !quit { state.notice = ChromiumRuntime.shared.status }
             }
             self.smokeTrace("Sending termination reply: \(quit)")
             state.terminating = quit
+            if !quit && stoppedWorkersForQuit { state.resumeResourceWorkerAfterCancelledQuit() }
             sender.reply(toApplicationShouldTerminate: quit)
         }
         smokeTrace("Returning terminateLater")

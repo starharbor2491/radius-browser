@@ -22,7 +22,7 @@ jobs:
       - name: Build native app
         run: ./scripts/build-app.sh
       - name: Verify native integration in release configuration
-        run: swift test -c release --filter 'BrowserIntegrationTests|ResourceModuleTests'
+        run: swift test -c release --filter 'BrowserIntegrationTests|ResourceModuleTests|ReaderModuleTests'
       - name: Launch packaged app and capture native screens
         timeout-minutes: 3
         run: ./scripts/smoke-app.sh

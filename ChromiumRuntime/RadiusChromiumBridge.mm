@@ -234,7 +234,11 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     if (page_) State(page_);
   }
   void OnLoadStart(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame, TransitionType) override {
-    if (page_ && frame->IsMain()) { page_->navigation_failed = false; page_->title.clear(); }
+    if (page_ && frame->IsMain()) {
+      page_->navigation_failed = false; page_->title.clear();
+      auto value = CefDictionaryValue::Create(); value->SetBool("navigationStart",true);
+      Emit(page_,RADIUS_CEF_STATE,value);
+    }
   }
   void OnLoadEnd(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame, int) override {
     if (page_ && frame->IsMain() && !page_->navigation_failed) State(page_,true);
@@ -269,6 +273,41 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     auto parsed = CefParseJSON(std::string(static_cast<const char*>(result),size),JSON_PARSER_RFC);
     if (parsed) value->SetValue("result",parsed);
     Emit(page_,RADIUS_CEF_RESULT,value);
+  }
+  void OnDevToolsEvent(CefRefPtr<CefBrowser>, const CefString& method,
+      const void* params,size_t size) override {
+    if (!page_) return;
+    const std::string name = method.ToString();
+    auto value = CefDictionaryValue::Create();
+    if (name == "Runtime.executionContextsCleared") {
+      value->SetBool("clear",true);
+    } else if (name == "Runtime.executionContextCreated" ||
+               name == "Runtime.executionContextDestroyed") {
+      if (!params || size > 65536) return;
+      auto parsed = CefParseJSON(std::string(static_cast<const char*>(params),size),JSON_PARSER_RFC);
+      auto dictionary = parsed ? parsed->GetDictionary() : nullptr;
+      if (!dictionary) return;
+      if (name == "Runtime.executionContextCreated") {
+        auto context = dictionary->GetDictionary("context");
+        auto auxiliary = context ? context->GetDictionary("auxData") : nullptr;
+        // Only the native Reader world is relevant. Never forward origins,
+        // frame URLs, page worlds, or other DevTools event payloads.
+        if (!context || context->GetString("name") != "org.radius.reader" ||
+            !auxiliary || auxiliary->GetString("type") != "isolated") return;
+        value->SetInt("id",context->GetInt("id"));
+        value->SetString("uniqueID",context->GetString("uniqueId"));
+      } else {
+        value->SetBool("destroyed",true);
+        value->SetInt("id",dictionary->GetInt("executionContextId"));
+        value->SetString("uniqueID",dictionary->GetString("executionContextUniqueId"));
+      }
+    } else return;
+    Emit(page_,RADIUS_CEF_READER_CONTEXT,value);
+  }
+  void OnDevToolsAgentDetached(CefRefPtr<CefBrowser>) override {
+    if (!page_) return;
+    auto value = CefDictionaryValue::Create(); value->SetBool("clear",true);
+    Emit(page_,RADIUS_CEF_READER_CONTEXT,value);
   }
  private:
   Page* page_;

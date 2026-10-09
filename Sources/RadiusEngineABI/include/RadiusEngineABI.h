@@ -12,7 +12,8 @@ typedef void (*radius_cef_event_callback)(void *context, int event, const char *
 typedef int (*radius_cef_popup_callback)(void *context, void *child, const char *url);
 
 enum { RADIUS_CEF_STATE = 1, RADIUS_CEF_FINISHED, RADIUS_CEF_ERROR,
-       RADIUS_CEF_CLOSED, RADIUS_CEF_RESULT, RADIUS_CEF_NOTICE };
+       RADIUS_CEF_CLOSED, RADIUS_CEF_RESULT, RADIUS_CEF_NOTICE,
+       RADIUS_CEF_READER_CONTEXT };
 enum { RADIUS_CEF_LOAD = 1, RADIUS_CEF_RELOAD, RADIUS_CEF_STOP,
        RADIUS_CEF_BACK, RADIUS_CEF_FORWARD, RADIUS_CEF_ZOOM,
        RADIUS_CEF_FIND, RADIUS_CEF_POPUPS, RADIUS_CEF_FOCUS };

@@ -32,7 +32,7 @@ struct ModulesView: View {
                     }
                 }
             }
-            Text("Resource providers contain removable native workers. The other four packages control features whose implementations remain built into Radius.")
+            Text("Reader and resource providers contain removable native workers. Notes, Page Capture, and Focus Mode still control features built into Radius.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack { Button("Import local module…") { app.importModule() }; Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.defaultAction) }
         }.padding(28).frame(width: 760, height: 620)
@@ -49,7 +49,7 @@ struct ModuleCard: View {
                 VStack(alignment: .leading, spacing: 5) {
                     HStack { Text(manifest.name).font(.headline); Text("v\(manifest.version)").font(.caption).foregroundStyle(.secondary) }
                     Text(manifest.summary).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    HStack { Text(manifest.publisher); Text(manifest.runtime == nil ? "· Built-in feature descriptor" : "· Removable native worker"); Link("Source", destination: manifest.source) }.font(.caption).foregroundStyle(.secondary)
+                    HStack { Text(manifest.publisher); Text(packageKind); Link("Source", destination: manifest.source) }.font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
                 if let installed {
@@ -68,17 +68,35 @@ struct ModuleCard: View {
                 if let installed { Text(ByteCountFormatter.string(fromByteCount: Int64(installed.diskBytes), countStyle: .file)) }
             }.font(.caption).foregroundStyle(.secondary)
             Text("No restart required").font(.caption).foregroundStyle(.secondary)
+            if isLegacyReader {
+                HStack {
+                    Text("This legacy descriptor no longer provides Reader. Install or update the removable Reader package.")
+                        .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    if let bundled = app.catalog.first(where: { $0.runtime == .nativeReaderWorker }) {
+                        if let current = app.installedModules.first(where: { $0.id == bundled.id }) {
+                            if current.manifest.version < bundled.version { Button("Update Reader") { app.install(bundled.id) } }
+                            else if !current.enabled { Button("Enable Reader") { app.toggleModule(current) } }
+                        } else { Button("Install Reader") { app.install(bundled.id) } }
+                    }
+                }.font(.caption)
+            }
             if manifest.runtime != nil {
-                Text("Trusted first-party native code · Same macOS user access as Radius · Runs only while its panel is open")
+                Text(manifest.runtime == .nativeReaderWorker ? "Trusted first-party native code · Runs once per extraction, then exits · Same macOS user access as Radius" : "Trusted first-party native code · Same macOS user access as Radius · Runs only while its panel is open")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }.padding(16).background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(.primary.opacity(0.1)))
     }
+    private var isLegacyReader: Bool { manifest.capability == .reader && manifest.runtime == nil }
+    private var packageKind: String {
+        if isLegacyReader { return "· Legacy Reader descriptor" }
+        return manifest.runtime == nil ? "· Built-in feature descriptor" : "· Removable native worker"
+    }
     private var icon: String {
         switch manifest.capability { case .resourceMonitor: "gauge.with.dots.needle.33percent"; case .notes: "note.text"; case .reader: "doc.plaintext"; case .screenshot: "camera.viewfinder"; case .focusMode: "viewfinder" }
     }
     private var enableLabel: String {
-        manifest.runtime != nil && app.installedModules.contains { $0.enabled && $0.manifest.capability == .resourceMonitor && $0.id != manifest.id } ? "Replace current" : "Enable"
+        manifest.runtime == .nativeResourceWorker && app.installedModules.contains { $0.enabled && $0.manifest.capability == .resourceMonitor && $0.id != manifest.id } ? "Replace current" : "Enable"
     }
 }
