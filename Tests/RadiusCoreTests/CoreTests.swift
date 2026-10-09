@@ -100,7 +100,7 @@ import CSQLite
     let directory = temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
     let repository = try ModuleRepository(root: directory)
-    for id in ["../escape", "a/b", ".hidden", "a..b", "", "💣"] {
+    for id in ["../escape", "a/b", ".hidden", "a..b", "", "💣", "ORG.RADIUS.NOTES"] {
         #expect(throws: (any Error).self) { try repository.install(module(id, .notes)) }
     }
     var a = module("org.radius.a", .notes), b = module("org.radius.b", .reader)

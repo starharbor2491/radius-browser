@@ -91,7 +91,7 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
     func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) { downloads.track(download) }
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         let url = navigationAction.request.url
-        guard url == nil || url?.absoluteString == "about:blank" || url.map(AddressResolver.isWebURL) == true else { return nil }
+        guard url == nil || url?.absoluteString == "about:blank" || url?.scheme == "blob" || url.map(AddressResolver.isWebURL) == true else { return nil }
         // WebKit's javaScriptCanOpenWindowsAutomatically setting blocks unsolicited popups.
         // Return a view using the supplied configuration; WebKit preserves the request and opener.
         return onCreateWindow?(configuration, url)

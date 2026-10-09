@@ -6,6 +6,7 @@ import RadiusCore
 @MainActor
 enum AppSmokeTest {
     static func run() async {
+        trace("Starting packaged-app smoke test")
         guard let outputPath = ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_OUTPUT"],
               ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_DATA"] != nil else {
             fail("Smoke test requires isolated data and output directories."); return
@@ -13,6 +14,7 @@ enum AppSmokeTest {
         let output = URL(fileURLWithPath: outputPath, isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+            trace("Waiting for browser window")
             let deadline = Date().addingTimeInterval(20)
             while AppDelegate.state?.ready != true || NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }) == nil || AppDelegate.state?.windows.values.compactMap(\.model).isEmpty != false {
                 if let error = AppDelegate.state?.startupError { throw ValidationError(error) }
@@ -21,9 +23,11 @@ enum AppSmokeTest {
             }
             guard let app = AppDelegate.state, let window = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }),
                   let browser = app.windows.values.compactMap(\.model).first else { throw ValidationError("Browser state is unavailable.") }
+            trace("Browser window opened")
             app.library.preferences.completedOnboarding = true
             browser.panel = .resources
             for design in DesignSystem.allCases {
+                trace("Capturing \(design.rawValue) appearance")
                 var config = Configuration(); config.theme.design = design
                 if design == .graphite { config.layout.tabs = .leading; config.layout.sidebar = .trailing }
                 app.applyConfiguration(config)
@@ -35,6 +39,7 @@ enum AppSmokeTest {
             }
             // Verify native control surfaces render independently of a website engine.
             for sheet in [BrowserSheet.modules, .customize, .settings, .recovery] {
+                trace("Opening \(sheet.rawValue) screen")
                 browser.sheet = sheet
                 try await Task.sleep(for: .milliseconds(400))
                 guard let panel = window.attachedSheet, let view = panel.contentView,
@@ -46,6 +51,7 @@ enum AppSmokeTest {
                 try await Task.sleep(for: .milliseconds(300))
             }
             if let address = ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_URL"] {
+                trace("Navigating to loopback HTTP fixture")
                 browser.navigate(address)
                 let pageDeadline = Date().addingTimeInterval(10)
                 while browser.activeWebTab.webView.title != "Radius HTTP fixture" || browser.activeWebTab.loading {
@@ -57,12 +63,15 @@ enum AppSmokeTest {
                 guard text.contains("Local browser check") else { throw ValidationError("Reader could not read the HTTP fixture.") }
             }
             guard await app.flush() else { throw ValidationError(app.notice ?? "App data could not be saved.") }
-            print("Radius packaged-app smoke test passed.")
+            trace("Radius packaged-app smoke test passed.")
             NSApp.terminate(nil)
         } catch { fail(error.localizedDescription) }
     }
+    private static func trace(_ message: String) {
+        FileHandle.standardOutput.write(Data((message + "\n").utf8))
+    }
     private static func fail(_ message: String) {
-        print("Radius smoke test failed: \(message)")
+        trace("Radius smoke test failed: \(message)")
         exit(1)
     }
 }

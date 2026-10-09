@@ -67,6 +67,27 @@ struct BrowserIntegrationTests {
         browser.closeWindow()
         #expect(await app.flush())
     }
+    @Test func generatedDocumentCanOpenWithoutPersistingItsURL() async throws {
+        let (app, directory) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        app.library.preferences.blockPopups = false
+        let browser = BrowserModel(app: app, isPrivate: false)
+        let parent = browser.activeWebTab
+        parent.webView.loadHTMLString("<html><head><title>Source</title></head><body>Source</body></html>", baseURL: URL(string: "https://fixture.invalid"))
+        try await waitUntil { parent.webView.title == "Source" && !parent.webView.isLoading }
+        _ = try await parent.webView.evaluateJavaScript("const u = URL.createObjectURL(new Blob(['<html><head><title>Generated document</title></head><body>Generated</body></html>'], {type: 'text/html'})); window.open(u, '_blank'); 'opened'")
+        try await waitUntil { browser.session.tabs.count == 2 && browser.activeWebTab.webView.title == "Generated document" }
+        #expect(browser.selectedTab.url?.scheme == "blob")
+        browser.toggleBookmark()
+        #expect(app.library.bookmarks.isEmpty)
+        #expect(await app.flush())
+        let database = try LibraryDatabase(url: directory.appendingPathComponent("library.sqlite"))
+        let saved = try await database.load()
+        #expect(!saved.sessions.flatMap(\.tabs).contains { $0.url?.scheme == "blob" })
+        #expect(!saved.history.contains { $0.url.scheme == "blob" })
+        browser.closeWindow()
+        #expect(await app.flush())
+    }
     private func fixture() async throws -> (AppState, URL) {
         _ = NSApplication.shared
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("radius-native-test-" + UUID().uuidString, isDirectory: true)

@@ -38,7 +38,7 @@ public struct ModuleManifest: Identifiable, Codable, Equatable, Sendable {
         }
     }
     public static func validID(_ id: String) -> Bool {
-        !id.isEmpty && id.count <= 80 && !id.hasPrefix(".") && !id.contains("..") &&
+        !id.isEmpty && id == id.lowercased() && id.count <= 80 && !id.hasPrefix(".") && !id.contains("..") &&
         id.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "." || $0 == "-") }
     }
     public static func decode(_ data: Data) throws -> ModuleManifest {

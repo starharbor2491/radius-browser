@@ -22,6 +22,7 @@ jobs:
       - name: Build native app
         run: ./scripts/build-app.sh
       - name: Launch packaged app and capture native screens
+        timeout-minutes: 2
         run: ./scripts/smoke-app.sh
       - name: Archive application
         run: ditto -c -k --sequesterRsrc --keepParent dist/Radius.app dist/Radius-macOS.zip
