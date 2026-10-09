@@ -64,9 +64,17 @@ struct ResourceModuleTests {
         try await waitForFrame(worker)
         worker.stop() // The panel's onDisappear lifecycle calls the same stop-and-reap path.
         #expect(!process.isRunning)
+        #expect(worker.frame == nil)
         var altered = try Data(contentsOf: package.url); altered.append(0)
         try altered.write(to: package.url)
         #expect(throws: (any Error).self) { try app.resourceWorkerPackage() }
+        let oldGeneration = app.resourceWorkerGeneration
+        try app.reinstallApprovedWorker(package.id)
+        #expect(app.resourceWorkerGeneration != oldGeneration)
+        let repaired = try app.resourceWorkerPackage()
+        try worker.start(executable: repaired.url, moduleID: repaired.id)
+        try await waitForFrame(worker)
+        #expect(worker.frame?.title == "Resource Monitor")
         #expect(await app.flush())
     }
 

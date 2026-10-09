@@ -56,7 +56,8 @@ void SchedulePump(int64_t delay) {
   [[NSRunLoop mainRunLoop] addTimer:pump_timer forMode:NSModalPanelRunLoopMode];
 }
 
-struct Context { CefRefPtr<CefRequestContext> value; size_t pages = 0; bool ready = false; };
+struct Context { CefRefPtr<CefRequestContext> value; size_t pages = 0; bool ready = false; uint64_t generation = 0; };
+uint64_t next_context_generation = 0;
 std::map<std::string, Context> contexts;
 struct Page;
 class Client;
@@ -269,12 +270,13 @@ void CreateReadyPage(Page* page) {
 }
 class ContextHandler final : public CefRequestContextHandler {
  public:
-  explicit ContextHandler(std::string key) : key_(std::move(key)) {}
-  void OnRequestContextInitialized(CefRefPtr<CefRequestContext> value) override {
+  ContextHandler(std::string key,uint64_t generation) : key_(std::move(key)),generation_(generation) {}
+  void OnRequestContextInitialized(CefRefPtr<CefRequestContext>) override {
     const auto context = contexts.find(key_);
     // Closing all waiting tabs removes this context. A stale completion must
     // never create a browser, or initialize a replacement with the same key.
-    if (stopped || context == contexts.end() || context->second.value.get() != value.get()) return;
+    // CEF gives callbacks fresh C++ wrappers; their pointer identity differs.
+    if (stopped || context == contexts.end() || context->second.generation != generation_) return;
     context->second.ready = true;
     std::vector<Page*> waiting;
     for (auto& entry : pages)
@@ -283,6 +285,7 @@ class ContextHandler final : public CefRequestContextHandler {
   }
  private:
   std::string key_;
+  uint64_t generation_;
   IMPLEMENT_REFCOUNTING(ContextHandler);
 };
 
@@ -346,9 +349,10 @@ void* Create(const char* profile,const char* private_window) {
       if (!EnsureDirectory(path)) return nullptr;
       CefString(&settings.cache_path) = path;
     }
-    auto context = CefRequestContext::CreateContext(settings,new ContextHandler(key));
+    const uint64_t generation = ++next_context_generation;
+    auto context = CefRequestContext::CreateContext(settings,new ContextHandler(key,generation));
     if (!context) { last_error="Chromium could not create an isolated website context."; return nullptr; }
-    contexts.emplace(key,Context{context,0});
+    contexts.emplace(key,Context{context,0,false,generation});
   }
   Page* page = Allocate(key);
   if (contexts.at(key).ready) {

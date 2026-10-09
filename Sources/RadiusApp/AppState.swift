@@ -9,7 +9,8 @@ final class AppState: ObservableObject {
     @Published var ready = false
     @Published var startupError: String?
     @Published var notice: String?
-    @Published var installedModules: [InstalledModule] = []
+    @Published var installedModules: [InstalledModule] = [] { didSet { resourceWorkerGeneration = UUID() } }
+    @Published private(set) var resourceWorkerGeneration = UUID()
     @Published var previewConfiguration: Configuration?
     let dataDirectory: URL
     private(set) var catalog: [ModuleManifest] = []
@@ -114,11 +115,29 @@ final class AppState: ObservableObject {
     func installApprovedModule(_ id: String) throws {
         guard let repository else { throw ValidationError("Open Recovery to repair module storage first.") }
         let plan = try repository.installationPlan(for: id, catalog: catalog)
+        defer { resourceWorkerGeneration = UUID() }
         let activate = installedModules.first { $0.id == id }?.enabled ?? true
         for manifest in plan {
             ResourceWorker.stopAll(moduleID: manifest.id)
             try repository.install(manifest, enabled: manifest.id != id && activate ? true : nil, payload: modulePayloads[manifest.id])
         }
+        installedModules = try repository.installed()
+    }
+    func reinstallWorker(_ module: InstalledModule) {
+        perform {
+            guard let bundled = catalog.first(where: { $0.id == module.id && $0.runtime == .nativeResourceWorker }) else {
+                throw ValidationError("This worker has no bundled replacement.")
+            }
+            guard approveModules([bundled]) else { return }
+            try reinstallApprovedWorker(module.id)
+        }
+    }
+    func reinstallApprovedWorker(_ id: String) throws {
+        guard let repository, let bundled = catalog.first(where: { $0.id == id && $0.runtime == .nativeResourceWorker }),
+              let current = installedModules.first(where: { $0.id == id }) else { throw ValidationError("This worker has no bundled replacement.") }
+        defer { resourceWorkerGeneration = UUID() }
+        ResourceWorker.stopAll(moduleID: id)
+        try repository.install(bundled, enabled: current.enabled, payload: modulePayloads[id])
         installedModules = try repository.installed()
     }
     func importModule() {
@@ -166,6 +185,7 @@ final class AppState: ObservableObject {
             return
         }
         perform {
+            defer { resourceWorkerGeneration = UUID() }
             ResourceWorker.stopAll(moduleID: module.id)
             try repository?.setEnabled(module.id, !module.enabled)
             installedModules = try repository?.installed() ?? []
@@ -173,12 +193,14 @@ final class AppState: ObservableObject {
     }
     func replaceResourceProvider(with id: String) throws {
         guard let repository else { throw ValidationError("Repair module storage first.") }
+        defer { resourceWorkerGeneration = UUID() }
         ResourceWorker.stopAll()
         try repository.replaceResourceProvider(with: id)
         installedModules = try repository.installed()
     }
     func removeModule(_ id: String) throws {
         guard let repository else { throw ValidationError("Repair module storage first.") }
+        defer { resourceWorkerGeneration = UUID() }
         ResourceWorker.stopAll(moduleID: id)
         try repository.uninstall(id)
         installedModules = try repository.installed()
@@ -252,6 +274,7 @@ final class AppState: ObservableObject {
     }
     func resetModules() {
         perform {
+            defer { resourceWorkerGeneration = UUID() }
             ResourceWorker.stopAll()
             let old = dataDirectory.appendingPathComponent("Modules", isDirectory: true)
             if FileManager.default.fileExists(atPath: old.path) {

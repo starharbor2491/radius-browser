@@ -55,7 +55,10 @@ struct ModuleCard: View {
                 if let installed {
                     if manifest.version > installed.manifest.version { Button("Update") { app.install(manifest.id) } }
                     else { Button(installed.enabled ? "Disable" : enableLabel) { app.toggleModule(installed) } }
-                    Menu { Button("Uninstall…", role: .destructive) { app.uninstall(installed) } } label: { Image(systemName: "ellipsis") }.menuStyle(.borderlessButton).fixedSize()
+                    Menu {
+                        if manifest.runtime != nil { Button("Reinstall bundled package…") { app.reinstallWorker(installed) } }
+                        Button("Uninstall…", role: .destructive) { app.uninstall(installed) }
+                    } label: { Image(systemName: "ellipsis") }.menuStyle(.borderlessButton).fixedSize()
                 } else { Button("Install") { app.install(manifest.id) }.buttonStyle(.borderedProminent) }
             }
             HStack(spacing: 8) {

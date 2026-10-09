@@ -71,7 +71,7 @@ final class ResourceWorker: ObservableObject {
     /// Stop and reap before the caller removes/replaces the installed package. Normal workers
     /// exit immediately; a separate dispatch timer bounds a stuck worker's shutdown to 250 ms.
     func stop() {
-        generation = UUID(); watchdog?.cancel(); watchdog = nil
+        generation = UUID(); watchdog?.cancel(); watchdog = nil; frame = nil
         output?.fileHandleForReading.readabilityHandler = nil
         process?.terminationHandler = nil
         try? input?.fileHandleForWriting.close()
@@ -121,7 +121,7 @@ struct ResourcePanel: View {
                 if let failure = worker.failure { Text(failure).font(.callout).foregroundStyle(.orange) }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(16)
         }
-        .task(id: app.installedModules) {
+        .task(id: app.resourceWorkerGeneration) {
             do {
                 let package = try app.resourceWorkerPackage()
                 try worker.start(executable: package.url, moduleID: package.id)
