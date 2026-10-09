@@ -226,8 +226,8 @@ struct BrowserWindow: View {
     private var startPage: some View {
         VStack(alignment: .leading, spacing: 28) {
             VStack(alignment: .leading, spacing: 10) {
-                Text(model.isPrivate ? "A private space." : "Make room for the web.").font(.system(size: 34, weight: .semibold))
-                Text(model.isPrivate ? "This window won't save tabs or history. Downloads you save stay on disk. Websites and your network can still see your activity." : "Enter an address above. Your browser, arranged around you.")
+                Text(model.isPrivate ? "Private window" : "New tab").font(.system(size: 34, weight: .semibold))
+                Text(model.isPrivate ? "This window won't save tabs or history. Downloads you save stay on disk. Websites and your network can still see your activity." : "Enter a website or search in the address bar. Press ⌘L to focus it.")
                     .font(.body).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if !app.library.preferences.completedOnboarding && !model.isPrivate {

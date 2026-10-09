@@ -17,14 +17,14 @@ struct RecoveryView: View {
             recoveryAction("Save current browser data", detail: "Retry any failed database writes.", button: "Retry save") {
                 Task { if await app.flush() { app.notice = "Browser data saved." } }
             }
-            recoveryAction("Inspect local backups", detail: "Open Radius's data folder in Finder. It can contain private browsing information from regular profiles.", button: "Show data folder") { NSWorkspace.shared.open(app.dataDirectory) }
+            recoveryAction("Inspect local backups", detail: "Open Radius's data folder in Finder. It can contain saved browsing data from regular profiles.", button: "Show data folder") { NSWorkspace.shared.open(app.dataDirectory) }
             if let notice = app.notice { Text(notice).font(.callout).foregroundStyle(.secondary).textSelection(.enabled) }
             Spacer(); HStack { Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.defaultAction) }
         }.padding(28).frame(width: 660, height: 570)
     }
     private func recoveryAction(_ title: String, detail: String, button: String, action: @escaping () -> Void) -> some View {
         HStack(alignment: .top, spacing: 24) {
-            VStack(alignment: .leading, spacing: 6) { Text(title).font(.headline); Text(detail).font(.callout).foregroundStyle(.secondary) }
+            VStack(alignment: .leading, spacing: 6) { Text(title).font(.headline); Text(detail).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
             Spacer(); Button(button, action: action)
         }.padding(14).background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
     }

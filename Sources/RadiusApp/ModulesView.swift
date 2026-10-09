@@ -19,7 +19,7 @@ struct ModulesView: View {
         VStack(alignment: .leading, spacing: 16) {
             SheetHeader(title: "Modules", subtitle: "Choose what your browser contains.")
             HStack {
-                Picker("Module catalog", selection: $section) { ForEach(Section.allCases, id: \.self) { Text($0.rawValue).tag($0) } }.pickerStyle(.segmented).frame(width: 360)
+                Picker("Module catalog", selection: $section) { ForEach(Section.allCases, id: \.self) { Text($0.rawValue).tag($0) } }.pickerStyle(.segmented).labelsHidden().frame(width: 360)
                 Spacer(); TextField("Search modules", text: $query).textFieldStyle(.roundedBorder).frame(width: 220)
             }
             ScrollView {
