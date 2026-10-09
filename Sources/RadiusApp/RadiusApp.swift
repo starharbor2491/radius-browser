@@ -2,7 +2,6 @@
 import AppKit
 import SwiftUI
 
-@main
 struct RadiusApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var state = AppState()
@@ -41,6 +40,13 @@ struct BrowserCommands: Commands {
             Divider()
             Button("Previous tab") { browser?.selectRelativeTab(-1) }.keyboardShortcut("[", modifiers: [.command, .shift])
             Button("Next tab") { browser?.selectRelativeTab(1) }.keyboardShortcut("]", modifiers: [.command, .shift])
+            Button("Switch browsing pane") { browser?.selectOtherPane() }
+                .keyboardShortcut("`", modifiers: [.command, .option]).disabled(browser?.session.split == nil)
+            Button(browser?.session.split == nil ? "Split side by side" : "Return to one pane") {
+                guard let browser else { return }
+                if browser.session.split != nil { browser.endSplit() }
+                else { browser.beginSplit(.sideBySide) }
+            }.disabled(browser == nil)
             Divider()
             Button("Modules…") { browser?.sheet = .modules }
             Button("Customize…") { browser?.sheet = .customize }

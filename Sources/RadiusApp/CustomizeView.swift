@@ -85,6 +85,7 @@ struct CustomizeView: View {
                     Text("Stacked").tag(Optional(SplitAxis.stacked))
                 }.labelsHidden()
             }
+            Text("Split panes open when you apply the setup. Live preview leaves your open tabs intact.").font(.caption).foregroundStyle(.secondary)
             field("Navigation bar") { Picker("Navigation bar placement", selection: binding(\.layout.navigation)) { Text("Top").tag(BarPlacement.top); Text("Bottom").tag(BarPlacement.bottom) }.pickerStyle(.segmented).labelsHidden() }
             field("Sidebar") { Picker("Sidebar placement", selection: binding(\.layout.sidebar)) { Text("Left").tag(SidebarPlacement.leading); Text("Right").tag(SidebarPlacement.trailing); Text("Hidden").tag(SidebarPlacement.hidden) }.pickerStyle(.segmented).labelsHidden() }
             field("Sidebar width · \(Int(draft.layout.sidebarWidth)) pt") { Slider(value: binding(\.layout.sidebarWidth), in: 180...360, step: 10).accessibilityLabel("Sidebar width") }

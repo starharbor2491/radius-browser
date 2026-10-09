@@ -1,0 +1,59 @@
+name: Verify embedded Chromium runtime
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'ChromiumRuntime/**'
+      - 'Sources/RadiusEngineABI/**'
+      - 'Sources/RadiusApp/Engines/**'
+      - 'Sources/RadiusApp/BrowserModel.swift'
+      - 'Sources/RadiusApp/AppSmokeTest.swift'
+      - 'scripts/chromium-runtime.py'
+      - '.github/workflows/chromium-runtime.yml'
+permissions:
+  contents: read
+concurrency:
+  group: radius-chromium-runtime-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  embedded:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build pinned optional Chromium package
+        run: python3 scripts/chromium-runtime.py --arch "${{ matrix.arch }}" --work-dir "$RUNNER_TEMP/radius-cef-runtime"
+      - name: Test native shell
+        run: ./scripts/test.sh
+      - name: Build universal Radius application
+        run: ./scripts/build-app.sh
+      - name: Verify installed Chromium renders inside Radius and quits normally
+        timeout-minutes: 5
+        env:
+          RADIUS_CHROMIUM_PACKAGE: ${{ runner.temp }}/radius-cef-runtime/Chromium-${{ matrix.arch }}.radiusengine
+        run: ./scripts/smoke-app.sh
+      - name: Archive development runtime
+        run: ditto -c -k --sequesterRsrc --keepParent "$RUNNER_TEMP/radius-cef-runtime/Chromium-${{ matrix.arch }}.radiusengine" "dist/Chromium-${{ matrix.arch }}.radiusengine.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Radius-Chromium-${{ matrix.arch }}-development-runtime
+          path: dist/Chromium-*.radiusengine.zip
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Radius-Chromium-${{ matrix.arch }}-diagnostics
+          path: |
+            dist/screenshots/*.png
+            dist/smoke-*.log
+            dist/smoke-sample.txt
+            ${{ runner.temp }}/radius-cef-runtime/radius-adapter-*.json
+          if-no-files-found: warn

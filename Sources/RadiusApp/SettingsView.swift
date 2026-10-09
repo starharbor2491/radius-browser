@@ -89,18 +89,21 @@ struct SettingsView: View {
                     Image(systemName: "globe").font(.title2)
                     VStack(alignment: .leading, spacing: 8) {
                         Text("System WebKit").font(.headline)
-                        Text("Active · Available with macOS · No additional download").font(.caption).foregroundStyle(.secondary)
+                        Text("Available with macOS · No additional download").font(.caption).foregroundStyle(.secondary)
                         Text("Safari's platform web engine. Security updates arrive through macOS updates. Chrome extensions are not supported by this Radius build.").font(.callout).foregroundStyle(.secondary)
                     }
                 }.padding(8)
             }
-            GroupBox {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack { Text("Chromium").font(.headline); Spacer(); Text("Not available in this build").font(.caption).foregroundStyle(.secondary) }
-                    Text("Native hosting, signed installation, and Chrome Web Store compatibility still need validation. Radius will not present an untested engine as installed.").font(.callout).foregroundStyle(.secondary)
-                    Link("Integration progress and compatibility checks", destination: URL(string: "https://github.com/starharbor2491/radius-browser/blob/main/docs/CHROMIUM.md")!)
-                }.padding(8)
+            ChromiumSettingsView(dataDirectory: app.dataDirectory)
+            Picker("Default for new tabs in \(model.profile.name)", selection: Binding(get: { model.profile.engineID ?? .webkit }, set: { engine in
+                guard let index = app.library.profiles.firstIndex(where: { $0.id == model.session.profileID }) else { return }
+                app.library.profiles[index].engineID = engine
+            })) {
+                Text("WebKit").tag(BrowserEngineID.webkit)
+                if ChromiumRuntime.shared.isInstalled(in: app.dataDirectory) { Text("Chromium Alloy").tag(BrowserEngineID.chromium) }
             }
+            Text("Existing tabs keep their engine. Use a tab's context menu to reopen it in another engine.").font(.caption).foregroundStyle(.secondary)
+            Link("Engine compatibility and release status", destination: URL(string: "https://github.com/starharbor2491/radius-browser/blob/codex/radius-v1/docs/CHROMIUM.md")!)
             Text("A required engine can be removed only after a compatible replacement is installed. Apple's system WebKit framework is part of macOS.").font(.caption).foregroundStyle(.secondary)
             Spacer()
         }
@@ -122,13 +125,19 @@ struct SettingsView: View {
     private func clearWebsiteData() {
         guard !model.isPrivate else { app.notice = "Close this private window to discard its temporary website storage."; return }
         let alert = NSAlert(); alert.messageText = "Clear website data for \(model.profile.name)?"
-        alert.informativeText = "Cookies, caches, local databases, and website permissions stored by WebKit will be cleared. You will be signed out. Close other windows using this profile first. Unsaved page work may be lost."
+        alert.informativeText = "Cookies, caches, and local databases in both WebKit and Chromium will be cleared for this profile. You will be signed out. Close other windows using this profile first. Unsaved page work may be lost."
         alert.addButton(withTitle: "Clear website data"); alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         clearing = true
-        let store = WKWebsiteDataStore(forIdentifier: model.session.profileID)
-        store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast) {
-            Task { @MainActor in clearing = false; model.activeWebTab.reload(); app.notice = "Website data for this profile was cleared." }
+        let profileID = model.session.profileID
+        Task {
+            defer { clearing = false }
+            do {
+                try await ChromiumRuntime.shared.clearWebsiteData(profileID: profileID, dataDirectory: app.dataDirectory)
+                let store = WKWebsiteDataStore(forIdentifier: profileID)
+                await store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
+                model.activeWebTab.reload(); app.notice = "Website data for this profile was cleared."
+            } catch { app.notice = error.localizedDescription }
         }
     }
 }

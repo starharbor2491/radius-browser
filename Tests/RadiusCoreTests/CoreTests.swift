@@ -122,6 +122,18 @@ import CSQLite
     let hostile = Data(#"<a href="javascript:alert(1)">Bad</a><A HREF='https://a.test'>OK</A><a href="https://a.test">Duplicate</a>"#.utf8)
     #expect(try BookmarkExchange.parse(hostile, profileID: profileID).count == 1)
 }
+@Test func bookmarkEntitiesDecodeOnceWithoutCorruptingURLs() throws {
+    let data = Data(#"<a href='https://example.test/?a=1&#38;b=2'>A&#39;s &#x1F4D6; &amp;lt;</a>"#.utf8)
+    let bookmarks = try BookmarkExchange.parse(data, profileID: UUID())
+    #expect(bookmarks[0].url.absoluteString == "https://example.test/?a=1&b=2")
+    #expect(bookmarks[0].title == "A's 📖 &lt;")
+}
+@Test func malformedBookmarkAnchorsHaveBoundedParsingTime() {
+    let malformed = Data(String(repeating: #"<a href="https://example.test">"#, count: 10_000).utf8)
+    let clock = ContinuousClock(), start = clock.now
+    #expect(throws: (any Error).self) { try BookmarkExchange.parse(malformed, profileID: UUID()) }
+    #expect(start.duration(to: clock.now) < .seconds(5))
+}
 @Test func moduleLifecycleRemovesFilesAndDoesNotReseedRemovedModules() throws {
     let directory = temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }

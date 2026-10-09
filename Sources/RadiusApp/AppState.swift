@@ -129,7 +129,7 @@ final class AppState: ObservableObject {
         if !privateBrowsing, let saved = library.sessions.first(where: { !claimedSessions.contains($0.id) }) {
             claimedSessions.insert(saved.id); return saved
         }
-        let session = WindowSession(profileID: library.profiles[0].id)
+        let session = WindowSession(profileID: library.profiles[0].id, tabs: [BrowserTab(engineID: library.profiles[0].engineID ?? .webkit)])
         if !privateBrowsing { claimedSessions.insert(session.id); library.sessions.append(session) }
         return session
     }
@@ -174,7 +174,9 @@ final class AppState: ObservableObject {
     }
     func applyConfiguration(_ configuration: Configuration) {
         var checked = configuration; checked.normalize()
+        let splitChanged = checked.layout.split != library.preferences.configuration.layout.split
         library.preferences.configuration = checked; previewConfiguration = nil
+        windows.values.compactMap(\.model).forEach { $0.synchronizeSplit(force: splitChanged) }
     }
     func resetModules() {
         perform {
@@ -264,18 +266,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.smokeTrace("Flushing application data before termination")
             let saved = await state.flush()
             self.smokeTrace("Termination flush completed: \(saved)")
-            if saved {
-                self.smokeTrace("Sending termination reply: true")
-                sender.reply(toApplicationShouldTerminate: true)
-            }
-            else {
+            var quit = saved
+            if !saved {
                 let alert = NSAlert(); alert.messageText = "Your latest changes could not be saved."
                 alert.informativeText = state.notice ?? "Retry saving from Recovery."
                 alert.addButton(withTitle: "Keep Radius open"); alert.addButton(withTitle: "Quit without saving")
-                let quit = alert.runModal() == .alertSecondButtonReturn
-                self.smokeTrace("Sending termination reply: \(quit)")
-                state.terminating = quit; sender.reply(toApplicationShouldTerminate: quit)
+                quit = alert.runModal() == .alertSecondButtonReturn
             }
+            if quit {
+                for browser in state.windows.values.compactMap(\.model) { browser.disposeEngineTabs() }
+                quit = await ChromiumRuntime.shared.shutdown()
+                if !quit { state.notice = ChromiumRuntime.shared.status }
+            }
+            self.smokeTrace("Sending termination reply: \(quit)")
+            state.terminating = quit
+            sender.reply(toApplicationShouldTerminate: quit)
         }
         smokeTrace("Returning terminateLater")
         return .terminateLater

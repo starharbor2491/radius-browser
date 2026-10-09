@@ -83,6 +83,7 @@ public struct WindowSession: Identifiable, Codable, Equatable, Sendable {
     public var tabs: [BrowserTab]
     public var selectedTabID: UUID
     public var split: TabSplit?
+    public var splitSuppressed: Bool?
     public init(id: UUID = UUID(), profileID: UUID, tabs: [BrowserTab] = []) {
         self.id = id; self.profileID = profileID
         self.tabs = tabs.isEmpty ? [BrowserTab()] : tabs
@@ -112,6 +113,8 @@ public struct WindowSession: Identifiable, Codable, Equatable, Sendable {
         }
         if let pair = split, pair.first == pair.second || !ids.contains(pair.first) || !ids.contains(pair.second) { split = nil }
         if let pair = split, !pair.contains(selectedTabID) { split?.first = selectedTabID }
+        if split != nil { splitSuppressed = nil }
+        selectTab(selectedTabID)
     }
     public func ancestors(of id: UUID) -> [UUID] {
         var result: [UUID] = [], seen: Set<UUID> = [id]
@@ -139,6 +142,7 @@ public struct WindowSession: Identifiable, Codable, Equatable, Sendable {
         let depth = parent.map { ancestors(of: $0).count + 1 } ?? 0
         guard descendants.allSatisfy({ ancestors(of: $0.id).count - ancestors(of: id).count + depth <= 8 }), depth <= 8 else { return false }
         tabs[index].parentID = parent
+        selectTab(selectedTabID)
         return true
     }
     public mutating func selectTab(_ id: UUID) {

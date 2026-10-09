@@ -10,7 +10,9 @@ var targets: [Target] = [
 ]
 #if os(macOS)
 products.append(.executable(name: "Radius", targets: ["RadiusApp"]))
-targets.append(.executableTarget(name: "RadiusApp", dependencies: ["RadiusCore"],
+targets.append(.target(name: "RadiusEngineABI", publicHeadersPath: "include",
+    linkerSettings: [.linkedFramework("AppKit")]))
+targets.append(.executableTarget(name: "RadiusApp", dependencies: ["RadiusCore", "RadiusEngineABI"],
     resources: [.copy("Resources")]))
 targets.append(.testTarget(name: "RadiusAppTests", dependencies: ["RadiusApp"]))
 #endif

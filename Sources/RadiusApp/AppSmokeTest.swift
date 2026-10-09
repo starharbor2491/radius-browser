@@ -84,6 +84,37 @@ enum AppSmokeTest {
                 try png.write(to: output.appendingPathComponent("Radius-split.png"))
                 browser.selectOtherPane()
                 guard browser.session.selectedTabID == pair.first else { throw ValidationError("Switching panes did not update the address context.") }
+                if let packagePath = ProcessInfo.processInfo.environment["RADIUS_CHROMIUM_PACKAGE"] {
+                    trace("Installing optional Chromium runtime")
+                    try await ChromiumRuntime.shared.install(from: URL(fileURLWithPath: packagePath, isDirectory: true), dataDirectory: app.dataDirectory)
+                    let id = browser.session.selectedTabID
+                    trace("Reopening an embedded tab in Chromium")
+                    browser.changeEngine(id, to: .chromium)
+                    let chromiumDeadline = Date().addingTimeInterval(30)
+                    while browser.webTab(id).title != "Radius HTTP fixture" || browser.webTab(id).loading {
+                        if let error = browser.webTab(id).errorMessage { throw ValidationError(error) }
+                        if Date() > chromiumDeadline { throw ValidationError("Embedded Chromium did not render the HTTP fixture.") }
+                        try await Task.sleep(for: .milliseconds(100))
+                    }
+                    guard browser.webTab(id).nativeView.window === window, browser.webTab(id).engineID == .chromium else {
+                        throw ValidationError("Chromium was not hosted inside the actual Radius window.")
+                    }
+                    guard try await browser.webTab(id).readerText().contains("Local browser check") else { throw ValidationError("Embedded Chromium did not execute the reader request.") }
+                    try await Task.sleep(for: .milliseconds(500))
+                    guard let view = window.contentView, let image = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw ValidationError("Cannot capture embedded Chromium.") }
+                    view.cacheDisplay(in: view.bounds, to: image)
+                    guard let png = image.representation(using: .png, properties: [:]) else { throw ValidationError("Cannot encode embedded Chromium.") }
+                    try png.write(to: output.appendingPathComponent("Radius-chromium.png"))
+                    trace("Closing Chromium while WebKit and Radius remain open")
+                    browser.closeTab(id)
+                    let closeDeadline = Date().addingTimeInterval(10)
+                    while ChromiumRuntime.shared.api?.live_pages() != 0 {
+                        if Date() > closeDeadline { throw ValidationError("The Chromium page did not close.") }
+                        try await Task.sleep(for: .milliseconds(100))
+                    }
+                    guard window.isVisible, browser.activeWebTab.engineID == .webkit else { throw ValidationError("Closing Chromium also closed the native window or WebKit pane.") }
+                    trace("Embedded Chromium runtime check passed")
+                }
             }
             trace("Saving browser data")
             guard await app.flush() else { throw ValidationError(app.notice ?? "App data could not be saved.") }

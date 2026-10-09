@@ -111,6 +111,7 @@ struct BrowserWindow: View {
         .onChange(of: app.library.preferences.blockPopups) { _, _ in model.updatePopupPolicy() }
         .onAppear { model.synchronizeSplit() }
         .onChange(of: layout.split) { _, _ in model.synchronizeSplit() }
+        .onChange(of: app.previewConfiguration) { _, value in if value == nil { model.synchronizeSplit() } }
     }
     private var navigation: some View {
         HStack(spacing: theme.spacing) {
@@ -143,8 +144,8 @@ struct BrowserWindow: View {
                 if app.enabled(.focusMode) { Button("Focus mode") { model.focusMode = true } }
                 Button("Find in page…") { findVisible = true }.disabled(!model.hasPage)
                 Menu("Split view") {
-                    Button("Side by side") { app.library.preferences.configuration.layout.split = .sideBySide }
-                    Button("Stacked") { app.library.preferences.configuration.layout.split = .stacked }
+                    Button("Side by side") { model.beginSplit(.sideBySide) }
+                    Button("Stacked") { model.beginSplit(.stacked) }
                     Button("Return to one pane") { model.endSplit() }.disabled(model.session.split == nil)
                 }
                 Divider()
@@ -186,7 +187,7 @@ struct BrowserWindow: View {
                     Image(systemName: tab.pinned ? "pin.fill" : "globe").font(.caption).foregroundStyle(.secondary)
                     Text(tab.title).font(.callout).lineLimit(1)
                 }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-            }.buttonStyle(.plain)
+            }.buttonStyle(.plain).help(tab.title)
             Button { model.closeTab(tab.id) } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .semibold)).frame(width: 22, height: 24) }
                 .buttonStyle(.plain).help("Close \(tab.title)").accessibilityLabel("Close \(tab.title)")
         }
@@ -199,6 +200,11 @@ struct BrowserWindow: View {
             Button("Move earlier") { model.moveTab(tab.id, by: -1) }
             Button("Move later") { model.moveTab(tab.id, by: 1) }
             Button("Duplicate tab") { model.newTab(url: tab.url) }
+            Menu("Reopen with another engine") {
+                ForEach(BrowserEngineID.allCases, id: \.self) { engine in
+                    Button(engine.label) { model.reopenTab(tab.id, with: engine) }.disabled(engine == (tab.engineID ?? .webkit))
+                }
+            }
             if layout.treeTabs == true {
                 Button("New child tab") { model.newTab(parentID: tab.id); addressFocused = true }
                 Button("Move to top level") { _ = model.session.setParent(tab.id, to: nil) }.disabled(tab.parentID == nil)
@@ -215,7 +221,7 @@ struct BrowserWindow: View {
         .draggable(tab.id.uuidString)
         .dropDestination(for: String.self) { items, _ in
             guard let value = items.first, let id = UUID(uuidString: value) else { return false }
-            model.moveTab(id, before: tab.id); return true
+            return model.moveTab(id, before: tab.id)
         }
         .accessibilityElement(children: .contain).accessibilityValue(tab.id == model.session.selectedTabID ? "Selected tab" : "Tab")
         .padding(.leading, vertical && layout.treeTabs == true ? CGFloat(model.session.ancestors(of: tab.id).count * 10) : 0)
@@ -243,7 +249,7 @@ struct BrowserWindow: View {
                     HSplitView { splitPane(pair.first); splitPane(pair.second) }
                 } else { VSplitView { splitPane(pair.first); splitPane(pair.second) } }
             } else if model.hasPage {
-                BrowserPage(tab: model.activeWebTab).id(ObjectIdentifier(model.activeWebTab))
+                BrowserPage(tab: model.activeWebTab, onUseWebKit: { model.reopenTab(model.session.selectedTabID, with: .webkit) }).id(ObjectIdentifier(model.activeWebTab))
             } else { startPage }
         }
         .overlay(alignment: .topTrailing) {
@@ -265,7 +271,7 @@ struct BrowserWindow: View {
                 IconButton(title: "Return to one pane", icon: "rectangle") { model.selectTab(id); model.endSplit() }
             }.font(.caption).padding(.horizontal, 12).padding(.vertical, 8).background(.bar)
             if descriptor?.url != nil {
-                BrowserPage(tab: model.webTab(id)).id(ObjectIdentifier(model.webTab(id)))
+                BrowserPage(tab: model.webTab(id), onUseWebKit: { model.reopenTab(id, with: .webkit) }).id(ObjectIdentifier(model.webTab(id)))
             } else {
                 VStack(spacing: 14) {
                     Text("New tab").font(.title2)
@@ -325,7 +331,7 @@ struct BrowserWindow: View {
     private var statusBar: some View {
         HStack(spacing: 8) {
             Image(systemName: model.isPrivate ? "hand.raised" : "globe")
-            Text(model.isPrivate ? "Private · WebKit" : "\(model.profile.name) · WebKit")
+            Text("\(model.isPrivate ? "Private" : model.profile.name) · \((model.selectedTab.engineID ?? .webkit).label)")
             Spacer()
             if model.hasPage { ZoomControls(tab: model.activeWebTab) }
         }.font(.caption).foregroundStyle(.secondary).padding(.horizontal, 14).padding(.vertical, 6).background(.bar)
@@ -341,6 +347,7 @@ struct BrowserWindow: View {
 }
 struct BrowserPage: View {
     @ObservedObject var tab: BrowserEngineTab
+    var onUseWebKit: (() -> Void)?
     var body: some View {
         VStack(spacing: 0) {
             if tab.loading { ProgressView(value: tab.progress).progressViewStyle(.linear).frame(height: 2) }
@@ -348,6 +355,7 @@ struct BrowserPage: View {
                 VStack(spacing: 16) {
                     EmptyPanel(title: "This page needs attention", icon: "exclamationmark.circle", detail: error)
                     Button("Reload page") { tab.reload() }.buttonStyle(.borderedProminent).padding(.bottom, 32)
+                    if tab.engineID == .chromium, let onUseWebKit { Button("Reopen in WebKit") { onUseWebKit() }.padding(.bottom, 24) }
                 }
             } else { WebViewHost(tab: tab) }
         }

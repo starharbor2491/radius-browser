@@ -6,6 +6,8 @@ mkdir -p dist
 smoke_server_pid=""
 smoke_app_pid=""
 smoke_watchdog_pid=""
+smoke_deadline=90
+if [[ -n "${RADIUS_CHROMIUM_PACKAGE:-}" ]]; then smoke_deadline=180; fi
 cleanup() {
   smoke_status=$?
   trap - EXIT HUP INT TERM
@@ -87,12 +89,12 @@ smoke_app_pid=$!
     /usr/bin/sample "$smoke_app_pid" 3 -file dist/smoke-sample.txt >dist/smoke-sample.log 2>&1 &
     sample_pid=$!
   fi
-  sleep 45 &
+  sleep "$((smoke_deadline - 45))" &
   timer_pid=$!
   wait "$timer_pid"
   timer_pid=""
   if kill -0 "$smoke_app_pid" 2>/dev/null; then
-    echo 'Radius exceeded the 90-second smoke-test deadline; sending TERM.' >&2
+    echo "Radius exceeded the $smoke_deadline-second smoke-test deadline; sending TERM." >&2
     kill -TERM "$smoke_app_pid" 2>/dev/null || true
     sleep 5 &
     timer_pid=$!

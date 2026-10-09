@@ -25,14 +25,22 @@ final class BrowserModel: ObservableObject {
     var bookmarks: [Bookmark] { app.library.bookmarks.filter { $0.profileID == session.profileID } }
     init(app: AppState, isPrivate: Bool) {
         self.app = app; self.isPrivate = isPrivate; session = app.claimSession(privateBrowsing: isPrivate)
+        for i in session.tabs.indices where session.tabs[i].engineID == nil { session.tabs[i].engineID = .webkit }
         if isPrivate { privateDataStore = .nonPersistent() }
         address = selectedTab.url?.absoluteString ?? ""
         app.registerWindow(self)
     }
     func webTab(_ id: UUID) -> BrowserEngineTab {
         if let cached = webTabs[id] { return cached }
-        let dataStore = privateDataStore ?? WKWebsiteDataStore(forIdentifier: session.profileID)
-        let tab = WebTab(dataStore: dataStore, downloads: downloads)
+        let engine = session.tabs.first(where: { $0.id == id })?.engineID ?? .webkit
+        let tab: BrowserEngineTab
+        if engine == .chromium {
+            do { tab = try ChromiumRuntime.shared.makeTab(profileID: session.profileID, privateSessionID: isPrivate ? session.id : nil, dataDirectory: app.dataDirectory) }
+            catch { tab = UnavailableEngineTab(engine: engine, reason: error.localizedDescription) }
+        } else {
+            let dataStore = privateDataStore ?? WKWebsiteDataStore(forIdentifier: session.profileID)
+            tab = WebTab(dataStore: dataStore, downloads: downloads)
+        }
         attach(tab, id: id)
         if let url = session.tabs.first(where: { $0.id == id })?.url { tab.load(url) }
         return tab
@@ -73,8 +81,11 @@ final class BrowserModel: ObservableObject {
     }
     func newTab(url: URL? = nil, parentID: UUID? = nil) {
         if let url, !AddressResolver.isWebURL(url) { app.notice = "This page cannot be reopened in a separate browsing context."; return }
+        if let parentID, !session.tabs.contains(where: { $0.id == parentID }) || session.ancestors(of: parentID).count >= 8 {
+            app.notice = "Tab trees support up to eight levels. Open this page as a top-level tab instead."; return
+        }
         guard session.tabs.count < 200 else { app.notice = "This window has 200 tabs. Close a tab or open another window."; return }
-        let tab = BrowserTab(url: url)
+        let tab = BrowserTab(url: url, engineID: profile.engineID ?? .webkit)
         session.tabs.append(tab)
         if let parentID { _ = session.setParent(tab.id, to: parentID) }
         selectTab(tab.id)
@@ -82,6 +93,11 @@ final class BrowserModel: ObservableObject {
     func selectTab(_ id: UUID) {
         guard session.tabs.contains(where: { $0.id == id }) else { return }
         session.selectTab(id); address = selectedTab.url?.absoluteString ?? ""
+        // Both views remain mounted in a split. Keep native focus and toolbar context together.
+        if session.split != nil, let view = webTabs[id]?.nativeView, let window = view.window {
+            if let current = window.firstResponder as? NSView, current === view || current.isDescendant(of: view) { return }
+            window.makeFirstResponder(view)
+        }
     }
     func closeTab(_ id: UUID) {
         guard let index = session.tabs.firstIndex(where: { $0.id == id }) else { return }
@@ -90,7 +106,7 @@ final class BrowserModel: ObservableObject {
         webTabs.removeValue(forKey: id)?.dispose()
         for i in session.tabs.indices where session.tabs[i].parentID == id { session.tabs[i].parentID = closing.parentID }
         let otherPane = session.split.map { $0.first == id ? $0.second : $0.first }
-        if session.split?.contains(id) == true { session.split = nil }
+        if session.split?.contains(id) == true { session.split = nil; session.splitSuppressed = true }
         session.tabs.remove(at: index)
         if session.tabs.isEmpty { session.tabs = [BrowserTab()] }
         if session.selectedTabID == id { selectTab(otherPane ?? session.tabs[min(index, session.tabs.count - 1)].id) }
@@ -112,12 +128,13 @@ final class BrowserModel: ObservableObject {
             session.tabs.swapAt(index, target)
         } else if session.tabs.indices.contains(index + offset) { session.tabs.swapAt(index, index + offset) }
     }
-    func moveTab(_ id: UUID, before target: UUID) {
-        guard id != target, let from = session.tabs.firstIndex(where: { $0.id == id }), let to = session.tabs.firstIndex(where: { $0.id == target }) else { return }
+    @discardableResult func moveTab(_ id: UUID, before target: UUID) -> Bool {
+        guard id != target, let from = session.tabs.firstIndex(where: { $0.id == id }), let to = session.tabs.firstIndex(where: { $0.id == target }) else { return false }
         if app.configuration.layout.treeTabs == true && session.tabs[from].parentID != session.tabs[to].parentID {
-            guard session.setParent(id, to: session.tabs[to].parentID) else { return }
+            guard session.setParent(id, to: session.tabs[to].parentID) else { return false }
         }
         let item = session.tabs.remove(at: from); session.tabs.insert(item, at: from < to ? to - 1 : to)
+        return true
     }
     func pinTab(_ id: UUID) {
         guard let index = session.tabs.firstIndex(where: { $0.id == id }) else { return }
@@ -125,14 +142,20 @@ final class BrowserModel: ObservableObject {
         if session.tabs[index].pinned { session.tabs[index].parentID = nil }
         session.tabs = session.tabs.filter(\.pinned) + session.tabs.filter { !$0.pinned }
     }
-    func synchronizeSplit() {
-        if app.configuration.layout.split != nil { session.enableSplit() }
-        else if session.split != nil { session.split = nil }
+    func synchronizeSplit(force: Bool = false) {
+        // A layout preview must not create or persist browsing tabs.
+        guard app.previewConfiguration == nil else { return }
+        if app.configuration.layout.split != nil {
+            if force { session.splitSuppressed = nil }
+            if session.splitSuppressed != true { session.enableSplit() }
+        } else { session.split = nil; session.splitSuppressed = nil }
+    }
+    func beginSplit(_ axis: SplitAxis) {
+        app.library.preferences.configuration.layout.split = axis
+        synchronizeSplit(force: true)
     }
     func endSplit() {
-        session.split = nil
-        app.library.preferences.configuration.layout.split = nil
-        if app.previewConfiguration != nil { app.previewConfiguration?.layout.split = nil }
+        session.split = nil; session.splitSuppressed = true
     }
     func selectOtherPane() {
         guard let pair = session.split else { return }
@@ -163,7 +186,36 @@ final class BrowserModel: ObservableObject {
         guard app.library.profiles.contains(where: { $0.id == id }) else { return }
         webTabs.values.forEach { $0.dispose() }; webTabs.removeAll(); closedTabs.removeAll()
         session.profileID = id; panel = nil
+        for i in session.tabs.indices {
+            if let url = session.tabs[i].url, !AddressResolver.isWebURL(url) {
+                session.tabs[i].url = nil; session.tabs[i].title = "New tab"
+            }
+        }
+        address = selectedTab.url?.absoluteString ?? ""
         if isPrivate { privateDataStore = .nonPersistent() }
+    }
+    func reopenTab(_ id: UUID, with engine: BrowserEngineID) {
+        guard let descriptor = session.tabs.first(where: { $0.id == id }), descriptor.engineID != engine else { return }
+        if let url = descriptor.url, !AddressResolver.isWebURL(url) {
+            app.notice = "Generated pages cannot be reopened in another engine. Open the original website instead."; return
+        }
+        if engine == .chromium && !ChromiumRuntime.shared.isInstalled(in: app.dataDirectory) {
+            app.notice = "Install a Chromium runtime in Settings → Browsing engines first."; return
+        }
+        if descriptor.url != nil {
+            let alert = NSAlert(); alert.messageText = "Reopen this page in \(engine.label)?"
+            alert.informativeText = "The page loads normally in a separate website context. Sign-ins, forms, and unsaved page work do not transfer."
+            alert.addButton(withTitle: "Reopen page"); alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        changeEngine(id, to: engine)
+    }
+    func changeEngine(_ id: UUID, to engine: BrowserEngineID) {
+        guard let index = session.tabs.firstIndex(where: { $0.id == id }) else { return }
+        if let url = session.tabs[index].url, !AddressResolver.isWebURL(url) { return }
+        webTabs.removeValue(forKey: id)?.dispose()
+        session.tabs[index].engineID = engine
+        _ = webTab(id)
     }
     func toggleBookmark() {
         guard !isPrivate, let url = selectedTab.url, AddressResolver.isWebURL(url) else { return }
@@ -177,10 +229,13 @@ final class BrowserModel: ObservableObject {
         }
     }
     func closeWindow() {
-        webTabs.values.forEach { $0.dispose() }; webTabs.removeAll()
+        disposeEngineTabs()
         downloads.cancelAll()
         if !isPrivate { app.closeSession(session.id) }
         privateDataStore = nil; closedTabs.removeAll(); app.unregisterWindow(session.id)
+    }
+    func disposeEngineTabs() {
+        webTabs.values.forEach { $0.dispose() }; webTabs.removeAll()
     }
 }
 enum BrowserPanel: String, CaseIterable, Identifiable {
