@@ -1,0 +1,229 @@
+// SPDX-License-Identifier: MPL-2.0
+import Foundation
+
+public enum SearchProvider: String, Codable, CaseIterable, Sendable {
+    case duckDuckGo, google, bing
+    public var label: String {
+        switch self { case .duckDuckGo: "DuckDuckGo"; case .google: "Google"; case .bing: "Bing" }
+    }
+    public func searchURL(_ text: String) -> URL {
+        let base = switch self {
+        case .duckDuckGo: "https://duckduckgo.com/"
+        case .google: "https://www.google.com/search"
+        case .bing: "https://www.bing.com/search"
+        }
+        var parts = URLComponents(string: base)!
+        parts.queryItems = [URLQueryItem(name: "q", value: text)]
+        return parts.url!
+    }
+}
+
+public enum AddressResolver {
+    /// User-entered navigation only. Websites never gain access to local files or custom schemes.
+    public static func resolve(_ input: String, search: SearchProvider = .duckDuckGo) -> URL? {
+        let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+        if let components = URLComponents(string: value), let scheme = components.scheme {
+            if ["http", "https"].contains(scheme.lowercased()),
+               let host = components.host, !host.isEmpty, components.user == nil, components.password == nil {
+                return components.url
+            }
+            // localhost:port and host:port are addresses, not executable schemes.
+            if !value.contains("://"), isHostWithPort(value) {
+                return URL(string: "http://" + value)
+            }
+            return nil
+        }
+        if !value.contains(where: { $0.isWhitespace }),
+           (value.contains(".") || value == "localhost" || value.hasPrefix("localhost/") || value.hasPrefix("[")),
+           let parts = URLComponents(string: "https://" + value),
+           let host = parts.host, !host.isEmpty, parts.user == nil, parts.password == nil {
+            let scheme = (host == "localhost" || host == "127.0.0.1" || host == "::1") ? "http://" : "https://"
+            return URL(string: scheme + value)
+        }
+        return search.searchURL(value)
+    }
+    private static func isHostWithPort(_ text: String) -> Bool {
+        guard let parts = URLComponents(string: "http://" + text),
+              let host = parts.host, parts.port != nil, parts.user == nil, parts.password == nil else { return false }
+        return host == "localhost" || host.contains(".") || host.contains(":")
+    }
+    public static func isWebURL(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), let host = url.host, !host.isEmpty else { return false }
+        return ["http", "https"].contains(scheme) && url.user == nil && url.password == nil
+    }
+}
+
+public struct BrowserTab: Identifiable, Codable, Equatable, Sendable {
+    public var id: UUID
+    public var title: String
+    public var url: URL?
+    public var pinned: Bool
+    public init(id: UUID = UUID(), title: String = "New tab", url: URL? = nil, pinned: Bool = false) {
+        self.id = id; self.title = title; self.url = url; self.pinned = pinned
+    }
+}
+public struct WindowSession: Identifiable, Codable, Equatable, Sendable {
+    public var id: UUID
+    public var profileID: UUID
+    public var tabs: [BrowserTab]
+    public var selectedTabID: UUID
+    public init(id: UUID = UUID(), profileID: UUID, tabs: [BrowserTab] = []) {
+        self.id = id; self.profileID = profileID
+        self.tabs = tabs.isEmpty ? [BrowserTab()] : tabs
+        self.selectedTabID = self.tabs[0].id
+    }
+    public mutating func normalize() {
+        var seen = Set<UUID>()
+        tabs = Array(tabs.filter { seen.insert($0.id).inserted }.prefix(200))
+        for i in tabs.indices {
+            if let url = tabs[i].url, !AddressResolver.isWebURL(url) { tabs[i].url = nil }
+            tabs[i].title = String(tabs[i].title.prefix(512))
+        }
+        if tabs.isEmpty { tabs = [BrowserTab()] }
+        if !tabs.contains(where: { $0.id == selectedTabID }) { selectedTabID = tabs[0].id }
+    }
+}
+public struct Profile: Identifiable, Codable, Equatable, Sendable {
+    public var id: UUID
+    public var name: String
+    public init(id: UUID = UUID(), name: String) { self.id = id; self.name = name }
+}
+public struct Bookmark: Identifiable, Codable, Equatable, Sendable {
+    public var id: UUID
+    public var profileID: UUID
+    public var title: String
+    public var url: URL
+    public var createdAt: Date
+    public init(id: UUID = UUID(), profileID: UUID, title: String, url: URL, createdAt: Date = Date()) {
+        self.id = id; self.profileID = profileID; self.title = title; self.url = url; self.createdAt = createdAt
+    }
+}
+public struct HistoryEntry: Identifiable, Codable, Equatable, Sendable {
+    public var id: UUID
+    public var profileID: UUID
+    public var title: String
+    public var url: URL
+    public var visitedAt: Date
+    public init(id: UUID = UUID(), profileID: UUID, title: String, url: URL, visitedAt: Date = Date()) {
+        self.id = id; self.profileID = profileID; self.title = title; self.url = url; self.visitedAt = visitedAt
+    }
+}
+public struct Note: Identifiable, Codable, Equatable, Sendable {
+    public var id: UUID
+    public var profileID: UUID
+    public var title: String
+    public var text: String
+    public var modifiedAt: Date
+    public init(id: UUID = UUID(), profileID: UUID, title: String = "Untitled note", text: String = "") {
+        self.id = id; self.profileID = profileID; self.title = title; self.text = text; self.modifiedAt = Date()
+    }
+}
+
+public enum DesignSystem: String, Codable, CaseIterable, Sendable {
+    case native, material, liquidGlass, graphite
+    public var label: String {
+        switch self { case .native: "macOS"; case .material: "Material"; case .liquidGlass: "Liquid Glass"; case .graphite: "Graphite" }
+    }
+}
+public enum ColorMode: String, Codable, CaseIterable, Sendable { case system, light, dark }
+public enum Accent: String, Codable, CaseIterable, Sendable { case blue, teal, orange, purple, pink }
+public enum Density: String, Codable, CaseIterable, Sendable { case comfortable, compact }
+public enum TabPlacement: String, Codable, CaseIterable, Sendable { case top, bottom, leading, trailing }
+public enum BarPlacement: String, Codable, CaseIterable, Sendable { case top, bottom }
+public enum SidebarPlacement: String, Codable, CaseIterable, Sendable { case leading, trailing, hidden }
+public struct Theme: Codable, Equatable, Sendable {
+    public var design: DesignSystem = .native
+    public var colorMode: ColorMode = .system
+    public var accent: Accent = .blue
+    public var density: Density = .comfortable
+    public var cornerRadius: Double = 10
+    public var transparency: Bool = true
+    public var reducedMotion: Bool = false
+    public init() {}
+    public mutating func normalize() {
+        cornerRadius = cornerRadius.isFinite ? min(24, max(0, cornerRadius)) : 10
+    }
+}
+public struct Layout: Codable, Equatable, Sendable {
+    public var tabs: TabPlacement = .top
+    public var navigation: BarPlacement = .top
+    public var sidebar: SidebarPlacement = .leading
+    public var sidebarWidth: Double = 240
+    public var bookmarksBar: Bool = false
+    public var statusBar: Bool = true
+    public init() {}
+    public mutating func normalize() {
+        sidebarWidth = sidebarWidth.isFinite ? min(360, max(180, sidebarWidth)) : 240
+    }
+}
+public struct Configuration: Codable, Equatable, Sendable {
+    public var theme = Theme()
+    public var layout = Layout()
+    public init() {}
+    public mutating func normalize() { theme.normalize(); layout.normalize() }
+}
+public struct NamedConfiguration: Identifiable, Codable, Equatable, Sendable {
+    public var id: UUID
+    public var name: String
+    public var configuration: Configuration
+    public init(id: UUID = UUID(), name: String, configuration: Configuration) {
+        self.id = id; self.name = name; self.configuration = configuration
+    }
+}
+public struct Preferences: Codable, Equatable, Sendable {
+    public var search: SearchProvider = .duckDuckGo
+    public var restoreSession: Bool = true
+    public var blockPopups: Bool = true
+    public var configuration = Configuration()
+    public var savedConfigurations: [NamedConfiguration] = []
+    public var completedOnboarding: Bool = false
+    public init() {}
+}
+public struct LibraryState: Codable, Equatable, Sendable {
+    public var profiles: [Profile] = [Profile(name: "Personal")]
+    public var bookmarks: [Bookmark] = []
+    public var history: [HistoryEntry] = []
+    public var notes: [Note] = []
+    public var sessions: [WindowSession] = []
+    public var preferences = Preferences()
+    public init() {}
+    public mutating func normalize() {
+        var profilesSeen = Set<UUID>()
+        profiles = Array(profiles.filter { profilesSeen.insert($0.id).inserted }.prefix(20))
+        if profiles.isEmpty { profiles = [Profile(name: "Personal")] }
+        let profileIDs = Set(profiles.map(\.id))
+        bookmarks = bookmarks.filter { profileIDs.contains($0.profileID) && AddressResolver.isWebURL($0.url) }
+        history = Array(history.filter { profileIDs.contains($0.profileID) && AddressResolver.isWebURL($0.url) }.suffix(10_000))
+        notes = notes.filter { profileIDs.contains($0.profileID) }
+        var sessionsSeen = Set<UUID>()
+        sessions = Array(sessions.filter { profileIDs.contains($0.profileID) && sessionsSeen.insert($0.id).inserted }.prefix(20))
+        for i in sessions.indices { sessions[i].normalize() }
+        preferences.configuration.normalize()
+        for i in preferences.savedConfigurations.indices { preferences.savedConfigurations[i].configuration.normalize() }
+    }
+}
+
+/// Intentionally excludes browsing data, credentials, module grants and executable content.
+public struct SetupPack: Codable, Equatable, Sendable {
+    public let formatVersion: Int
+    public var name: String
+    public var configuration: Configuration
+    public init(name: String, configuration: Configuration) {
+        formatVersion = 1; self.name = name; self.configuration = configuration
+    }
+    public static func decode(_ data: Data) throws -> SetupPack {
+        guard data.count <= 64 * 1024 else { throw ValidationError("Setup pack is too large.") }
+        var pack = try JSONDecoder().decode(SetupPack.self, from: data)
+        guard pack.formatVersion == 1 else { throw ValidationError("This setup pack needs a newer Radius version.") }
+        guard !pack.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              pack.name.count <= 100 else { throw ValidationError("Use a setup name of 1–100 characters.") }
+        pack.configuration.normalize()
+        return pack
+    }
+}
+public struct ValidationError: LocalizedError, Equatable, Sendable {
+    public var message: String
+    public init(_ message: String) { self.message = message }
+    public var errorDescription: String? { message }
+}

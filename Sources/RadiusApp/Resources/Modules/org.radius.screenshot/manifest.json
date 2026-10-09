@@ -1,0 +1,11 @@
+{
+  "id": "org.radius.screenshot",
+  "name": "Page Capture",
+  "version": 1,
+  "summary": "Save the visible page as a PNG image.",
+  "publisher": "Radius",
+  "source": "https://github.com/starharbor2491/radius-browser",
+  "capability": "screenshot",
+  "dependencies": [],
+  "defaultInstalled": true
+}

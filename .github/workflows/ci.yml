@@ -1,0 +1,38 @@
+name: Build and test Radius
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: radius-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift version
+        run: swift --version
+      - name: Test core and validate packages
+        run: ./scripts/test.sh
+      - name: Build native app
+        run: ./scripts/build-app.sh
+      - name: Archive application
+        run: ditto -c -k --sequesterRsrc --keepParent dist/Radius.app dist/Radius-macOS.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Radius-macOS-local-build
+          path: dist/Radius-macOS.zip
+          if-no-files-found: error
+  portable-core:
+    runs-on: ubuntu-24.04
+    container: swift:6.2.1
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: apt-get update && apt-get install -y libsqlite3-dev python3
+      - run: ./scripts/test.sh

@@ -1,0 +1,11 @@
+{
+  "id": "org.radius.reader",
+  "name": "Reader",
+  "version": 1,
+  "summary": "Read an extracted text view of the current page.",
+  "publisher": "Radius",
+  "source": "https://github.com/starharbor2491/radius-browser",
+  "capability": "reader",
+  "dependencies": [],
+  "defaultInstalled": true
+}

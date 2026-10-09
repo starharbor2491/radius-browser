@@ -1,0 +1,11 @@
+{
+  "id": "org.radius.notes",
+  "name": "Notes",
+  "version": 1,
+  "summary": "A quiet place for notes, stored locally within your profile.",
+  "publisher": "Radius",
+  "source": "https://github.com/starharbor2491/radius-browser",
+  "capability": "notes",
+  "dependencies": [],
+  "defaultInstalled": true
+}

@@ -1,0 +1,11 @@
+{
+  "id": "org.radius.focus",
+  "name": "Focus Mode",
+  "version": 1,
+  "summary": "Hide browser chrome for a focused reading session. Escape brings it back.",
+  "publisher": "Radius",
+  "source": "https://github.com/starharbor2491/radius-browser",
+  "capability": "focusMode",
+  "dependencies": [],
+  "defaultInstalled": true
+}
