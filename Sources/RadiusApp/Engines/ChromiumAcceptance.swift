@@ -275,7 +275,7 @@ enum ChromiumAcceptance {
                 if ownerWindow.firstResponder is NSTextView { break }
             }
             guard ContinuousClock.now < addressFocusDeadline else {
-                throw ValidationError("Cmd-L on the Chromium start page did not focus Radius's native address field.")
+                throw ValidationError("Cmd-L on the Chromium start page did not focus Radius's native address field (key=\(NSApp.keyWindow?.windowNumber ?? -1), owner=\(ownerWindow.windowNumber), responder=\(String(describing: ownerWindow.firstResponder)), addressEditing=\(browser.addressEditing), selectedBlank=\(browser.activeWebTab === blank), nativeChrome=\(blank.hasNativeNavigationChrome)).")
             }
             try await Task.sleep(for: .milliseconds(50))
         }

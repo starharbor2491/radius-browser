@@ -451,7 +451,21 @@ struct BrowserWindow: View {
             if model.hasPage { ZoomControls(tab: model.activeWebTab) }
         }.font(.caption).foregroundStyle(.secondary).padding(.horizontal, 14).padding(.vertical, 6).background(.bar)
     }
-    private func focusAddress() { addressFocused = !model.activeWebTab.focusAddressBar() }
+    private func focusAddress() {
+        let tab = model.activeWebTab
+        let nativeFocused = tab.focusAddressBar()
+        // A replaced field can leave FocusState true without a field editor.
+        // Commit a fresh focus request after the new native field is mounted.
+        addressFocused = false
+        guard !nativeFocused else { return }
+        let selected = model.session.selectedTabID
+        DispatchQueue.main.async {
+            guard !model.isClosed, !app.finalQuitDataFrozen,
+                  model.session.selectedTabID == selected, model.activeWebTab === tab,
+                  !tab.hasNativeNavigationChrome else { return }
+            addressFocused = true
+        }
+    }
     private func secondarySidebar(_ panel: BrowserPanel) -> some View {
         SidebarView(model: model, panel: panel, onClose: model.closeSecondarySidebar).frame(width: min(layout.sidebarWidth, max(180, windowWidth * 0.24))).modifier(ChromeSurface(theme: sidebarTheme))
             .background(BrowserLayoutRegion(identifier: "radius.secondarySidebar"))

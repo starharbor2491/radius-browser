@@ -1,14 +1,22 @@
 // SPDX-License-Identifier: MPL-2.0
 import AppKit
+import Darwin
 import Testing
 @testable import RadiusApp
 
 extension NativeIntegrationTests.BrowserIntegrationTests {
     @Test func nativeTabMenuTargetsTheCurrentOwnedWindowAndRejectsFrozenOrClosedModels() async throws {
+        atexit {
+            let trace = "NATIVE_HOST_EXIT\n" + Thread.callStackSymbols.prefix(32).joined(separator: "\n") + "\n"
+            FileHandle.standardError.write(Data(trace.utf8))
+        }
         _ = NSApplication.shared
         let previousPolicy = NSApp.activationPolicy()
+        nativeHostTrace("before activation; application=\(type(of: NSApp!)) delegate=\(String(describing: NSApp.delegate)) policy=\(previousPolicy.rawValue)")
         NSApp.setActivationPolicy(.regular)
+        nativeHostTrace("before finishLaunching")
         NSApp.finishLaunching()
+        nativeHostTrace("after finishLaunching")
         NSApp.activate(ignoringOtherApps: true)
         let previousState = AppDelegate.state
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("radius-menu-test-" + UUID().uuidString)
@@ -20,13 +28,16 @@ extension NativeIntegrationTests.BrowserIntegrationTests {
         let secondProxy = WindowDelegateProxy(original: nil, model: second)
         firstWindow.delegate = firstProxy; secondWindow.delegate = secondProxy
         defer {
+            nativeHostTrace("begin focus teardown")
             app.unfreezeQuitData()
             firstWindow.delegate = nil; secondWindow.delegate = nil
             firstWindow.close(); secondWindow.close(); otherWindow.close()
             first.closeWindow(); second.closeWindow()
             withExtendedLifetime((firstProxy, secondProxy)) {}
             AppDelegate.state = previousState
+            nativeHostTrace("before restoring activation policy")
             NSApp.setActivationPolicy(previousPolicy)
+            nativeHostTrace("after restoring activation policy")
             try? FileManager.default.removeItem(at: directory)
         }
         let commands = NativeTabCommands()
@@ -91,6 +102,8 @@ extension NativeIntegrationTests.BrowserIntegrationTests {
     }
 
     @Test func nativeTabMenuSurvivesMenuReplacementWithoutDuplicatingCommandsOrCocoaEditingItems() throws {
+        nativeHostTrace("begin menu replacement")
+        defer { nativeHostTrace("end menu replacement") }
         _ = NSApplication.shared
         let commands = NativeTabCommands(), menu = commandMenu()
         let file = try #require(menu.items[0].submenu)
@@ -113,7 +126,9 @@ extension NativeIntegrationTests.BrowserIntegrationTests {
         edit.addItem(emoji)
         for _ in 0..<2 { edit.addItem(NSMenuItem(title: "Other emoji", action: emoji.action, keyEquivalent: "")) }
         edit.addItem(unrelated)
+        nativeHostTrace("before initial menu install")
         commands.install(in: menu)
+        nativeHostTrace("after initial menu install")
         #expect(!file.items.contains(standardClose) && file.items.contains(otherClose) && file.items.contains(closeAll))
         #expect(edit.items == [copy, dictation, separator, emoji, unrelated])
         #expect(dictation.target === NSApp && emoji.target == nil)
@@ -123,11 +138,13 @@ extension NativeIntegrationTests.BrowserIntegrationTests {
         #expect(Set(owned.compactMap { $0.identifier?.rawValue }).count == 5)
         #expect(owned.allSatisfy { $0.action != nil })
         commands.install(in: menu)
+        nativeHostTrace("after repeated menu install")
         #expect(menu.items.prefix(2).flatMap { $0.submenu?.items ?? [] } == originals)
         #expect(edit.items == [copy, dictation, separator, emoji, unrelated])
 
         let replacement = commandMenu()
         commands.install(in: replacement)
+        nativeHostTrace("after replacement menu install")
         let restored = replacement.items.flatMap { $0.submenu?.items ?? [] }.filter { $0.target === commands }
         #expect(restored == owned)
         #expect(menu.items.prefix(2).flatMap { $0.submenu?.items ?? [] }.allSatisfy { $0.target !== commands })
@@ -150,6 +167,10 @@ extension NativeIntegrationTests.BrowserIntegrationTests {
             try await Task.sleep(for: .milliseconds(20))
         }
         try #require(NSApp.keyWindow === window)
+    }
+
+    private func nativeHostTrace(_ message: String) {
+        FileHandle.standardError.write(Data(("NATIVE_HOST_TRACE " + message + "\n").utf8))
     }
 
     private func commandWindow() -> NSWindow {
