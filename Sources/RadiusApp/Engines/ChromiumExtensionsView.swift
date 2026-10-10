@@ -55,7 +55,7 @@ struct ChromiumExtensionsView: View {
                 if let onOpenSettings { Button("Open browsing engine settings", action: onOpenSettings) }
             }
             if let tab, tab.profileID == profileID, let message { Text(message).font(.callout).foregroundStyle(.secondary) }
-            Text("Compatibility target: Manifest V3 content scripts, background workers, storage, permissions, actions and popups. Chromium exposes each Radius tab as a separate window; extensions that reorganize tabs or windows may behave differently.")
+            Text("Compatibility target: Manifest V3 content scripts, background service workers, scripting, storage, permissions, actions and popups, options and side panels. Each Chromium browsing pane has Chrome's own tabs and extension toolbar. Compatibility varies by extension.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding(20).frame(minWidth: 760, minHeight: 560)

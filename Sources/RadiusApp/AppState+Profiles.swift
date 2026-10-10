@@ -142,7 +142,7 @@ extension AppState {
         }
         // Storage can be in use in other tabs and extension workers. Retain the
         // durable request and perform removal before engines start next time.
-        notice = "Quit and reopen Radius to clear this profile's website data. Your bookmarks, notes, history, and tab addresses are kept."
+        notice = "Quit and reopen Radius to clear WebKit website data and reset this Chromium profile. Chromium bookmarks, history, extensions, and settings are removed; Radius bookmarks, history, notes, tab addresses, and setup are kept."
     }
 
     func libraryPreparedForChromiumRemoval() -> LibraryState {
@@ -151,6 +151,7 @@ extension AppState {
         for index in prepared.sessions.indices {
             for tabIndex in prepared.sessions[index].tabs.indices where prepared.sessions[index].tabs[tabIndex].engineID == .chromium {
                 prepared.sessions[index].tabs[tabIndex].engineID = .webkit
+                prepared.sessions[index].tabs[tabIndex].chromiumPages = nil
                 if let url = prepared.sessions[index].tabs[tabIndex].url, !AddressResolver.isWebURL(url) {
                     prepared.sessions[index].tabs[tabIndex].url = nil
                     prepared.sessions[index].tabs[tabIndex].title = "New tab"
@@ -160,6 +161,7 @@ extension AppState {
         return prepared
     }
     func prepareForChromiumRemoval() {
+        windows.values.compactMap(\.model).forEach { $0.captureChromiumSessions() }
         library = libraryPreparedForChromiumRemoval()
         for model in windows.values.compactMap(\.model) {
             for tab in model.session.tabs where tab.engineID == .chromium {
@@ -170,6 +172,7 @@ extension AppState {
             }
             for index in model.closedTabs.indices where model.closedTabs[index].engineID == .chromium {
                 model.closedTabs[index].engineID = .webkit
+                model.closedTabs[index].chromiumPages = nil
                 if let url = model.closedTabs[index].url, !AddressResolver.isWebURL(url) { model.closedTabs[index].url = nil; model.closedTabs[index].title = "New tab" }
             }
             model.address = model.selectedTab.url?.absoluteString ?? ""

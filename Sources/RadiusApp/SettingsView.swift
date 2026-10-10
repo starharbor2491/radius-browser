@@ -81,9 +81,9 @@ struct SettingsView: View {
             Text("Browser data stays on this Mac. Radius has no analytics or cloud sync. Websites make their own network requests.").foregroundStyle(.secondary)
             GroupBox {
                 VStack(alignment: .leading, spacing: 14) {
-                    HStack { VStack(alignment: .leading) { Text("Browsing history"); Text("\(app.library.history.filter { $0.profileID == model.session.profileID }.count) saved visits").font(.caption).foregroundStyle(.secondary) }; Spacer(); Button("Clear…") { clearHistory() } }
+                    HStack { VStack(alignment: .leading) { Text("Radius history"); Text("\(app.library.history.filter { $0.profileID == model.session.profileID }.count) saved visits · Chrome's native history is separate").font(.caption).foregroundStyle(.secondary) }; Spacer(); Button("Clear…") { clearHistory() } }
                     Divider()
-                    HStack { VStack(alignment: .leading) { Text("Cookies and website data"); Text("Signs you out of websites in this profile").font(.caption).foregroundStyle(.secondary) }; Spacer(); Button(clearing ? "Clearing…" : "Clear…") { clearWebsiteData() }.disabled(clearing) }
+                    HStack { VStack(alignment: .leading) { Text("Website data and Chromium profile"); Text("Clears WebKit site data and resets Chromium, including its extensions, native bookmarks and history").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }; Spacer(); Button(clearing ? "Queuing…" : "Reset…") { clearWebsiteData() }.disabled(clearing) }
                 }.padding(8)
             }
             Text("Private browsing avoids saving history and tabs. Saved downloads remain on disk. It does not hide activity from websites, employers, or network providers.").font(.callout).foregroundStyle(.secondary)
@@ -130,21 +130,22 @@ struct SettingsView: View {
     private func clearHistory() {
         let profileID = model.session.profileID
         guard let profile = app.library.profiles.first(where: { $0.id == profileID }) else { return }
-        let alert = NSAlert(); alert.messageText = "Clear history for \(profile.name)?"; alert.informativeText = "Bookmarks, notes, and other profiles are kept. This cannot be undone."
-        alert.addButton(withTitle: "Clear history"); alert.addButton(withTitle: "Cancel")
+        let alert = NSAlert(); alert.messageText = "Clear Radius history for \(profile.name)?"; alert.informativeText = "Visits recorded by Radius will be removed. Chromium's native history is separate; clear it in Chrome's own controls. Radius bookmarks, notes, and other profiles are kept. This cannot be undone."
+        alert.addButton(withTitle: "Clear Radius history"); alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         guard !app.terminating, !app.deletingProfileIDs.contains(profileID),
               app.library.profiles.contains(where: { $0.id == profileID }) else { return }
         app.library.history.removeAll { $0.profileID == profileID }
+        app.notice = "Radius history cleared for \(profile.name)."
     }
     private func clearWebsiteData() {
         guard !model.isPrivate else { app.notice = "Close this private window to discard its temporary website storage."; return }
         let profileID = model.session.profileID
         guard let profile = app.library.profiles.first(where: { $0.id == profileID }) else { return }
         let profileName = profile.name
-        let alert = NSAlert(); alert.messageText = "Clear website data for \(profileName)?"
-        alert.informativeText = "Cookies, caches, and local databases in both WebKit and Chromium will be cleared for this profile. You will be signed out. Close other windows using this profile first. Unsaved page work may be lost."
-        alert.addButton(withTitle: "Clear website data"); alert.addButton(withTitle: "Cancel")
+        let alert = NSAlert(); alert.messageText = "Reset website data and Chromium for \(profileName)?"
+        alert.informativeText = "WebKit cookies, caches and local databases will be cleared. Chromium's entire engine profile will be reset, including installed extensions, native bookmarks, history and settings. You will be signed out. Radius bookmarks, history, notes and tab addresses are kept. Close other windows using this profile first; unsaved page work may be lost. This cannot be undone."
+        alert.addButton(withTitle: "Reset profile storage"); alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         clearing = true
         Task {
@@ -152,7 +153,7 @@ struct SettingsView: View {
             do {
                 try await app.requestWebsiteDataClear(profileID)
                 let ready = NSAlert(); ready.messageText = "Website data removal is queued for \(profileName)"
-                ready.informativeText = "Quit and reopen Radius to complete removal before either engine loads. Bookmarks, history, notes, and tab addresses are kept."
+                ready.informativeText = "Quit and reopen Radius to clear WebKit site data and reset Chromium before either engine loads. Radius bookmarks, history, notes and tab addresses are kept; Chromium's engine-local records and extensions will be removed."
                 ready.addButton(withTitle: "Quit Radius"); ready.addButton(withTitle: "Later")
                 if ready.runModal() == .alertFirstButtonReturn { NSApp.terminate(nil) }
             } catch { app.notice = error.localizedDescription }

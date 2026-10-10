@@ -9,7 +9,7 @@ struct DistributionSettingsView: View {
     var body: some View {
         GroupBox("Installation and updates") {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Install Chromium, remove it, or update Radius with a verified complete application. Installation happens after you quit; the native interface and your browser data stay available.")
+                Text("Install Chromium, remove it, or update Radius with a verified complete application. Installation happens after you quit. Your Radius profiles, saved records, modules, and layout are kept.")
                     .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 if let current = distribution.current {
                     LabeledContent("Installed", value: "Radius \(current.version) · \(current.chromium ? "WebKit + Chromium" : "WebKit")")
@@ -59,8 +59,11 @@ struct DistributionSettingsView: View {
     }
     private func confirmInstall(_ asset: DistributionAsset) {
         let alert = NSAlert()
-        alert.messageText = asset.release.chromium ? "Install Chromium and restart Radius?" : "Remove Chromium and restart Radius?"
-        alert.informativeText = "The complete Radius app is staged and verified before replacement. Your installed modules, chosen layout, profiles, and website data are kept. \(asset.release.chromium ? "Existing tabs keep their engine; choose Chromium for future tabs or reopen a tab explicitly." : "Chromium tabs must be reopened with WebKit. Website addresses reload in separate sign-in contexts; unsaved forms and authentication do not transfer.")"
+        let removingChromium = distribution.current?.chromium == true && !asset.release.chromium
+        alert.messageText = removingChromium ? "Remove Chromium and restart Radius?" : "Install Radius and restart?"
+        alert.informativeText = "The complete Radius app is staged and verified before replacement. " + (removingChromium
+            ? DistributionManager.chromiumRemovalNotice
+            : "Your Radius profiles, saved records, installed modules, and layout are kept.\(asset.release.chromium ? " Choose Chromium for future tabs or reopen a tab explicitly to change its engine." : "")")
         alert.addButton(withTitle: "Download installer"); alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         distribution.install(asset, dataDirectory: dataDirectory)

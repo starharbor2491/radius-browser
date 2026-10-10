@@ -317,8 +317,14 @@ struct ProfilesIntegrationTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let profileID = app.library.profiles[0].id
         app.library.profiles[0].engineID = .chromium
-        let website = BrowserTab(title: "Signed-in website", url: URL(string: "https://fixture.invalid/account"), pinned: true, engineID: .chromium)
-        let generated = BrowserTab(title: "Extension options", url: URL(string: "chrome-extension://fixture/options.html"), parentID: website.id, engineID: .chromium)
+        let savedPages = [
+            ChromiumSessionPage(url: URL(string: "https://fixture.invalid/account"), title: "Signed-in website"),
+            ChromiumSessionPage(url: URL(string: "https://fixture.invalid/background"), title: "Background website"),
+            ChromiumSessionPage()
+        ]
+        let website = BrowserTab(title: "Signed-in website", url: savedPages[0].url, pinned: true, engineID: .chromium, chromiumPages: savedPages)
+        let generatedPages = [ChromiumSessionPage(), ChromiumSessionPage(url: URL(string: "https://fixture.invalid/another"), title: "Another website")]
+        let generated = BrowserTab(title: "Extension options", url: URL(string: "chrome-extension://fixture/options.html"), parentID: website.id, engineID: .chromium, chromiumPages: generatedPages)
         let webKitTab = BrowserTab(title: "Independent WebKit page", engineID: .webkit)
         app.library.sessions = [WindowSession(profileID: profileID, tabs: [website, generated, webKitTab])]
         let browser = BrowserModel(app: app, isPrivate: false)
@@ -338,7 +344,7 @@ struct ProfilesIntegrationTests {
         let prepared = try await database.load()
         #expect(prepared.profiles.first { $0.id == profileID }?.engineID == .webkit)
         let preparedSession = try #require(prepared.sessions.first { $0.id == originalSession.id })
-        #expect(preparedSession.tabs.allSatisfy { $0.engineID == .webkit })
+        #expect(preparedSession.tabs.allSatisfy { $0.engineID == .webkit && $0.chromiumPages == nil }, "A WebKit restart snapshot must not retain hidden Chromium tabs.")
         #expect(preparedSession.tabs.first { $0.id == website.id }?.url == website.url)
         #expect(preparedSession.tabs.first { $0.id == website.id }?.pinned == true)
         #expect(preparedSession.tabs.first { $0.id == generated.id }?.url == nil)
@@ -362,6 +368,8 @@ struct ProfilesIntegrationTests {
         expectedDurableLibrary.normalize()
         #expect(restored.profiles == expectedDurableLibrary.profiles)
         #expect(restored.sessions == expectedDurableLibrary.sessions)
+        #expect(restored.sessions.first { $0.id == originalSession.id }?.tabs.first { $0.id == website.id }?.chromiumPages == savedPages)
+        #expect(restored.sessions.first { $0.id == originalSession.id }?.tabs.first { $0.id == generated.id }?.chromiumPages == generatedPages)
         #expect(browser.session == originalSession)
         let afterRefusal = browser.activeWebTab
         if originalAdapter is UnavailableEngineTab {

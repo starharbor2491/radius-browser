@@ -147,4 +147,34 @@ fi
 smoke_watchdog_pid=$!
 if wait "$smoke_app_pid"; then smoke_status=0; else smoke_status=$?; fi
 smoke_app_pid=""
+if [[ "$smoke_status" -eq 0 ]]; then
+  # Native acceptance records this path only after a real incomplete Chromium
+  # download survives its inner-tab close and the owning pane reaches CLOSED.
+  # The retained admission must remove the file during actual CefShutdown.
+  python3 - "$PWD/dist/smoke-data/DownloadAcceptance" <<'PY'
+import os, pathlib, re, stat, sys
+root = pathlib.Path(sys.argv[1])
+marker = root / 'expected-staging.txt'
+if not os.path.lexists(marker):
+    sys.exit(0)
+if root.is_symlink() or not root.is_dir():
+    raise ValueError('Download acceptance must use its owned directory.')
+descriptor = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+with os.fdopen(descriptor, 'rb') as stream:
+    info = os.fstat(stream.fileno())
+    if not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
+        raise ValueError('Invalid download acceptance receipt.')
+    encoded = stream.read(4097)
+if not encoded or len(encoded) > 4096:
+    raise ValueError('Invalid download acceptance receipt.')
+staging = pathlib.Path(encoded.decode('utf-8').rstrip('\r\n'))
+filename = r'\.radius-download-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\.part'
+if (not staging.is_absolute() or staging.parent != root.resolve(strict=True)
+        or not re.fullmatch(filename, staging.name)):
+    raise ValueError('Download acceptance receipt escapes its owned directory.')
+if os.path.lexists(staging):
+    raise RuntimeError('Chromium kept incomplete download staging after normal shutdown.')
+print('Chromium incomplete download staging removed after normal shutdown.')
+PY
+fi
 exit "$smoke_status"

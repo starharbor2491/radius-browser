@@ -59,7 +59,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/radius-cef-runtime
-          key: radius-cef154-chrome-3-${{ matrix.arch }}
+          key: radius-cef154-chrome-4-${{ matrix.arch }}
       - name: Build pinned optional Chromium package
         id: chromium-build
         run: python3 scripts/chromium-runtime.py --arch "${{ matrix.arch }}" --work-dir "$RUNNER_TEMP/radius-cef-runtime"
@@ -68,7 +68,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/radius-cef-runtime
-          key: radius-cef154-chrome-3-${{ matrix.arch }}
+          key: radius-cef154-chrome-4-${{ matrix.arch }}
       - name: Test native shell
         id: native-tests
         run: ./scripts/test.sh

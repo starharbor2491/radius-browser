@@ -55,9 +55,33 @@ public enum AddressResolver {
     }
 }
 
+/// Website titles are limited to 512 Unicode scalars and at most 2048 UTF-8
+/// bytes; grapheme counts alone do not bound combining-character input.
+public func boundedPageTitle(_ title: String) -> String {
+    String(String.UnicodeScalarView(title.unicodeScalars.prefix(512)))
+}
+
 public enum BrowserEngineID: String, Codable, CaseIterable, Sendable {
     case webkit, chromium
     public var label: String { self == .webkit ? "WebKit" : "Chromium" }
+}
+/// Safe restoration data for Chrome's tabs within one native browser pane.
+public struct ChromiumSessionPage: Codable, Equatable, Sendable {
+    public var url: URL?
+    public var title: String
+    public init(url: URL? = nil, title: String = "New tab") { self.url = url; self.title = title }
+    /// The selected page is first. Blank/internal pages retain their slot without
+    /// persisting privileged URLs, cookies, forms or website execution state.
+    public static func normalized(_ pages: [Self]) -> [Self] {
+        Array(pages.prefix(200)).map { page in
+            var value = page
+            if let url = value.url, !AddressResolver.isWebURL(url) || url.absoluteString.utf8.count > 8192 {
+                value.url = nil
+            }
+            value.title = value.url == nil ? "New tab" : boundedPageTitle(value.title)
+            return value
+        }
+    }
 }
 public struct BrowserTab: Identifiable, Codable, Equatable, Sendable {
     public var id: UUID
@@ -67,8 +91,9 @@ public struct BrowserTab: Identifiable, Codable, Equatable, Sendable {
     public var parentID: UUID?
     public var collapsed: Bool?
     public var engineID: BrowserEngineID?
-    public init(id: UUID = UUID(), title: String = "New tab", url: URL? = nil, pinned: Bool = false, parentID: UUID? = nil, engineID: BrowserEngineID? = nil) {
-        self.id = id; self.title = title; self.url = url; self.pinned = pinned; self.parentID = parentID; self.engineID = engineID
+    public var chromiumPages: [ChromiumSessionPage]?
+    public init(id: UUID = UUID(), title: String = "New tab", url: URL? = nil, pinned: Bool = false, parentID: UUID? = nil, engineID: BrowserEngineID? = nil, chromiumPages: [ChromiumSessionPage]? = nil) {
+        self.id = id; self.title = title; self.url = url; self.pinned = pinned; self.parentID = parentID; self.engineID = engineID; self.chromiumPages = chromiumPages
     }
 }
 public struct TabSplit: Codable, Equatable, Sendable {
@@ -94,7 +119,12 @@ public struct WindowSession: Identifiable, Codable, Equatable, Sendable {
         tabs = Array(tabs.filter { seen.insert($0.id).inserted }.prefix(200))
         for i in tabs.indices {
             if let url = tabs[i].url, !AddressResolver.isWebURL(url) { tabs[i].url = nil; tabs[i].title = "New tab" }
-            tabs[i].title = String(tabs[i].title.prefix(512))
+            tabs[i].title = boundedPageTitle(tabs[i].title)
+            if tabs[i].engineID == .chromium, let pages = tabs[i].chromiumPages {
+                let saved = ChromiumSessionPage.normalized(pages)
+                tabs[i].chromiumPages = saved.isEmpty ? nil : saved
+                if let selected = saved.first { tabs[i].url = selected.url; tabs[i].title = selected.title }
+            } else { tabs[i].chromiumPages = nil }
         }
         if tabs.isEmpty { tabs = [BrowserTab()] }
         tabs = tabs.filter(\.pinned) + tabs.filter { !$0.pinned }
@@ -372,6 +402,8 @@ public struct LibraryState: Codable, Equatable, Sendable {
         }
         bookmarks = bookmarks.filter { profileIDs.contains($0.profileID) && AddressResolver.isWebURL($0.url) }
         history = Array(history.filter { profileIDs.contains($0.profileID) && AddressResolver.isWebURL($0.url) }.suffix(10_000))
+        for i in bookmarks.indices { bookmarks[i].title = boundedPageTitle(bookmarks[i].title) }
+        for i in history.indices { history[i].title = boundedPageTitle(history[i].title) }
         notes = notes.filter { profileIDs.contains($0.profileID) }
         var sessionsSeen = Set<UUID>()
         sessions = sessions.filter { profileIDs.contains($0.profileID) && sessionsSeen.insert($0.id).inserted }

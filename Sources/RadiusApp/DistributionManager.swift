@@ -10,6 +10,7 @@ import UniformTypeIdentifiers
 @MainActor
 final class DistributionManager: ObservableObject {
     static let shared = DistributionManager()
+    static let chromiumRemovalNotice = "Only the active HTTP(S) page in each Chromium pane reopens in WebKit. Other inner tabs are closed; active pages without an HTTP(S) address become blank WebKit pages. Cookies, sign-ins, and unsaved work do not transfer between engines. Radius bookmarks, history, notes, profiles, installed modules, and layout are kept. Chromium's saved engine data remains on disk."
     @Published private(set) var available: [DistributionAsset] = []
     @Published private(set) var busy = false
     @Published private(set) var progress: Double?
@@ -118,7 +119,7 @@ final class DistributionManager: ObservableObject {
         guard !busy, !terminationPending else { return }
         let panel = NSOpenPanel()
         panel.title = "Import a Radius installer"
-        panel.message = "Choose an official signed Radius.app or offline Radius disk image. Browser data and your chosen modules are kept."
+        panel.message = "Choose an official signed Radius.app or offline Radius disk image. Radius profiles, saved records, modules, and layout are kept. A WebKit-only installer requires confirmation before removing Chromium."
         panel.allowedContentTypes = [.applicationBundle, .diskImage]
         panel.canChooseDirectories = true; panel.canChooseFiles = true; panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url,
@@ -284,6 +285,14 @@ final class DistributionManager: ObservableObject {
                 return try ReleaseTrust.metadata(of: imported)
             }
             if let expected, release != expected { throw ValidationError("The signed installer does not match the advertised release.") }
+            if expected == nil, current.chromium, !release.chromium {
+                let alert = NSAlert()
+                alert.messageText = "Stage a WebKit-only installer and remove Chromium?"
+                alert.informativeText = Self.chromiumRemovalNotice + " Replacement happens only after you choose Restart and install."
+                alert.addButton(withTitle: "Stage installer"); alert.addButton(withTitle: "Cancel")
+                guard alert.runModal() == .alertFirstButtonReturn else { throw CancellationError() }
+                try Task.checkCancellation()
+            }
             guard let installDestination = chooseDestination() else { throw CancellationError() }
             try ReleaseTrust.verifyDestinationIsNotRunning(installDestination, excludingPID: ProcessInfo.processInfo.processIdentifier)
             if FileManager.default.fileExists(atPath: installDestination.path) {
@@ -298,7 +307,7 @@ final class DistributionManager: ObservableObject {
             let saved = PendingInstall(candidate: imported, destination: installDestination, release: release)
             try JSONEncoder().encode(saved).write(to: directory!.appendingPathComponent("pending-install.json"), options: [.atomic])
             candidate = imported; rejectedStage = nil; destination = installDestination; pending = release
-            message = "Radius \(release.version) is ready. Restart to \(release.chromium ? "install Chromium" : "use WebKit and remove Chromium"). Website addresses reload; cookies and unsaved forms do not transfer between engines. Your modules, layout, and browser data are kept."
+            message = readyMessage(for: release, current: current)
         } catch {
             // Cancellation must still finish removing this owned disposable
             // stage. A detached cleanup keeps filesystem work off the UI actor.
@@ -349,7 +358,13 @@ final class DistributionManager: ObservableObject {
         }
         candidate = saved.candidate; destination = saved.destination; pending = saved.release
         rejectedStage = nil
-        message = "A verified installer is ready. Choose Restart and install, or discard it."
+        message = readyMessage(for: saved.release, current: current)
+    }
+    private func readyMessage(for release: DistributionRelease, current: DistributionRelease) -> String {
+        if current.chromium, !release.chromium {
+            return "Radius \(release.version) is ready. Restart to use WebKit and remove Chromium. " + Self.chromiumRemovalNotice
+        }
+        return "Radius \(release.version) is ready. Choose Restart and install, or discard it. Your Radius profiles, saved records, installed modules, and layout are kept."
     }
     private func chooseDestination() -> URL? {
         let current = Bundle.main.bundleURL.standardizedFileURL

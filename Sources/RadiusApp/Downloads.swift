@@ -16,8 +16,13 @@ final class DownloadAdmission {
     var activeCenters: [DownloadCenter] { centers.values.filter(\.hasActive) }
     func refresh(_ center: DownloadCenter) {
         let id = ObjectIdentifier(center)
-        if center.hasActive { centers[id] = center }
+        if center.hasActive || center.hasShutdownPendingDownloads { centers[id] = center }
         else { centers.removeValue(forKey: id) }
+    }
+    /// Only a successful CefShutdown proves the writers of closed Chromium
+    /// WebContents have stopped. Keep these centers alive until that boundary.
+    func chromiumDidShutDown() {
+        for center in Array(centers.values) { center.chromiumDidShutDown() }
     }
     func freeze() { acceptingDownloads = false }
     func resume() { acceptingDownloads = true }
@@ -98,9 +103,19 @@ final class DownloadItem: ObservableObject, Identifiable {
 final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
     @Published var items: [DownloadItem] = [] { didSet { admission.refresh(self) } }
     private let admission: DownloadAdmission
+    private var acceptanceDestination: URL?
     var acceptingDownloads: Bool { admission.acceptingDownloads }
     func acceptsDownloads(for profileID: UUID) -> Bool { admission.acceptsDownloads(for: profileID) }
     init(admission: DownloadAdmission = .shared) { self.admission = admission; super.init() }
+    func useAcceptanceDestination(_ url: URL) throws {
+        guard CommandLine.arguments.contains("--smoke-test"),
+              let root = ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_DATA"],
+              url.standardizedFileURL.resolvingSymlinksInPath().deletingLastPathComponent() ==
+                URL(fileURLWithPath: root, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath().appendingPathComponent("DownloadAcceptance", isDirectory: true) else {
+            throw ValidationError("The download fixture requires its isolated acceptance directory.")
+        }
+        acceptanceDestination = url
+    }
     private var standaloneWindow: DownloadWindowController?
     func showWindow() {
         if standaloneWindow == nil {
@@ -169,6 +184,11 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
         }
         admission.refresh(self)
     }
+    fileprivate func chromiumDidShutDown() {
+        for item in items where item.acknowledgementUnavailable && !item.transferEnded {
+            finishCancellation(item)
+        }
+    }
     private func chooseDestination(for item: DownloadItem, suggestedName: String, completion: @MainActor @Sendable (URL?) -> Void) {
         guard acceptsDownloads(for: item.profileID), item.active else {
             if item.active { cancel(item) }
@@ -176,12 +196,29 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
         }
         let cleanName = URL(fileURLWithPath: suggestedName).lastPathComponent
         item.name = cleanName.isEmpty ? "Download" : cleanName
-        let panel = NSSavePanel(); panel.nameFieldStringValue = item.name
-        panel.message = "Save this download. Files are never opened automatically."
-        item.destinationPanel = panel
-        let choice = panel.runModal()
-        item.destinationPanel = nil
-        guard acceptsDownloads(for: item.profileID), item.active, choice == .OK, let url = panel.url else {
+        let selected: URL?
+        let environment = ProcessInfo.processInfo.environment
+        if let destination = acceptanceDestination,
+           CommandLine.arguments.contains("--smoke-test"),
+           let root = environment["RADIUS_SMOKE_TEST_DATA"],
+           let fixture = environment["RADIUS_SMOKE_TEST_URL"].flatMap(URL.init(string:)),
+           fixture.scheme == "http", fixture.host == "127.0.0.1", fixture.port != nil,
+           let source = item.sourceURL, source == fixture.deletingLastPathComponent().appendingPathComponent("slow-download"),
+           destination.standardizedFileURL.resolvingSymlinksInPath().deletingLastPathComponent() ==
+             URL(fileURLWithPath: root, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath().appendingPathComponent("DownloadAcceptance", isDirectory: true) {
+            // A fixed loopback transfer in the isolated native acceptance run.
+            // Production downloads always present the save panel below.
+            acceptanceDestination = nil
+            selected = destination
+        } else {
+            let panel = NSSavePanel(); panel.nameFieldStringValue = item.name
+            panel.message = "Save this download. Files are never opened automatically."
+            item.destinationPanel = panel
+            let choice = panel.runModal()
+            item.destinationPanel = nil
+            selected = choice == .OK ? panel.url : nil
+        }
+        guard acceptsDownloads(for: item.profileID), item.active, let url = selected else {
             if item.active { cancel(item) }
             completion(nil)
             return
@@ -319,6 +356,7 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
         }
     }
     var hasActive: Bool { items.contains(where: \.awaitsTerminalUpdate) }
+    var hasShutdownPendingDownloads: Bool { items.contains { $0.acknowledgementUnavailable && !$0.transferEnded } }
     func hasActive(profileID: UUID) -> Bool { items.contains { $0.profileID == profileID && $0.awaitsTerminalUpdate } }
 }
 

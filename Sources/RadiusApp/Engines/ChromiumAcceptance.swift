@@ -123,6 +123,22 @@ enum ChromiumAcceptance {
         guard chrome.isKeyWindow, browser.session.selectedTabID == probeID else {
             throw ValidationError("Focusing the Chrome pane did not select its native Radius tab (active=\(NSApp.isActive), key=\(chrome.isKeyWindow), eligible=\(chrome.canBecomeKey), visible=\(chrome.isVisible), child=\(chrome.windowNumber), actualKey=\(NSApp.keyWindow?.windowNumber ?? -1), parent=\(ownerWindow.windowNumber), selectedProbe=\(browser.session.selectedTabID == probeID)).")
         }
+        let frozenMembers = try await nativeBrowsers(tab)
+        let frozenCommandConsumed: Bool
+        do {
+            browser.app.freezeQuitData()
+            defer { browser.app.unfreezeQuitData() }
+            try key("w", code: 13, modifiers: .command, window: chrome)
+            try key("t", code: 17, modifiers: .command, window: chrome)
+            frozenCommandConsumed = tab.performNativeTabCommand(.close)
+            try await Task.sleep(for: .milliseconds(150))
+        }
+        guard frozenCommandConsumed,
+              Set(try await nativeBrowsers(tab).compactMap { $0["id"] as? Int }) ==
+                Set(frozenMembers.compactMap { $0["id"] as? Int }),
+              browser.activeWebTab === tab else {
+            throw ValidationError("Native Chrome input changed a pane while its final quit snapshot was frozen.")
+        }
         // Send ordinary AppKit events to our own key window. Do not invoke the
         // browser command callback or grant system accessibility permission.
         try key("l", code: 37, modifiers: .command, window: chrome)
@@ -140,9 +156,15 @@ enum ChromiumAcceptance {
             }
             try await Task.sleep(for: .milliseconds(100))
         }
+        let homeMembers = try await nativeBrowsers(tab)
+        let homeIDs = Set(homeMembers.compactMap { $0["id"] as? Int })
+        let homeActive = homeMembers.first { $0["active"] as? Bool == true }?["id"] as? Int
         browser.showStartPage()
         try await waitForStartPage(tab)
-        guard browser.activeWebTab === tab, !browser.hasPage, tab.url == nil, tab.canGoBack else {
+        let afterHome = try await nativeBrowsers(tab)
+        guard Set(afterHome.compactMap { $0["id"] as? Int }) == homeIDs,
+              afterHome.first(where: { $0["active"] as? Bool == true })?["id"] as? Int == homeActive,
+              browser.activeWebTab === tab, browser.hasPage, tab.url?.scheme == "chrome", tab.canGoBack else {
             throw ValidationError("Chromium Home did not retain its native state (sameBrowser=\(browser.activeWebTab === tab), hasPage=\(browser.hasPage), URL=\(tab.url?.absoluteString ?? "nil"), canGoBack=\(tab.canGoBack)).")
         }
         tab.goBack()
@@ -151,20 +173,24 @@ enum ChromiumAcceptance {
             guard ContinuousClock.now < backDeadline else { throw ValidationError("Chromium Back did not restore the page after Home.") }
             try await Task.sleep(for: .milliseconds(100))
         }
-        tab.goForward()
-        let forwardDeadline = ContinuousClock.now.advanced(by: .seconds(10))
-        while browser.hasPage || tab.loading || !tab.isShowingStartPage {
-            guard ContinuousClock.now < forwardDeadline else { throw ValidationError("Chromium Forward did not return to Radius's native start page.") }
-            try await Task.sleep(for: .milliseconds(100))
+        guard try await evaluate(tab, "location.href") == target.absoluteString else {
+            throw ValidationError("Chrome Home's Back history did not restore the actual prior HTTP document.")
         }
-        guard browser.activeWebTab === tab, tab.url == nil else { throw ValidationError("Chromium Forward replaced the Home browser or exposed its internal address.") }
+        tab.goForward()
+        try await waitForStartPage(tab)
+        let afterForward = try await nativeBrowsers(tab)
+        guard Set(afterForward.compactMap { $0["id"] as? Int }) == homeIDs,
+              afterForward.first(where: { $0["active"] as? Bool == true })?["id"] as? Int == homeActive,
+              browser.activeWebTab === tab, browser.hasPage, tab.nativeView.window != nil else {
+            throw ValidationError("Chromium Forward replaced its pane or hid the inner tab strip.")
+        }
         tab.goBack()
         let restoreDeadline = ContinuousClock.now.advanced(by: .seconds(10))
         while tab.url != target || tab.loading || !tab.hasNativeNavigationChrome {
             guard ContinuousClock.now < restoreDeadline else { throw ValidationError("Chromium Back failed after traversing its Home history entry.") }
             try await Task.sleep(for: .milliseconds(100))
         }
-        print("Radius Chromium acceptance: Home preserved its browser and Back/Forward restored the previous document and native start page")
+        print("Radius Chromium acceptance: Home preserved its browser and Back/Forward restored the previous document and Chrome new-tab surface")
         browser.showStartPage()
         try await waitForStartPage(tab)
         // Exercise the engine's navigation path, as extension tabs.update does,
@@ -175,9 +201,10 @@ enum ChromiumAcceptance {
             guard ContinuousClock.now < externalDeadline else { throw ValidationError("An engine-originated Chromium navigation remained hidden behind Radius's start page.") }
             try await Task.sleep(for: .milliseconds(100))
         }
-        print("Radius Chromium acceptance: engine-originated navigation replaced the native Home state")
+        print("Radius Chromium acceptance: engine-originated navigation replaced the Chrome Home document")
         try await verifyNavigationRetry(browser: browser, tab: tab, fixtureURL: target)
         chrome.makeKeyAndOrderFront(nil); tab.focus()
+        try await verifyNativeTabMenus(tab)
         let beforeNew = Set(browser.session.tabs.map(\.id))
         guard let profileIndex = browser.app.library.profiles.firstIndex(where: { $0.id == browser.session.profileID }) else {
             throw ValidationError("The shortcut probe's profile is unavailable.")
@@ -185,12 +212,50 @@ enum ChromiumAcceptance {
         let originalEngine = browser.app.library.profiles[profileIndex].engineID
         browser.app.library.profiles[profileIndex].engineID = .chromium
         defer { browser.app.library.profiles[profileIndex].engineID = originalEngine }
+        let beforeMembers = try await nativeBrowsers(tab)
         try key("t", code: 17, modifiers: .command, window: chrome)
-        try await Task.sleep(for: .milliseconds(300))
-        let created = Set(browser.session.tabs.map(\.id)).subtracting(beforeNew)
-        guard created.count == 1, created.contains(browser.session.selectedTabID) else {
-            throw ValidationError("Native Cmd-T from Chrome did not create and select one Radius tab.")
+        let innerDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while try await nativeBrowsers(tab).count != beforeMembers.count + 1 {
+            guard ContinuousClock.now < innerDeadline else { throw ValidationError("Native Cmd-T did not add one inner Chrome tab.") }
+            try await Task.sleep(for: .milliseconds(100))
         }
+        guard Set(browser.session.tabs.map(\.id)) == beforeNew, browser.activeWebTab === tab else {
+            throw ValidationError("Chrome's inner tab created a duplicate outer Radius row.")
+        }
+        try key("l", code: 37, modifiers: .command, window: chrome)
+        try await Task.sleep(for: .milliseconds(100))
+        components.fragment = "radius-inner-tab"
+        guard let innerTarget = components.url else { throw ValidationError("The inner-tab target is invalid.") }
+        for character in innerTarget.absoluteString { try key(String(character), code: 0, window: chrome) }
+        try key("\r", code: 36, window: chrome)
+        let innerLoadDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while tab.url != innerTarget || tab.loading {
+            guard ContinuousClock.now < innerLoadDeadline else { throw ValidationError("Chrome's new inner tab did not become the Radius command target.") }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        guard browser.selectedTab.url == innerTarget, try await evaluate(tab, "location.href") == innerTarget.absoluteString else {
+            throw ValidationError("The displayed inner Chrome tab and Radius metadata disagree.")
+        }
+        let savedPages = tab.chromiumSessionPages
+        guard let savedPages, savedPages.count == 2, savedPages.first?.url == innerTarget,
+              savedPages.contains(where: { $0.url?.path == "/navigation-retry" }) else {
+            throw ValidationError("The Chromium pane did not preserve its active and inactive pages for session recovery.")
+        }
+        try await verifyGroupedRestore(savedPages, app: browser.app)
+        try await focusPage(tab)
+        try key("w", code: 13, modifiers: .command, window: chrome)
+        let innerCloseDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while try await nativeBrowsers(tab).count != beforeMembers.count {
+            guard ContinuousClock.now < innerCloseDeadline else { throw ValidationError("Cmd-W did not close only the active inner Chrome tab.") }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        guard browser.session.tabs.contains(where: { $0.id == probeID }), browser.activeWebTab === tab else {
+            throw ValidationError("Closing one Chrome tab destroyed its still-live Radius pane.")
+        }
+        // A separately requested pristine Radius pane still offers the native
+        // start widgets/address field before it opens its first Chrome page.
+        browser.newTab(engine: .chromium)
+        let created = Set(browser.session.tabs.map(\.id)).subtracting(beforeNew)
         guard let blank = browser.activeWebTab as? ChromiumTab, !browser.hasPage,
               blank.nativeView.window == nil, !blank.hasNativeNavigationChrome, !blank.focusAddressBar() else {
             throw ValidationError("A blank Chromium tab hid Radius's address field or claimed an unmounted Chrome toolbar.")
@@ -259,16 +324,123 @@ enum ChromiumAcceptance {
         let deadline = ContinuousClock.now.advanced(by: .seconds(10))
         var document = ""
         while ContinuousClock.now < deadline {
-            // StopLoad can synchronously report loading=false before the Home
-            // load commits. Require the actual replacement document as well.
             if !tab.loading {
                 document = (try? await evaluate(tab, "location.href")) ?? ""
-                if document.hasPrefix("about:blank#radius-start-"), tab.isShowingStartPage,
-                   tab.nativeView.window == nil, !tab.loading { return }
+                // This fresh diagnostic profile has no new-tab override.
+                if let url = URL(string: document), url.scheme == "chrome",
+                   ["newtab", "new-tab-page"].contains(url.host ?? ""), url.path == "/" || url.path.isEmpty,
+                   tab.nativeView.window != nil, tab.hasNativeNavigationChrome, !tab.loading { return }
             }
             try await Task.sleep(for: .milliseconds(100))
         }
-        throw ValidationError("Chromium Home did not commit its empty document (document=\(document), loading=\(tab.loading), mounted=\(tab.nativeView.window != nil), startPage=\(tab.isShowingStartPage)).")
+        throw ValidationError("Chromium Home did not commit its native new-tab document (document=\(document), loading=\(tab.loading), mounted=\(tab.nativeView.window != nil)).")
+    }
+    private static func nativeBrowsers(_ tab: ChromiumTab) async throws -> [[String: Any]] {
+        let data = try await tab.request("Radius.chromeHostState", parameters: [:])
+        guard let value = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let members = value["browsers"] as? [[String: Any]] else {
+            throw ValidationError("The normal Chrome pane did not report its owned inner browsers.")
+        }
+        return members
+    }
+    private static func verifyNativeTabMenus(_ tab: ChromiumTab) async throws {
+        try await focusPage(tab)
+        let before = try await nativeBrowsers(tab)
+        let ids = Set(before.compactMap { $0["id"] as? Int })
+        func perform(_ title: String, in menu: NSMenu) -> Bool {
+            menu.update()
+            for (index, item) in menu.items.enumerated() {
+                if item.title == title, item.isEnabled { menu.performActionForItem(at: index); return true }
+                if let submenu = item.submenu, perform(title, in: submenu) { return true }
+            }
+            return false
+        }
+        guard let menu = NSApp.mainMenu, perform("New tab", in: menu) else {
+            throw ValidationError("The actual Radius New tab menu was unavailable with a native Chrome window focused.")
+        }
+        let addDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while try await nativeBrowsers(tab).count != before.count + 1 {
+            guard ContinuousClock.now < addDeadline else { throw ValidationError("The native New tab menu did not target the focused Chrome pane.") }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        guard perform("Close tab", in: menu) else { throw ValidationError("The actual Radius Close tab menu was unavailable for Chrome.") }
+        let closeDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while Set(try await nativeBrowsers(tab).compactMap { $0["id"] as? Int }) != ids {
+            guard ContinuousClock.now < closeDeadline else { throw ValidationError("The native Close tab menu closed the wrong Chrome pane or inner tab.") }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        print("Radius Chromium acceptance: actual New/Close menu routed to focused \(tab.isAuxiliary ? "auxiliary" : "embedded") native Chrome window")
+    }
+    private static func verifyGroupedRestore(_ pages: [ChromiumSessionPage], app: AppState) async throws {
+        let downloads = DownloadCenter()
+        let directory = app.dataDirectory.appendingPathComponent("DownloadAcceptance", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let destination = directory.appendingPathComponent("radius-download-fixture.bin")
+        try downloads.useAcceptanceDestination(destination)
+        let restored = try ChromiumRuntime.shared.makeTab(profileID: UUID(), privateSessionID: nil, dataDirectory: app.dataDirectory, downloads: downloads)
+        let window = NSWindow(contentRect: NSRect(x: 160, y: 120, width: 900, height: 680),
+                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = restored.nativeView
+        window.makeKeyAndOrderFront(nil)
+        defer { restored.dispose(); window.close() }
+        restored.restoreChromiumSessionPages(pages)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(30))
+        while restored.chromiumSessionPages?.count != pages.count || restored.url != pages.first?.url || restored.loading {
+            guard ContinuousClock.now < deadline else { throw ValidationError("A saved Chromium pane did not restore all inner tabs and its selected page.") }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        guard Set(restored.chromiumSessionPages?.compactMap(\.url) ?? []) == Set(pages.compactMap(\.url)),
+              try await evaluate(restored, "location.href") == pages.first?.url?.absoluteString else {
+            throw ValidationError("Chromium session recovery discarded an inactive tab or selected the wrong WebContents.")
+        }
+        guard let address = ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_URL"],
+              let source = URL(string: address)?.deletingLastPathComponent().appendingPathComponent("slow-download") else {
+            throw ValidationError("The isolated slow download fixture is unavailable.")
+        }
+        let sourceJSON = String(decoding: try JSONSerialization.data(withJSONObject: source.absoluteString, options: [.fragmentsAllowed]), as: UTF8.self)
+        _ = try await evaluate(restored, "(function(){ const a=document.createElement('a'); a.href=\(sourceJSON); a.download='radius-download-fixture.bin'; document.body.append(a); a.click(); return 'started'; })()")
+        let transferDeadline = ContinuousClock.now.advanced(by: .seconds(8))
+        while downloads.items.first?.staging == nil || downloads.items.first?.fraction == 0 {
+            guard ContinuousClock.now < transferDeadline else { throw ValidationError("Chromium did not begin the real slow download.") }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        guard let transfer = downloads.items.first, let staging = transfer.staging, !transfer.transferEnded,
+              FileManager.default.fileExists(atPath: staging.path) else {
+            throw ValidationError("The slow Chromium transfer did not own a staging file.")
+        }
+        _ = try? await restored.request("Page.close", parameters: [:], timeout: .seconds(5))
+        let closeDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while try await nativeBrowsers(restored).count != pages.count - 1 {
+            guard ContinuousClock.now < closeDeadline else { throw ValidationError("Closing the initial restored Chrome browser destroyed surviving siblings.") }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        guard restored.chromeWindow?.isVisible == true, try await evaluate(restored, "location.href") != pages.first?.url?.absoluteString else {
+            throw ValidationError("The restored pane did not route commands to its surviving active browser.")
+        }
+        _ = try await evaluate(restored, "(document.documentElement.dataset.radiusActiveCapture='surviving-tab', 'ready')")
+        guard try await restored.pageHTML().contains("radius-active-capture=\"surviving-tab\""),
+              !(try await restored.capturePNG()).isEmpty else {
+            throw ValidationError("Reader or Capture targeted the closed initial browser.")
+        }
+        guard transfer.acknowledgementUnavailable, !transfer.transferEnded,
+              FileManager.default.fileExists(atPath: staging.path), downloads.hasShutdownPendingDownloads else {
+            throw ValidationError("Closing a downloading native inner tab fabricated completion or deleted an unconfirmed writer's file.")
+        }
+        var closed = false
+        restored.onClose = { closed = true }
+        _ = try? await restored.request("Page.close", parameters: [:], timeout: .seconds(5))
+        let lastCloseDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while !closed {
+            guard ContinuousClock.now < lastCloseDeadline else { throw ValidationError("A closed inner tab's download prevented the empty native pane from closing.") }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        guard !transfer.transferEnded, FileManager.default.fileExists(atPath: staging.path) else {
+            throw ValidationError("A native pane close cleaned an unknown writer before engine shutdown.")
+        }
+        // The external smoke runner verifies this file is gone after normal
+        // Quit, which executes the actual CefShutdown and registry cleanup.
+        try staging.path.write(to: directory.appendingPathComponent("expected-staging.txt"), atomically: true, encoding: .utf8)
+        print("Radius Chromium acceptance: grouped recovery, active Reader/Capture and native-tab download ownership loss passed; cleanup awaits real engine shutdown")
     }
     private static func key(_ characters: String, code: UInt16, modifiers: NSEvent.ModifierFlags = [], window: NSWindow) throws {
         for type in [NSEvent.EventType.keyDown, .keyUp] {
@@ -313,8 +485,8 @@ enum ChromiumAcceptance {
               abs(chrome.frame.width - expected.width) < 2, abs(chrome.frame.height - expected.height) < 2 else {
             throw ValidationError("The Chrome window does not fit its native page anchor; see the recorded window frames.")
         }
-        guard tab.hasNativeNavigationChrome, state["toolbarDrawn"] as? Bool == true,
-              (state["toolbarWidth"] as? Int ?? 0) > 20, (state["toolbarHeight"] as? Int ?? 0) > 20 else {
+        guard tab.hasNativeNavigationChrome, state["normalWindow"] as? Bool == true,
+              state["toolbarDrawn"] as? Bool == true else {
             throw ValidationError("The Chrome navigation toolbar is not visibly laid out inside its native child window.")
         }
     }
@@ -374,7 +546,7 @@ enum ChromiumAcceptance {
                 storeWindow.contentView = store.nativeView; storeWindow.makeKeyAndOrderFront(nil)
                 defer { store.dispose(); storeWindow.close() }
                 store.showExtensions(); try await waitForManager(store)
-                try await verifyWebStore(store)
+                try await verifyWebStore(store, app: app)
                 let version = try await evaluate(store, "String((await chrome.developerPrivate.getExtensionsInfo({includeDisabled:true,includeTerminated:true})).find(e => e.id === 'ddkjiahejlhfcafbddmgiahcphecmpfh')?.version)")
                 let receipt: [String: Any] = ["profileID": store.profileID.uuidString, "version": version,
                                               "processID": ProcessInfo.processInfo.processIdentifier]
@@ -383,7 +555,7 @@ enum ChromiumAcceptance {
             } catch { failures.append("Chrome Web Store: " + error.localizedDescription) }
         }
         if !failures.isEmpty { throw ValidationError(failures.joined(separator: "\n")) }
-        print("Radius Chromium acceptance: Chrome Views, native child geometry/focus, and extension manager passed")
+        print("Radius Chromium acceptance: normal Chrome window, native child geometry/focus, and extension manager passed")
     }
     static func verifySessionCookieAfterLastBrowserCloses(app: AppState) async throws {
         var failures: [String] = []
@@ -563,17 +735,17 @@ enum ChromiumAcceptance {
         _ = try await waitForFixture(page, key: "radiusFixtureSidePanelOpened", value: "1")
         print("Radius Chromium acceptance: MV3 content/worker/scripting/storage/action/side-panel documents executed")
 
-        // Exercise the real management command. CEF opens a native auxiliary
-        // Chrome window; its original browser/tab identity must be preserved.
+        // Exercise the real management command. Chrome may open an inner tab or
+        // an auxiliary window; preserve its actual browser and window identity.
         _ = try await evaluate(manager, "String(await chrome.developerPrivate.showOptions('\(id)'))")
         let optionsDeadline = ContinuousClock.now.advanced(by: .seconds(15))
         var options: ChromiumTab?
         while ContinuousClock.now < optionsDeadline {
-            options = ChromiumRuntime.shared.auxiliaryTabs.first { $0.profileID == manager.profileID && $0.url?.host == id && $0.chromeWindow?.isVisible == true }
+            options = ([manager, page] + ChromiumRuntime.shared.auxiliaryTabs).first { $0.profileID == manager.profileID && $0.url?.host == id && $0.chromeWindow?.isVisible == true }
             if options != nil { break }
             try await Task.sleep(for: .milliseconds(100))
         }
-        guard let options else { throw ValidationError("Extension settings did not open in a managed auxiliary Chrome window.") }
+        guard let options else { throw ValidationError("Extension settings did not open in an owned Chrome window.") }
         _ = try await waitForFixture(options, key: "radiusFixtureOptionsState", value: "ready")
         guard options.chromeWindow?.isVisible == true else { throw ValidationError("The native extension settings window is not visible.") }
         let permissions = try await evaluate(options, "JSON.stringify(await chrome.permissions.getAll())")
@@ -586,28 +758,56 @@ enum ChromiumAcceptance {
         try await click(options, selector: "#nativecheckbox")
         _ = try await waitForFixture(options, key: "radiusFixtureTheme", value: "dark")
         _ = try await waitForFixture(page, key: "radiusFixtureTheme", value: "dark")
-        let createdTabID = try await evaluate(options, "String((await chrome.tabs.create({url:chrome.runtime.getURL('options.html?api=tab')})).id)")
-        let createdTab = try await waitForAuxiliary(profileID: manager.profileID, query: "api=tab")
-        guard try await evaluate(createdTab, "String((await chrome.tabs.getCurrent()).id)") == createdTabID else {
-            throw ValidationError("The extension-created tab lost its Chromium tab identity.")
-        }
         let createdWindowID = try await evaluate(options, "String((await chrome.windows.create({url:chrome.runtime.getURL('options.html?api=window'),type:'normal'})).id)")
         let createdWindow = try await waitForAuxiliary(profileID: manager.profileID, query: "api=window")
+        try await verifyNativeTabMenus(createdWindow)
+        let originTabID = try await evaluate(createdWindow, "String((await chrome.tabs.getCurrent()).id)")
         guard try await evaluate(createdWindow, "String((await chrome.windows.getCurrent()).id)") == createdWindowID else {
             throw ValidationError("The extension-created window lost its Chromium window identity.")
         }
-        _ = try await evaluate(options, "String(!!window.open(chrome.runtime.getURL('options.html?api=popup'),'_blank'))")
+        let createdTabID = try await evaluate(createdWindow, "String((await chrome.tabs.create({windowId:Number('\(createdWindowID)'),active:false,url:chrome.runtime.getURL('options.html?api=tab')})).id)")
+        guard try await evaluate(createdWindow, "String((await chrome.tabs.getCurrent()).id)") == originTabID,
+              try await evaluate(createdWindow, "String((await chrome.tabs.get(Number('\(createdTabID)'))).active)") == "false",
+              try await evaluate(createdWindow, "String((await chrome.tabs.get(Number('\(createdTabID)'))).windowId)") == createdWindowID else {
+            throw ValidationError("Adopting an inactive extension tab changed its selection or native window identity.")
+        }
+        let nativeMembers = try await nativeBrowsers(createdWindow)
+        guard nativeMembers.count == 2 else { throw ValidationError("The extension's two native tabs were not grouped into one Chrome window.") }
+        // Selection can replace the request's active target while the promise
+        // completes. Verify the actual committed selected page independently.
+        _ = try? await evaluate(createdWindow, "String((await chrome.tabs.update(Number('\(createdTabID)'),{active:true})).id)")
+        let selectionDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while createdWindow.url?.query != "api=tab" || createdWindow.loading {
+            guard ContinuousClock.now < selectionDeadline else { throw ValidationError("Selecting an extension tab did not update the pane's active WebContents.") }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        guard try await evaluate(createdWindow, "String((await chrome.tabs.getCurrent()).id)") == createdTabID else {
+            throw ValidationError("Native pane commands still targeted the inactive initial tab.")
+        }
+        _ = try await evaluate(createdWindow, "(document.documentElement.dataset.radiusActiveCapture='extension-tab', 'ready')")
+        guard try await createdWindow.pageHTML().contains("radius-active-capture=\"extension-tab\"") else {
+            throw ValidationError("Reader captured the wrong inner Chrome tab.")
+        }
+        _ = try await evaluate(createdWindow, "String(!!window.open(chrome.runtime.getURL('options.html?api=popup'),'_blank','popup,width=500,height=420'))")
         let descendant = try await waitForAuxiliary(profileID: manager.profileID, query: "api=popup")
         guard try await evaluate(descendant, "String(!!window.opener)") == "true" else {
             throw ValidationError("An auxiliary popup lost its original opener relationship.")
         }
-        options.dispose()
-        guard try await evaluate(createdTab, "String((await chrome.tabs.getCurrent()).id)") == createdTabID,
+        _ = try await evaluate(createdWindow, "String(await chrome.tabs.remove(Number('\(originTabID)')))")
+        guard try await evaluate(createdWindow, "String((await chrome.tabs.getCurrent()).id)") == createdTabID,
               try await evaluate(createdWindow, "String((await chrome.windows.getCurrent()).id)") == createdWindowID else {
-            throw ValidationError("An auxiliary window stopped working when its origin tab closed.")
+            throw ValidationError("Closing a window's initial browser destroyed its surviving inner tab.")
         }
-        createdTab.dispose(); createdWindow.dispose(); descendant.dispose()
-        print("Radius Chromium acceptance: tabs.create/windows.create identities and auxiliary popup opener/lifetime passed")
+        // Close only the options WebContents, never its complete owning pane.
+        // The originating native manager and its sibling tabs remain usable.
+        _ = try? await options.request("Page.close", parameters: [:], timeout: .seconds(5))
+        guard try await evaluate(createdWindow, "String((await chrome.tabs.getCurrent()).id)") == createdTabID,
+              try await evaluate(descendant, "String(!!window.opener)") == "true" else {
+            throw ValidationError("An auxiliary window stopped working after its originating settings tab closed.")
+        }
+        createdWindow.dispose(); descendant.dispose()
+        manager.showExtensions(); try await waitForManager(manager)
+        print("Radius Chromium acceptance: inactive tabs.create preserved selection/window identity, native selection routed Reader, and initial/origin closure preserved surviving browsers")
         page.reload()
         state = try await waitForFixture(page, key: "radiusFixtureWorker", value: "ready")
         // Wait for the next document's worker ping, not an old DOM state during reload.
@@ -732,7 +932,7 @@ enum ChromiumAcceptance {
             try await Task.sleep(for: .milliseconds(100))
         }
     }
-    private static func verifyWebStore(_ tab: ChromiumTab) async throws {
+    private static func verifyWebStore(_ tab: ChromiumTab, app: AppState) async throws {
         // Fixed public MV3 extension, installed only into the fresh acceptance
         // profile above. Never run this probe in the user's browsing profile.
         let extensionID = "ddkjiahejlhfcafbddmgiahcphecmpfh"
@@ -773,6 +973,8 @@ enum ChromiumAcceptance {
         // Add extension button on this fixed fixture's real permission dialog.
         print("Radius Chromium acceptance: waiting for the native Web Store permission dialog")
         var approved = false
+        var verifier: ChromiumTab?
+        defer { verifier?.dispose() }
         var lastPromptState = ""
         let installDeadline = ContinuousClock.now.advanced(by: .seconds(45))
         while ContinuousClock.now < installDeadline {
@@ -786,13 +988,23 @@ enum ChromiumAcceptance {
                 }
                 if approved { print("Radius Chromium acceptance: pressed the fixture's native Add extension button") }
             }
-            let value = try await evaluate(tab, "String(document.body.innerText.includes('Remove from Chrome'))")
-            if value == "true", approved {
-                tab.showExtensions(); try await waitForManager(tab)
-                let state = try await evaluate(tab, "String((await chrome.developerPrivate.getExtensionsInfo({includeDisabled:true,includeTerminated:true})).find(e => e.id === '\(extensionID)')?.state)")
-                guard state == "ENABLED" else { throw ValidationError("The Web Store extension was not enabled after installation.") }
-                print("Radius Chromium acceptance: live Chrome Web Store install passed for \(extensionID)")
-                return
+            if approved {
+                // Extensions can select an onboarding tab after installation.
+                // Query the same profile's real manager in a separate hidden
+                // native browser so the Store's initiating WebContents remains
+                // intact throughout its install, regardless of selected tab.
+                if verifier == nil {
+                    verifier = try ChromiumRuntime.shared.makeTab(profileID: tab.profileID, privateSessionID: nil, dataDirectory: app.dataDirectory)
+                    verifier?.showExtensions()
+                }
+                if let verifier, verifier.url?.host == "extensions", !verifier.loading {
+                    let state = try await evaluate(verifier, "String((await chrome.developerPrivate.getExtensionsInfo({includeDisabled:true,includeTerminated:true})).find(e => e.id === '\(extensionID)')?.state)")
+                    if state == "ENABLED" {
+                        tab.showExtensions(); try await waitForManager(tab)
+                        print("Radius Chromium acceptance: live Chrome Web Store install passed for \(extensionID)")
+                        return
+                    }
+                }
             }
             try await Task.sleep(for: .milliseconds(250))
         }

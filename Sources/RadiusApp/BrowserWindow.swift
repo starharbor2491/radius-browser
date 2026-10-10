@@ -71,6 +71,7 @@ struct BrowserWindow: View {
     private var usesChromeNavigation: Bool { navigationEpoch >= 0 && model.hasPage && model.activeWebTab.hasNativeNavigationChrome }
     private func hidden(_ component: String) -> Bool { model.focusMode && model.focusHiddenComponents.contains(component) }
     private var showTabs: Bool { !hidden("tabs") && layout.hideTabStrip != true }
+    private var hasChromePanes: Bool { model.session.tabs.contains { $0.engineID == .chromium } }
     private var secondaryPanel: BrowserPanel? {
         guard windowWidth >= 1100, let value = layout.secondaryPanel, let panel = BrowserPanel(rawValue: value), available(panel), panel != visiblePanel, !hidden("sidebar") else { return nil }; return panel
     }
@@ -230,8 +231,8 @@ struct BrowserWindow: View {
             Button("Settings") { model.sheet = .settings }
             if layout.secondaryPanel != nil && windowWidth < 1100 { Text("Widen this window to show the second sidebar") }
             Button("Chromium extensions…") { model.sheet = .extensions }.disabled(model.isPrivate)
-            Menu("Tabs") {
-                Button("New tab") { model.newTab(); focusAddress() }
+            Menu(hasChromePanes ? "Browsing panes" : "Tabs") {
+                Button(hasChromePanes ? "New browsing pane" : "New tab") { model.newTab(); focusAddress() }
                 ForEach(model.session.tabs) { tab in Button(tab.title) { model.selectTab(tab.id) } }
             }
             Divider()
@@ -257,7 +258,7 @@ struct BrowserWindow: View {
         Group {
             if vertical {
                 VStack(spacing: 6) {
-                    HStack { Text("Tabs").font(.headline); Spacer(); newTabButton }.padding(.horizontal, 12).padding(.top, 12)
+                    HStack { Text(hasChromePanes ? "Browsing panes" : "Tabs").font(.headline); Spacer(); newTabButton }.padding(.horizontal, 12).padding(.top, 12)
                     ScrollView { LazyVStack(spacing: 4) { ForEach(treeTabs ? model.session.visibleTreeTabs : model.session.tabs) { tabRow($0, vertical: true) } }.padding(6) }
                     profileMenu.padding(12)
                 }
@@ -271,7 +272,9 @@ struct BrowserWindow: View {
         }.modifier(ChromeSurface(theme: tabsTheme))
     }
     private func tabRow(_ tab: BrowserTab, vertical: Bool) -> some View {
-        HStack(spacing: 5) {
+        let chrome = tab.engineID == .chromium
+        let closeLabel = chrome ? "Close browsing pane: \(tab.title)" : "Close \(tab.title)"
+        return HStack(spacing: 5) {
             if vertical && treeTabs && model.session.tabs.contains(where: { $0.parentID == tab.id }) {
                 Button { model.toggleBranch(tab.id) } label: { Image(systemName: tab.collapsed == true ? "chevron.right" : "chevron.down").font(.caption).frame(width: 18, height: 24) }
                     .buttonStyle(.plain).accessibilityLabel("\(tab.collapsed == true ? "Expand" : "Collapse") \(tab.title)")
@@ -280,29 +283,33 @@ struct BrowserWindow: View {
                 HStack(spacing: 7) {
                     BrowserSymbol(name: tab.pinned ? "pin.fill" : "globe").font(.caption).foregroundStyle(tab.id == model.session.selectedTabID ? Color(nsColor: .secondaryLabelColor) : theme.foreground.opacity(0.75))
                     Text(tab.title).font(tabsTheme.interfaceFont()).foregroundStyle(tab.id == model.session.selectedTabID ? Color(nsColor: .textColor) : (theme.textHex.flatMap(InterfaceColor.init(hex:))?.color ?? Color.primary)).lineLimit(1)
+                    if chrome, let count = tab.chromiumPages?.count, count > 1 {
+                        Text("\(count) tabs").font(.caption2).foregroundStyle(.secondary).fixedSize()
+                    }
                 }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
             }.buttonStyle(.plain).help(tab.title)
             Button { model.closeTab(tab.id) } label: { BrowserSymbol(name: "xmark").font(.system(size: 10, weight: .semibold)).foregroundStyle(tab.id == model.session.selectedTabID ? Color(nsColor: .textColor) : theme.foreground).frame(width: 22, height: 24) }
-                .buttonStyle(.plain).help("Close \(tab.title)").accessibilityLabel("Close \(tab.title)")
+                .buttonStyle(.plain).help(chrome ? "Close this browsing pane and all its Chrome tabs" : closeLabel).accessibilityLabel(closeLabel)
         }
         .padding(.leading, 10).padding(.trailing, 4).padding(.vertical, tabsTheme.density == .compact ? 2 : 5)
         .frame(width: vertical ? nil : 180)
         .background(tab.id == model.session.selectedTabID ? Color(nsColor: .textBackgroundColor) : Color.clear, in: RoundedRectangle(cornerRadius: tabsTheme.cornerRadius))
         .overlay(RoundedRectangle(cornerRadius: tabsTheme.cornerRadius).stroke(tab.id == model.session.selectedTabID ? Color.primary.opacity(0.18) : .clear))
         .contextMenu {
-            Button(tab.pinned ? "Unpin tab" : "Pin tab") { model.pinTab(tab.id) }
+            Button("\(tab.pinned ? "Unpin" : "Pin") \(chrome ? "pane" : "tab")") { model.pinTab(tab.id) }
             Button("Move earlier") { model.moveTab(tab.id, by: -1) }
             Button("Move later") { model.moveTab(tab.id, by: 1) }
-            Button("Duplicate tab") { model.newTab(url: tab.url, engine: tab.engineID ?? .webkit) }
+            Button(chrome ? "Open active page in new pane" : "Duplicate tab") { model.newTab(url: tab.url, engine: tab.engineID ?? .webkit) }
+                .disabled(chrome && tab.url.map(AddressResolver.isWebURL) != true)
             Menu("Reopen with another engine") {
                 ForEach(BrowserEngineID.allCases, id: \.self) { engine in
                     Button(engine.label) { model.reopenTab(tab.id, with: engine) }.disabled(engine == (tab.engineID ?? .webkit))
                 }
             }
             if treeTabs {
-                Button("New child tab") { model.newTab(parentID: tab.id); addressFocused = true }
+                Button(hasChromePanes ? "New child pane" : "New child tab") { model.newTab(parentID: tab.id); addressFocused = true }
                 Button("Move to top level") { _ = model.session.setParent(tab.id, to: nil) }.disabled(tab.parentID == nil)
-                Menu("Move under tab") {
+                Menu(hasChromePanes ? "Move under pane" : "Move under tab") {
                     ForEach(model.session.tabs.filter { $0.id != tab.id && !model.session.ancestors(of: $0.id).contains(tab.id) }) { parent in
                         Button(parent.title) {
                             if !model.session.setParent(tab.id, to: parent.id) { app.notice = "Tab trees support up to eight levels. Pinned tabs stay at the top level." }
@@ -310,17 +317,17 @@ struct BrowserWindow: View {
                     }
                 }.disabled(tab.pinned)
             }
-            Divider(); Button("Close tab") { model.closeTab(tab.id) }
+            Divider(); Button(chrome ? "Close browsing pane" : "Close tab") { model.closeTab(tab.id) }
         }
         .draggable(tab.id.uuidString)
         .dropDestination(for: String.self) { items, _ in
             guard let value = items.first, let id = UUID(uuidString: value) else { return false }
             return model.moveTab(id, before: tab.id)
         }
-        .accessibilityElement(children: .contain).accessibilityValue(tab.id == model.session.selectedTabID ? "Selected tab" : "Tab")
+        .accessibilityElement(children: .contain).accessibilityValue("\(tab.id == model.session.selectedTabID ? "Selected " : "")\(chrome ? "browsing pane" : "tab")")
         .padding(.leading, vertical && treeTabs ? CGFloat(model.session.ancestors(of: tab.id).count * 10) : 0)
     }
-    private var newTabButton: some View { IconButton(title: "New tab", icon: "plus") { model.newTab(); focusAddress() } }
+    private var newTabButton: some View { IconButton(title: hasChromePanes ? "New browsing pane" : "New tab", icon: "plus") { model.newTab(); focusAddress() } }
     private var profileMenu: some View {
         Menu {
             ForEach(app.library.profiles) { profile in Button(profile.name) { model.switchProfile(profile.id) } }
@@ -502,7 +509,7 @@ struct BrowserWindow: View {
         case .back: model.activeWebTab.goBack()
         case .forward: model.activeWebTab.goForward()
         case .reload: if model.activeWebTab.loading { model.activeWebTab.stop() } else { model.activeWebTab.reload() }
-        case .newTab: model.newTab(); focusAddress()
+        case .newTab: model.performTabCommand(.new)
         case .home: model.showStartPage(); focusAddress()
         case .bookmark: model.toggleBookmark()
         case .sidebar: model.togglePanel(.bookmarks)
@@ -518,7 +525,7 @@ struct BrowserWindow: View {
     }
     private func contributedAction(_ action: NativeModuleAction) {
         switch action {
-        case .newTab: model.newTab(); focusAddress()
+        case .newTab: model.performTabCommand(.new)
         case .bookmarks: model.togglePanel(.bookmarks)
         case .history: if !model.isPrivate { model.togglePanel(.history) }
         case .downloads: model.togglePanel(.downloads)
@@ -529,7 +536,9 @@ struct BrowserWindow: View {
         }
     }
     private func capturePage() {
-        let source = model.activeWebTab, descriptor = model.selectedTab, profileID = model.session.profileID
+        let source = model.activeWebTab
+        source.refreshActiveContent()
+        let descriptor = model.selectedTab, profileID = model.session.profileID
         let revision = source.navigationRevision, generation = app.resourceWorkerGeneration
         do {
             let specification = try app.pageCaptureSpecification()
@@ -549,7 +558,9 @@ struct BrowserWindow: View {
         } catch { app.notice = error.localizedDescription }
     }
     private func openReader() {
-        let source = model.activeWebTab, descriptor = model.selectedTab, profileID = model.session.profileID
+        let source = model.activeWebTab
+        source.refreshActiveContent()
+        let descriptor = model.selectedTab, profileID = model.session.profileID
         let revision = source.navigationRevision
         extracting = true
         readerTask = Task {
@@ -586,7 +597,17 @@ struct BrowserPage: View {
     var body: some View {
         VStack(spacing: 0) {
             if tab.loading { ProgressView(value: tab.progress).progressViewStyle(.linear).frame(height: 2) }
-            if let error = tab.errorMessage {
+            if tab.hasNativeNavigationChrome {
+                if let error = tab.errorMessage {
+                    HStack(spacing: 12) {
+                        Text(error).font(.callout).lineLimit(3).help(error).frame(maxWidth: .infinity, alignment: .leading)
+                        Button("Reload page") { tab.reload() }.buttonStyle(.bordered)
+                        if let onUseWebKit { Button("Reopen in WebKit") { onUseWebKit() }.buttonStyle(.bordered) }
+                    }.padding(.horizontal, 16).padding(.vertical, 10)
+                }
+                // Keep Chrome's tab strip and sibling pages accessible on error.
+                WebViewHost(tab: tab)
+            } else if let error = tab.errorMessage {
                 VStack(spacing: 16) {
                     EmptyPanel(title: "This page needs attention", icon: "exclamationmark.circle", detail: error)
                     Button("Reload page") { tab.reload() }.buttonStyle(.borderedProminent).padding(.bottom, 32)

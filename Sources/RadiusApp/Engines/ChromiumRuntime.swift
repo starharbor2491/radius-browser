@@ -18,6 +18,35 @@ final class ChromiumRuntime: ObservableObject {
     private(set) var api: radius_cef_api?
     private var loadedDataDirectory: URL?
     private var stopped = false
+    private(set) var finalQuitFrozen = false
+    private var inputFreezeMonitor: Any?
+    func setFinalQuitFrozen(_ frozen: Bool) {
+        finalQuitFrozen = frozen
+        api?.set_final_quit_frozen(frozen ? 1 : 0)
+        if let monitor = inputFreezeMonitor { NSEvent.removeMonitor(monitor); inputFreezeMonitor = nil }
+        guard frozen else { return }
+        // Chrome children, extension bubbles and auxiliary windows are outside
+        // SwiftUI's disabled hierarchy. Pause application input at the final
+        // snapshot boundary, while preserving the native save-decision alert.
+        inputFreezeMonitor = NSEvent.addLocalMonitorForEvents(matching: [
+            .keyDown, .keyUp, .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
+            .otherMouseDown, .otherMouseUp, .leftMouseDragged, .rightMouseDragged,
+            .otherMouseDragged, .scrollWheel
+        ]) { event in
+            let windowID = event.window.map(ObjectIdentifier.init)
+            let allowed = MainActor.assumeIsolated {
+                guard ChromiumRuntime.shared.finalQuitFrozen else { return true }
+                guard let modal = NSApp.modalWindow else { return false }
+                var window = windowID.flatMap { id in NSApp.windows.first { ObjectIdentifier($0) == id } } ?? NSApp.keyWindow
+                while let current = window {
+                    if current === modal { return true }
+                    window = current.parent ?? current.sheetParent
+                }
+                return false
+            }
+            return allowed ? event : nil
+        }
+    }
     // Own every live callback receiver, including management pages and pages
     // awaiting download cancellation after their native tab has disappeared.
     private var tabs: [ObjectIdentifier: ChromiumTab] = [:]
@@ -31,7 +60,7 @@ final class ChromiumRuntime: ObservableObject {
     }
     func beginPrivateSession(_ id: UUID) { privateSessions.insert(id) }
     func canAdoptPage(profileID: UUID, privateSessionID: UUID?) -> Bool {
-        guard !stopped, !blockedProfileIDs.contains(profileID) else { return false }
+        guard !stopped, !finalQuitFrozen, !blockedProfileIDs.contains(profileID) else { return false }
         return privateSessionID.map { privateSessions.contains($0) } ?? true
     }
     func closePrivateSession(_ id: UUID) {
@@ -48,6 +77,9 @@ final class ChromiumRuntime: ObservableObject {
         (sessionID?.uuidString ?? "").withCString { session in
             (profileID?.uuidString ?? "").withCString { profile in api.release_private_contexts(session, profile) }
         }
+    }
+    var focusedNativeTab: ChromiumTab? {
+        tabs.values.first { $0.chromeWindow?.isKeyWindow == true }
     }
     var auxiliaryTabs: [ChromiumTab] { tabs.values.filter(\.isAuxiliary) }
     var extensionManagementTabs: [ChromiumTab] {
@@ -79,6 +111,7 @@ final class ChromiumRuntime: ObservableObject {
         (try? ChromiumPackage.readManifest(Self.packageURL)) != nil
     }
     func makeTab(profileID: UUID, privateSessionID: UUID?, dataDirectory: URL, downloads: DownloadCenter? = nil) throws -> ChromiumTab {
+        guard !finalQuitFrozen else { throw ValidationError("Radius is saving its final browsing state.") }
         guard !blockedProfileIDs.contains(profileID) else {
             throw ValidationError("This profile is being deleted. Choose another profile.")
         }
@@ -112,7 +145,7 @@ final class ChromiumRuntime: ObservableObject {
         library = handle
         guard let symbol = dlsym(handle, "radius_cef_get_api") else { throw ValidationError("This runtime has no Radius engine API.") }
         let getter = unsafeBitCast(symbol, to: radius_cef_get_api_function.self)
-        guard let pointer = getter(), UnsafeRawPointer(pointer).load(as: UInt32.self) == 3 else {
+        guard let pointer = getter(), UnsafeRawPointer(pointer).load(as: UInt32.self) == 4 else {
             throw ValidationError("This runtime uses an incompatible Radius engine API.")
         }
         let loadedAPI = pointer.pointee
@@ -149,7 +182,10 @@ final class ChromiumRuntime: ObservableObject {
         for _ in 0..<200 {
             if api.live_pages() == 0 {
                 let success = api.shutdown() != 0
-                if success { isLoaded = false; stopped = true; didShutDown = true; privateSessions.removeAll() }
+                if success {
+                    isLoaded = false; stopped = true; didShutDown = true; privateSessions.removeAll()
+                    DownloadAdmission.shared.chromiumDidShutDown()
+                }
                 return success
             }
             try? await Task.sleep(for: .milliseconds(50))
@@ -180,7 +216,7 @@ private enum ChromiumPackage {
         #else
         let architecture = "x86_64"
         #endif
-        guard manifest.format == 2, manifest.abi == 3, manifest.runtimeStyle == "chrome",
+        guard manifest.format == 2, manifest.abi == 4, manifest.runtimeStyle == "chrome",
               manifest.architecture == architecture, manifest.cefVersion == ChromiumRuntime.cefVersion else {
             throw ValidationError("This Chromium package is incompatible with this Radius build or Mac architecture.")
         }

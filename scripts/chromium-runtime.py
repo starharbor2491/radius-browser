@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MPL-2.0
-"""Build an optional Radius Chrome Views adapter from the pinned upstream CEF SDK.
+"""Build an optional Radius normal Chrome window adapter from the pinned upstream CEF SDK.
 
 This is a development package. Ad-hoc signatures verify local integrity; they do
 not provide Developer ID publisher trust or notarized consumer distribution.
@@ -85,7 +85,7 @@ def build(work, arch):
         proof.checked(["codesign", "--verify", "--strict", helper])
     proof.checked(["codesign", "--force", "--sign", "-", packaged_framework])
     proof.checked(["lipo", binaries / "RadiusChromiumBridge.dylib", "-verify_arch", arch])
-    manifest = {"format": 2, "abi": 3, "runtimeStyle": "chrome", "architecture": arch, "cefVersion": proof.VERSION}
+    manifest = {"format": 2, "abi": 4, "runtimeStyle": "chrome", "architecture": arch, "cefVersion": proof.VERSION}
     (package / "Contents/Resources/manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     proof.checked(["codesign", "--force", "--sign", "-", package])
     proof.checked(["codesign", "--verify", "--deep", "--strict", package])
@@ -115,7 +115,7 @@ def embed(package, app):
     if manifest_path.stat().st_size > 4096 or not manifest_path.is_file():
         raise ValueError("Invalid Chromium package manifest")
     manifest = json.loads(manifest_path.read_text())
-    if (manifest.get("format") != 2 or manifest.get("abi") != 3 or manifest.get("runtimeStyle") != "chrome" or
+    if (manifest.get("format") != 2 or manifest.get("abi") != 4 or manifest.get("runtimeStyle") != "chrome" or
             manifest.get("cefVersion") != proof.VERSION or manifest.get("architecture") not in proof.ARCHIVES):
         raise ValueError("Incompatible Chromium development package")
     for path in package.rglob("*"):

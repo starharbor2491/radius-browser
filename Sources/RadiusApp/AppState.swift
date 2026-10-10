@@ -430,7 +430,7 @@ final class AppState: ObservableObject {
         guard AddressResolver.isWebURL(url), !deletingProfileIDs.contains(profileID), library.profiles.contains(where: { $0.id == profileID }) else { return }
         if let last = library.history.last, last.url == url, last.profileID == profileID,
            Date().timeIntervalSince(last.visitedAt) < 2 { return }
-        library.history.append(HistoryEntry(profileID: profileID, title: String(title.prefix(512)), url: url))
+        library.history.append(HistoryEntry(profileID: profileID, title: boundedPageTitle(title), url: url))
         if library.history.count > 10_000 { library.history.removeFirst(library.history.count - 10_000) }
     }
     func toggleBookmark(url: URL, title: String, profileID: UUID) {
@@ -438,7 +438,11 @@ final class AppState: ObservableObject {
         guard AddressResolver.isWebURL(url) else { notice = "Only HTTP and HTTPS pages can be saved as bookmarks."; return }
         if library.bookmarks.contains(where: { $0.url == url && $0.profileID == profileID }) {
             library.bookmarks.removeAll { $0.url == url && $0.profileID == profileID }
-        } else { library.bookmarks.append(Bookmark(profileID: profileID, title: title, url: url)) }
+            notice = "Removed from Radius bookmarks."
+        } else {
+            library.bookmarks.append(Bookmark(profileID: profileID, title: title, url: url))
+            notice = "Saved in Radius bookmarks."
+        }
     }
     @discardableResult
     func importBookmarks(profileID: UUID) -> Bool {
@@ -527,8 +531,15 @@ final class AppState: ObservableObject {
         }
         return true
     }
-    func freezeQuitData() { finalQuitDataFrozen = true }
-    func unfreezeQuitData() { finalQuitDataFrozen = false }
+    func freezeQuitData() {
+        windows.values.compactMap(\.model).forEach { $0.captureChromiumSessions() }
+        ChromiumRuntime.shared.setFinalQuitFrozen(true)
+        finalQuitDataFrozen = true
+    }
+    func unfreezeQuitData() {
+        ChromiumRuntime.shared.setFinalQuitFrozen(false)
+        finalQuitDataFrozen = false
+    }
     func updateQuitCleanup(_ mutation: (inout LibraryState) -> Void) {
         // Only synchronous tombstone bookkeeping bypasses the final snapshot.
         // Never allow unrelated mutations while cleanup awaits an engine/store.

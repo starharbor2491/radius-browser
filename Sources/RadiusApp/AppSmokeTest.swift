@@ -72,12 +72,22 @@ enum AppSmokeTest {
             }
             app.applyConfiguration(baseline)
             // Verify native control surfaces render independently of a website engine.
-            for sheet in [BrowserSheet.modules, .customize, .settings, .recovery] {
+            for sheet in [BrowserSheet.modules, .customize, .settings, .engines, .recovery] {
                 trace("Opening \(sheet.rawValue) screen")
                 browser.sheet = sheet
                 try await Task.sleep(for: .milliseconds(400))
                 guard let view = window.attachedSheet?.contentView else { throw ValidationError("The \(sheet.rawValue) screen did not open.") }
                 try capture(view, to: output.appendingPathComponent("Radius-\(sheet.rawValue).png"))
+                if sheet == .modules {
+                    guard let picker = moduleSectionPicker(in: view),
+                          let segment = (0..<picker.segmentCount).first(where: { picker.label(forSegment: $0) == "Updates" }) else {
+                        throw ValidationError("The Modules screen has no native Updates selector.")
+                    }
+                    picker.selectedSegment = segment
+                    guard picker.sendAction(picker.action, to: picker.target) else { throw ValidationError("The Modules Updates selection did not respond.") }
+                    try await Task.sleep(for: .milliseconds(300))
+                    try capture(view, to: output.appendingPathComponent("Radius-modules-updates.png"))
+                }
                 browser.sheet = nil
                 try await Task.sleep(for: .milliseconds(300))
             }
@@ -325,6 +335,12 @@ enum AppSmokeTest {
             NSApp.perform(#selector(NSApplication.terminate(_:)), with: nil, afterDelay: 0)
         } catch { fail(error.localizedDescription) }
     }
+    private static func moduleSectionPicker(in root: NSView) -> NSSegmentedControl? {
+        if let picker = root as? NSSegmentedControl, !picker.isHidden,
+           (0..<picker.segmentCount).contains(where: { picker.label(forSegment: $0) == "Updates" }) { return picker }
+        for child in root.subviews { if let picker = moduleSectionPicker(in: child) { return picker } }
+        return nil
+    }
     private static func layoutRegion(_ identifier: String, in root: NSView) -> NSView? {
         if root.identifier?.rawValue == identifier, !root.isHidden, root.bounds.width > 0, root.bounds.height > 0 { return root }
         for child in root.subviews { if let match = layoutRegion(identifier, in: child) { return match } }
@@ -370,17 +386,107 @@ enum AppSmokeTest {
             try? FileManager.default.removeItem(at: url)
         }
     }
-    private static func evaluate(_ tab: ChromiumTab, _ source: String) async throws -> String {
-        let data = try await tab.request("Runtime.evaluate", parameters: ["expression": source, "returnByValue": true])
+    private static func evaluate(_ tab: ChromiumTab, _ source: String, timeout: Duration = .seconds(15)) async throws -> String {
+        let data = try await tab.request("Runtime.evaluate", parameters: ["expression": source, "returnByValue": true], timeout: timeout)
         guard let response = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let result = response["result"] as? [String: Any], let value = result["value"] as? String else {
             throw ValidationError("The Chromium script did not return its expected result.")
         }
         return value
     }
+    private struct ChromeContents: Decodable {
+        struct Page: Decodable { let id: Int; let url: String; let active: Bool }
+        let browsers: [Page]
+        let activeBrowser: Int
+        var ids: Set<Int> { Set(browsers.map(\.id)) }
+    }
+    private static func chromeContents(_ tab: ChromiumTab) async throws -> ChromeContents {
+        let data = try await tab.request("Radius.chromeHostState", parameters: [:], timeout: .seconds(3))
+        let state = try JSONDecoder().decode(ChromeContents.self, from: data)
+        guard state.browsers.filter(\.active).count == 1,
+              state.browsers.contains(where: { $0.id == state.activeBrowser && $0.active }) else {
+            throw ValidationError("Chromium did not identify its actual active browser.")
+        }
+        return state
+    }
+    private static func waitForChromeContents(_ tab: ChromiumTab, matching predicate: (ChromeContents) -> Bool) async throws -> ChromeContents {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while ContinuousClock.now < deadline {
+            if let state = try? await chromeContents(tab), predicate(state) { return state }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw ValidationError("Chromium did not finish opening or closing its native tab.")
+    }
+    private static func verifyPopupDocument(_ tab: ChromiumTab, property: String, token: String, title: String, submittedBody: String? = nil) async throws {
+        let expression = """
+        (() => {
+          const source = window.radiusPopupToken === '\(token)' ? window : window.opener;
+          const popup = source && source.\(property);
+          if (!popup || popup.closed) return '';
+          const doc = popup.document;
+          return JSON.stringify({
+            title: doc.title, body: doc.body ? doc.body.innerText : '',
+            exactOpener: popup.opener === source && source.\(property) === popup,
+            openerToken: popup.opener && popup.opener.radiusPopupToken,
+            cookie: doc.cookie,
+            method: doc.getElementById('request-method')?.textContent,
+            submittedBody: doc.getElementById('submitted-body')?.textContent
+          });
+        })()
+        """
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        var lastDocument = "unavailable"
+        while ContinuousClock.now < deadline {
+            if let value = try? await evaluate(tab, expression, timeout: .seconds(3)) {
+                lastDocument = value
+                if let data = value.data(using: .utf8),
+                   let document = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   document["title"] as? String == title,
+                   document["exactOpener"] as? Bool == true,
+                   document["openerToken"] as? String == token,
+                   (document["cookie"] as? String)?.contains("radiusPopupProof=\(token)") == true {
+                    if let submittedBody {
+                        if document["method"] as? String == "POST", document["submittedBody"] as? String == submittedBody { return }
+                    } else if document["body"] as? String == "Popup" { return }
+                }
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw ValidationError("The actual Chromium popup did not preserve its document, exact opener, profile cookie, or POST body: \(lastDocument).")
+    }
     private static func verifyPopups(in browser: BrowserModel, app: AppState) async throws {
         let parentID = browser.session.selectedTabID
-        guard let parent = browser.activeWebTab as? ChromiumTab, let expectedWindow = parent.nativeView.window else { throw ValidationError("The popup probe requires a hosted Chromium tab.") }
+        let outerIDs = browser.session.tabs.map(\.id)
+        guard let parent = browser.activeWebTab as? ChromiumTab,
+              let expectedWindow = parent.nativeView.window, let chromeWindow = parent.chromeWindow else {
+            throw ValidationError("The popup probe requires a hosted Chromium pane.")
+        }
+        let profileID = parent.profileID, privateSessionID = parent.privateSessionID
+        let originalContents = try await chromeContents(parent)
+        let originalDocument = try await evaluate(parent, "JSON.stringify({href: location.href, title: document.title})")
+        let token = UUID().uuidString
+        _ = try await evaluate(parent, "window.radiusPopupToken = '\(token)'; document.cookie = 'radiusPopupProof=\(token); path=/'; String(window.radiusPopupToken)")
+        func verifyPaneOwnership() throws {
+            guard browser.session.selectedTabID == parentID, browser.session.tabs.map(\.id) == outerIDs,
+                  browser.activeWebTab === parent, parent.nativeView.window === expectedWindow,
+                  parent.chromeWindow === chromeWindow, chromeWindow.parent === expectedWindow,
+                  chromeWindow.isVisible, expectedWindow.isVisible,
+                  parent.profileID == profileID, parent.privateSessionID == privateSessionID else {
+                throw ValidationError("A normal Chrome tab changed its Radius pane, profile, or owned window.")
+            }
+        }
+        func closePopup(_ property: String) async throws {
+            // Chrome may leave a script-created tab in the background. Address
+            // the real WindowProxy through its opener, rather than selecting or
+            // recreating a page to make this test pass.
+            _ = try? await evaluate(parent, "(() => { const source = window.radiusPopupToken === '\(token)' ? window : window.opener; source.\(property).close(); return 'closing'; })()", timeout: .seconds(3))
+            _ = try await waitForChromeContents(parent) { $0.ids == originalContents.ids && $0.activeBrowser == originalContents.activeBrowser }
+            try verifyPaneOwnership()
+            guard try await evaluate(parent, "JSON.stringify({href: location.href, title: document.title})") == originalDocument,
+                  try await evaluate(parent, "String(window.radiusPopupToken)") == token else {
+                throw ValidationError("Closing a Chrome popup did not return to its original live document.")
+            }
+        }
         let originalPolicy = app.library.preferences.blockPopups
         defer {
             app.library.preferences.blockPopups = originalPolicy
@@ -389,23 +495,32 @@ enum AppSmokeTest {
         app.library.preferences.blockPopups = true; browser.updatePopupPolicy()
         let blocked = try await evaluate(parent, "(() => { const w = window.open('about:blank'); if (w) { w.close(); return 'opened'; } return 'blocked'; })()")
         guard blocked == "blocked" else { throw ValidationError("Chromium opened an unsolicited popup while Radius blocks popups.") }
-        app.library.preferences.blockPopups = false; browser.updatePopupPolicy()
-        let opened = try await evaluate(parent, "(() => { const w = window.open('about:blank'); if (!w) return 'blocked'; w.document.write('<html><title>Radius Chromium popup</title><body>Popup</body></html>'); w.document.close(); return 'opened'; })()")
-        guard opened == "opened" else { throw ValidationError("Chromium rejected its allowed popup request: \(opened).") }
-        let deadline = Date().addingTimeInterval(10)
-        while browser.activeWebTab.title != "Radius Chromium popup" {
-            if Date() > deadline {
-                var documentTitle = "unavailable"
-                if let popup = browser.activeWebTab as? ChromiumTab { documentTitle = (try? await evaluate(popup, "String(document.title)")) ?? "unavailable" }
-                throw ValidationError("Chromium popup did not open inside Radius. Engine: \(browser.activeWebTab.engineID.label); title: \(browser.activeWebTab.title ?? "nil"); document title: \(documentTitle); error: \(browser.activeWebTab.errorMessage ?? "none").")
-            }
-            try await Task.sleep(for: .milliseconds(100))
+        try await Task.sleep(for: .milliseconds(250))
+        let blockedContents = try await chromeContents(parent)
+        guard blockedContents.ids == originalContents.ids, blockedContents.activeBrowser == originalContents.activeBrowser else {
+            throw ValidationError("A blocked popup created or selected a native Chrome tab.")
         }
-        guard browser.session.selectedTabID != parentID,
-              let popup = browser.activeWebTab as? ChromiumTab,
-              popup.nativeView.window === expectedWindow,
-              try await evaluate(popup, "String(window.opener !== null)") == "true" else { throw ValidationError("Chromium popup lost its opener or native window.") }
-        browser.closeTab(browser.session.selectedTabID); browser.selectTab(parentID)
+        try verifyPaneOwnership()
+        app.library.preferences.blockPopups = false; browser.updatePopupPolicy()
+        // A real tab switch can cancel the issuing DevTools response. The
+        // native browser inventory and actual popup document prove the result.
+        _ = try? await evaluate(parent, "(() => { const w = window.open('about:blank'); if (!w) return 'blocked'; window.radiusPopupHandle = w; w.document.write('<html><title>Radius Chromium popup</title><body>Popup</body></html>'); w.document.close(); return 'opened'; })()", timeout: .seconds(3))
+        _ = try await waitForChromeContents(parent) { originalContents.ids.isSubset(of: $0.ids) && $0.ids.count == originalContents.ids.count + 1 }
+        try verifyPaneOwnership()
+        try await verifyPopupDocument(parent, property: "radiusPopupHandle", token: token, title: "Radius Chromium popup")
+        try await closePopup("radiusPopupHandle")
+        // Submit the fixture's original target=_blank form. The server echoes
+        // its received method/body and registers the resulting live WindowProxy
+        // with the opener, so a URL-only reopen cannot satisfy these assertions.
+        _ = try? await evaluate(parent, "(() => { delete window.radiusPostPopup; const form = document.querySelector('form[action=\"/submitted\"]'); if (!form) return 'missing form'; form.submit(); return 'submitted'; })()", timeout: .seconds(3))
+        _ = try await waitForChromeContents(parent) { originalContents.ids.isSubset(of: $0.ids) && $0.ids.count == originalContents.ids.count + 1 }
+        try verifyPaneOwnership()
+        try await verifyPopupDocument(parent, property: "radiusPostPopup", token: token, title: "Radius POST fixture", submittedBody: "test=preserved")
+        guard (try await chromeContents(parent)).browsers.contains(where: { !originalContents.ids.contains($0.id) && URL(string: $0.url)?.path == "/submitted" }) else {
+            throw ValidationError("The submitted document was not the newly created native Chrome tab.")
+        }
+        try await closePopup("radiusPostPopup")
+        _ = try await evaluate(parent, "document.cookie = 'radiusPopupProof=; path=/; max-age=0'; delete window.radiusPopupToken; delete window.radiusPopupHandle; delete window.radiusPostPopup; 'cleaned'")
     }
     private static func openProbe(app: AppState, privateBrowsing: Bool, profileID: UUID?, address: String) async throws -> (BrowserModel, NSWindow) {
         let model = BrowserModel(app: app, isPrivate: privateBrowsing)

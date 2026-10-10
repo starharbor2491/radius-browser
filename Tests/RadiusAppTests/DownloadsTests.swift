@@ -313,7 +313,7 @@ struct DownloadsTests {
         #expect(item.status.contains("before cancellation was confirmed"))
         #expect(item.status.contains("temporary file is retained"))
 
-        // Neither retrying nor shutdown may wait for an impossible callback,
+        // A cancellation request cannot wait for an impossible callback,
         // delete the file, or turn an unconfirmed close into "Finished".
         center.cancel(item)
         try await center.cancelAllAndWait(timeout: .zero)
@@ -321,6 +321,37 @@ struct DownloadsTests {
         #expect(cancelRequests == 1)
         #expect(!item.transferEnded)
         #expect(FileManager.default.fileExists(atPath: staging.path))
+    }
+
+    @Test func closedOwnerCenterSurvivesUntilConfirmedEngineShutdown() async throws {
+        let admission = DownloadAdmission()
+        weak var retainedCenter: DownloadCenter?
+        let item: DownloadItem
+        let directory: URL
+        let staging: URL
+        do {
+            let (center, transfer, folder) = try fixture(admission: admission)
+            item = transfer; directory = folder; staging = try #require(transfer.staging)
+            retainedCenter = center
+            center.chromiumOwnerClosed(ids: ["download"])
+        }
+        defer { try? FileManager.default.removeItem(at: directory) }
+        #expect(retainedCenter != nil)
+        #expect(admission.activeCenters.isEmpty)
+        #expect(item.acknowledgementUnavailable)
+        try await admission.cancelAllAndWait(timeout: .zero)
+        #expect(!item.transferEnded)
+        #expect(FileManager.default.fileExists(atPath: staging.path))
+
+        // This callback is invoked by the runtime only after CefShutdown has
+        // returned successfully; a refused Quit never reaches it.
+        admission.chromiumDidShutDown()
+        #expect(item.transferEnded)
+        #expect(item.status == "Cancelled")
+        #expect(!item.acknowledgementUnavailable)
+        #expect(item.staging == nil)
+        #expect(!FileManager.default.fileExists(atPath: staging.path))
+        #expect(retainedCenter == nil)
     }
 
     @Test func ownerClosingWhileCancellationWaitsReleasesTheWaitAndKeepsStaging() async throws {

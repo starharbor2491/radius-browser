@@ -36,8 +36,8 @@ final class ChromiumTab: BrowserEngineTab {
     private var pageURL: URL?
     private var failedURL: URL?
     private var pageTitle: String?
-    private var showingStartPage = false
-    private let startPageURL = URL(string: "about:blank#radius-start-" + UUID().uuidString)!
+    private var restoringPages = false
+    private var sessionPages: [ChromiumSessionPage] = []
     private var nextRequest = 1
     private struct PendingRequest {
         let continuation: CheckedContinuation<Data, any Error>
@@ -47,9 +47,26 @@ final class ChromiumTab: BrowserEngineTab {
     private var readerContexts: [Int: String] = [:]
     override var nativeView: NSView { hostView }
     var chromeWindow: NSWindow? { hostView.value(forKey: "browserWindow") as? NSWindow }
-    override var isShowingStartPage: Bool { failedURL == nil && (showingStartPage || pageURL == startPageURL) }
-    override var url: URL? { isShowingStartPage ? nil : failedURL ?? pageURL }
-    override var title: String? { isShowingStartPage ? nil : pageTitle }
+    override var url: URL? { activeContentKnown ? failedURL ?? pageURL : nil }
+    override var title: String? { activeContentKnown ? pageTitle : nil }
+    private var activeContentKnown: Bool { hostView.value(forKey: "activeContentKnown") as? Bool == true }
+    private var refreshingActiveContent = false
+    override func refreshActiveContent() {
+        guard !refreshingActiveContent, !restoringPages else { return }
+        refreshingActiveContent = true
+        defer { refreshingActiveContent = false }
+        command(Int(RADIUS_CEF_SYNC_ACTIVE))
+    }
+    override var chromiumSessionPages: [ChromiumSessionPage]? {
+        restoringPages || !activeContentKnown || sessionPages.isEmpty ? nil : sessionPages
+    }
+    override func restoreChromiumSessionPages(_ pages: [ChromiumSessionPage]) {
+        guard !pages.isEmpty, pages.count <= 200 else { return }
+        restoringPages = true
+        let addresses = pages.map { page in page.url.flatMap { AddressResolver.isWebURL($0) && $0.absoluteString.utf8.count <= 8192 ? $0.absoluteString : nil } ?? "" }
+        guard let data = try? JSONSerialization.data(withJSONObject: addresses, options: [.withoutEscapingSlashes]) else { return }
+        command(Int(RADIUS_CEF_RESTORE_TABS), text: String(decoding: data, as: UTF8.self))
+    }
     override var engineID: BrowserEngineID { .chromium }
 
     init(runtime: ChromiumRuntime, page: UnsafeMutableRawPointer, downloads: DownloadCenter, profileID: UUID, privateSessionID: UUID?) {
@@ -107,6 +124,9 @@ final class ChromiumTab: BrowserEngineTab {
             MainActor.assumeIsolated {
                 guard let self, let chrome = self.chromeWindow,
                       windowID == ObjectIdentifier(chrome) else { return }
+                if let owner = self.hostView.window, owner.isVisible, owner.canBecomeMain {
+                    owner.makeMain()
+                }
                 self.onActivate?()
             }
         }
@@ -120,20 +140,23 @@ final class ChromiumTab: BrowserEngineTab {
             let handled = MainActor.assumeIsolated {
                 guard let self, !self.isAuxiliary, self.hasNativeNavigationChrome,
                       let chrome = self.chromeWindow, windowID == ObjectIdentifier(chrome), chrome.isKeyWindow else { return false }
+                if self.runtime.finalQuitFrozen { return true }
                 if modifiers == NSEvent.ModifierFlags.command.rawValue, key == "l" {
                     self.onActivate?()
                     return self.focusAddressBar()
                 }
-                let action: String
-                if modifiers == NSEvent.ModifierFlags.command.rawValue, key == "t" { action = "newTab" }
-                else if modifiers == NSEvent.ModifierFlags.command.rawValue, key == "w" { action = "closeTab" }
-                else if modifiers == NSEvent.ModifierFlags.command.union(.shift).rawValue, key == "w" { action = "closeWindow" }
+                if modifiers == NSEvent.ModifierFlags.command.union(.shift).rawValue, key == "w" {
+                    self.onActivate?(); self.onBrowserCommand?("closeWindow"); return true
+                }
+                let nativeCommand: NativeTabCommand
+                if modifiers == NSEvent.ModifierFlags.command.rawValue, key == "t" { nativeCommand = .new }
+                else if modifiers == NSEvent.ModifierFlags.command.rawValue, key == "w" { nativeCommand = .close }
+                else if modifiers == NSEvent.ModifierFlags.command.union(.shift).rawValue, key == "t" { nativeCommand = .reopen }
+                else if modifiers == NSEvent.ModifierFlags.command.union(.shift).rawValue, key == "[" || key == "{" { nativeCommand = .previous }
+                else if modifiers == NSEvent.ModifierFlags.command.union(.shift).rawValue, key == "]" || key == "}" { nativeCommand = .next }
                 else { return false }
-                guard let command = self.onBrowserCommand else { return false }
                 self.onActivate?()
-                self.hostView.window?.makeKeyAndOrderFront(nil)
-                command(action)
-                return true
+                return self.performNativeTabCommand(nativeCommand)
             }
             return handled ? nil : event
         }
@@ -156,19 +179,37 @@ final class ChromiumTab: BrowserEngineTab {
     }
     override func load(_ url: URL) {
         guard AddressResolver.isWebURL(url) else { errorMessage = "Only HTTP and HTTPS addresses are supported."; return }
-        showingStartPage = false; failedURL = nil
+        failedURL = nil
         errorMessage = nil; pageURL = url; loading = true
         command(Int(RADIUS_CEF_LOAD), text: url.absoluteString)
     }
-    override func showStartPage() {
-        // Only this native operation can navigate to the internal empty page.
-        // Keep the browser, history, context and active downloads alive.
-        showingStartPage = true; failedURL = nil; errorMessage = nil; didStartNavigation()
-        pageURL = nil; pageTitle = nil; loading = true
-        command(Int(RADIUS_CEF_STOP))
-        command(Int(RADIUS_CEF_LOAD), text: startPageURL.absoluteString)
+    override func performNativeTabCommand(_ command: NativeTabCommand) -> Bool {
+        guard !disposing, let page, let api = runtime.api,
+              hasNativeNavigationChrome || (isAuxiliary && chromeWindow?.isVisible == true) else { return false }
+        if runtime.finalQuitFrozen { return true }
+        let native: Int
+        switch command {
+        case .new: native = Int(RADIUS_CEF_NEW_TAB)
+        case .close: native = Int(RADIUS_CEF_CLOSE_TAB)
+        case .reopen: native = Int(RADIUS_CEF_REOPEN_TAB)
+        case .previous: native = Int(RADIUS_CEF_PREVIOUS_TAB)
+        case .next: native = Int(RADIUS_CEF_NEXT_TAB)
+        }
+        if api.native_tab_command(page, Int32(native)) == 0 {
+            onNotice?("This Chrome tab action is not available yet.")
+        }
+        // This visible native Chrome window owns the command even while Chrome
+        // disables it. Never fall through to an unrelated outer Radius tab.
+        return true
     }
-    func showExtensions() { showingStartPage = false; failedURL = nil; command(Int(RADIUS_CEF_EXTENSIONS)) }
+    override func showStartPage() {
+        // A browsing Chromium pane keeps Chrome's own tab strip and new-tab
+        // surface. Its selected WebContents and siblings remain the same.
+        failedURL = nil; errorMessage = nil; didStartNavigation()
+        pageURL = URL(string: "chrome://newtab/"); pageTitle = "New tab"; loading = true
+        command(Int(RADIUS_CEF_HOME))
+    }
+    func showExtensions() { failedURL = nil; command(Int(RADIUS_CEF_EXTENSIONS)) }
     override func reload() {
         // Provisional failures do not commit a new CEF document. Retry the
         // reported web address instead of reloading the previous Home entry.
@@ -176,9 +217,15 @@ final class ChromiumTab: BrowserEngineTab {
         else { errorMessage = nil; command(Int(RADIUS_CEF_RELOAD)) }
     }
     override func stop() { command(Int(RADIUS_CEF_STOP)) }
-    override func goBack() { showingStartPage = false; failedURL = nil; errorMessage = nil; command(Int(RADIUS_CEF_BACK)) }
-    override func goForward() { showingStartPage = false; failedURL = nil; errorMessage = nil; command(Int(RADIUS_CEF_FORWARD)) }
-    override func setZoom(_ value: Double) { super.setZoom(value); command(Int(RADIUS_CEF_ZOOM), value: zoom) }
+    override func goBack() { failedURL = nil; errorMessage = nil; command(Int(RADIUS_CEF_BACK)) }
+    override func goForward() { failedURL = nil; errorMessage = nil; command(Int(RADIUS_CEF_FORWARD)) }
+    override func setZoom(_ value: Double) {
+        guard value.isFinite, !disposing, !restoringPages else { return }
+        refreshActiveContent()
+        guard activeContentKnown else { return }
+        zoom = min(5, max(0.25, value))
+        command(Int(RADIUS_CEF_ZOOM), value: zoom)
+    }
     override func updatePopupPolicy() { command(Int(RADIUS_CEF_POPUPS), value: allowPopups?() == true ? 1 : 0) }
     override func focus() {
         command(Int(RADIUS_CEF_FOCUS))
@@ -237,6 +284,8 @@ final class ChromiumTab: BrowserEngineTab {
     /// Internal DevTools transport, never a listening debugging port.
     func request(_ method: String, parameters: [String: Any], timeout: Duration = .seconds(15)) async throws -> Data {
         try Task.checkCancellation()
+        guard !restoringPages else { throw ValidationError("This Chromium pane is still restoring its saved tabs.") }
+        command(Int(RADIUS_CEF_SYNC_ACTIVE))
         guard let page, let api = runtime.api else { throw ValidationError("This Chromium page is closed.") }
         let json = String(decoding: try JSONSerialization.data(withJSONObject: parameters), as: UTF8.self)
         let id = nextRequest; nextRequest += 1
@@ -263,11 +312,24 @@ final class ChromiumTab: BrowserEngineTab {
         guard let data = json.data(using: .utf8), let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
         switch event {
         case Int32(RADIUS_CEF_STATE), Int32(RADIUS_CEF_FINISHED):
+            if value["activeContentChanged"] as? Bool == true {
+                cancelRequests(); didStartNavigation(); failedURL = nil; errorMessage = nil; pageTitle = nil
+            }
+            if let restoring = value["restoring"] as? Bool { restoringPages = restoring }
+            if let pages = value["innerPages"] as? [[String: Any]], pages.count <= 200 {
+                let ordered = pages.filter { $0["selected"] as? Bool == true } + pages.filter { $0["selected"] as? Bool != true }
+                sessionPages = ordered.map { item in
+                    let candidate = (item["url"] as? String).flatMap(URL.init(string:))
+                    let url = candidate.flatMap { AddressResolver.isWebURL($0) && $0.absoluteString.utf8.count <= 8192 ? $0 : nil }
+                    let title = url == nil ? "New tab" : boundedPageTitle(item["title"] as? String ?? "Untitled")
+                    return ChromiumSessionPage(url: url, title: title)
+                }
+            }
             if let chrome = value["chromeStyle"] as? Bool { chromeStyle = chrome }
             if let chrome = value["navigationChrome"] as? Bool { navigationChrome = chrome }
             if let visible = value["navigationChromeVisible"] as? Bool { navigationChromeVisible = visible }
             if let address = value["committedURL"] as? String, let url = URL(string: address) {
-                showingStartPage = false; failedURL = nil; errorMessage = nil; pageURL = url; pageTitle = nil
+                failedURL = nil; errorMessage = nil; pageURL = url; pageTitle = nil
             }
             if value["navigationStart"] as? Bool == true {
                 didStartNavigation()
@@ -275,19 +337,20 @@ final class ChromiumTab: BrowserEngineTab {
                 return
             }
             if let address = value["url"] as? String { pageURL = URL(string: address) }
-            if let title = value["title"] as? String { pageTitle = title.isEmpty ? nil : title }
+            if let title = value["title"] as? String { pageTitle = title.isEmpty ? nil : boundedPageTitle(title) }
             if let value = value["loading"] as? Bool {
                 loading = value; progress = value ? 0.4 : 1
                 if value && failedURL == nil { errorMessage = nil }
             }
             if let value = value["canGoBack"] as? Bool { canGoBack = value }
             if let value = value["canGoForward"] as? Bool { canGoForward = value }
+            if let value = value["zoom"] as? Double, value.isFinite, value > 0, zoom != value { zoom = value }
             onChange?(event == Int32(RADIUS_CEF_FINISHED))
         case Int32(RADIUS_CEF_ERROR):
             errorMessage = value["message"] as? String
             loading = false; progress = 0
             if let address = value["failedURL"] as? String, let url = URL(string: address), AddressResolver.isWebURL(url) {
-                failedURL = url; showingStartPage = false; pageTitle = nil
+                failedURL = url; pageTitle = nil
             }
             onChange?(false)
         case Int32(RADIUS_CEF_NOTICE):
@@ -319,6 +382,11 @@ final class ChromiumTab: BrowserEngineTab {
         case Int32(RADIUS_CEF_DOWNLOAD_UPDATE):
             guard let id = value["id"] as? Int else { return }
             let key = downloadPrefix + ":" + String(id)
+            if value["ownerClosed"] as? Bool == true {
+                downloads.chromiumOwnerClosed(ids: [key])
+                downloadIDs.remove(key)
+                return
+            }
             let complete = value["complete"] as? Bool == true
             let cancelled = value["cancelled"] as? Bool == true
             let interrupted = value["interrupted"] as? Bool == true
@@ -360,6 +428,7 @@ final class ChromiumTab: BrowserEngineTab {
         let notice = onNotice
         if !disposing {
             disposing = true
+            command(Int(RADIUS_CEF_STOP_ADMISSION))
             removeFocusObserver()
             cancelRequests(); super.dispose()
         }

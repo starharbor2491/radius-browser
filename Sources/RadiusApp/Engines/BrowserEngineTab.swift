@@ -3,6 +3,8 @@ import AppKit
 import SwiftUI
 import RadiusCore
 
+enum NativeTabCommand { case new, close, reopen, previous, next }
+
 /// Native browser controls observe this state; engines own their website context.
 @MainActor
 class BrowserEngineTab: NSObject, ObservableObject {
@@ -27,6 +29,10 @@ class BrowserEngineTab: NSObject, ObservableObject {
     var url: URL? { nil }
     var title: String? { nil }
     var engineID: BrowserEngineID { preconditionFailure("An engine must identify itself") }
+    func refreshActiveContent() {}
+    func performNativeTabCommand(_ command: NativeTabCommand) -> Bool { false }
+    var chromiumSessionPages: [ChromiumSessionPage]? { nil }
+    func restoreChromiumSessionPages(_ pages: [ChromiumSessionPage]) {}
     func load(_ url: URL) { preconditionFailure("An engine must implement navigation") }
     func showStartPage() { preconditionFailure("An engine must implement its native start page transition") }
     func reload() { preconditionFailure("An engine must implement reload") }

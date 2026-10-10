@@ -36,8 +36,8 @@ struct ChromiumSettingsView: View {
     }
     private func prepareForRemoval() {
         guard !app.terminating, !app.finalQuitDataFrozen else { return }
-        let alert = NSAlert(); alert.messageText = "Switch all Chromium tabs to WebKit?"
-        alert.informativeText = "All profile defaults and Chromium tabs will switch to WebKit. Website addresses reload in separate sign-in contexts; forms and unsaved work do not transfer. Generated pages become New tab. Tab organization and saved browser data are kept. You can then install the WebKit-only Radius package without reopening unavailable Chromium tabs."
+        let alert = NSAlert(); alert.messageText = "Switch all Chromium browsing panes to WebKit?"
+        alert.informativeText = "Each pane retains only its active HTTP or HTTPS page. Other inner Chrome tabs close and their session addresses are discarded. Active pages reload with separate sign-ins; forms and unsaved work do not transfer. Generated pages become New tab. Radius bookmarks, history, notes, modules and layout are kept. You can then install the WebKit-only Radius package."
         alert.addButton(withTitle: "Switch to WebKit"); alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         guard !app.terminating, !app.finalQuitDataFrozen else { return }
