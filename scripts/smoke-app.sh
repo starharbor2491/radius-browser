@@ -131,10 +131,22 @@ fi
     /usr/bin/sample "$smoke_app_pid" 3 -file dist/smoke-sample.txt >dist/smoke-sample.log 2>&1 &
     sample_pid=$!
   fi
-  sleep "$((smoke_deadline - 45))" &
-  timer_pid=$!
-  wait "$timer_pid"
-  timer_pid=""
+  remaining=$((smoke_deadline - 45))
+  quit_remaining=45
+  while [[ "$remaining" -gt 0 ]]; do
+    if /usr/bin/grep -q 'Radius packaged-app smoke test passed.' dist/smoke-app.log; then
+      if [[ "$quit_remaining" -eq 0 ]]; then
+        echo 'Radius did not quit within 45 seconds after completing acceptance.' >&2
+        break
+      fi
+      quit_remaining=$((quit_remaining - 1))
+    fi
+    sleep 1 &
+    timer_pid=$!
+    wait "$timer_pid"
+    timer_pid=""
+    remaining=$((remaining - 1))
+  done
   if kill -0 "$smoke_app_pid" 2>/dev/null; then
     # TERM can produce exit status zero; record the timeout before signalling.
     : >"$smoke_timeout_marker"

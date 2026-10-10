@@ -43,14 +43,19 @@ struct ResourceModuleTests {
             var edited = app.library.preferences.configuration
             edited.layout.navigation = rollback ? .top : .bottom
             let probe = WorkerReentryProbe(app: app, id: widget.id, approval: approval, configuration: edited)
-            // Observers alone do not keep a run-loop mode active. Queue real
-            // work for the nested process wait, without depending on a timer.
-            CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue) {
+            // A preflight can service the run loop before worker reaping starts.
+            // Keep a real source pending until the guarded critical section, then
+            // invalidate it before the probe itself can reenter the run loop.
+            let runLoop = CFRunLoopGetCurrent()
+            let timer = try #require(CFRunLoopTimerCreateWithHandler(nil, CFAbsoluteTimeGetCurrent(), 0.001, 0, 0) { timer in
                 MainActor.assumeIsolated {
-                    guard probe.app.stoppingModuleWorkers else { return }
+                    guard probe.app.stoppingModuleWorkers, !probe.fired else { return }
+                    CFRunLoopTimerInvalidate(timer)
                     probe.attemptUpdate()
                 }
-            }
+            })
+            CFRunLoopAddTimer(runLoop, timer, CFRunLoopMode.commonModes)
+            defer { CFRunLoopTimerInvalidate(timer) }
 
             if rollback {
                 #expect(throws: (any Error).self) {

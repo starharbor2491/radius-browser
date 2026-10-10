@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 import AppKit
+import CoreFoundation
 import Darwin
 import SwiftUI
 import RadiusCore
@@ -29,7 +30,7 @@ enum AppSmokeTest {
                 try await ChromiumAcceptance.verifyStoreRestart(app: app)
                 guard await app.flush() else { throw ValidationError(app.notice ?? "Could not save restart acceptance data.") }
                 trace("Chromium real-process restart acceptance passed")
-                NSApp.perform(#selector(NSApplication.terminate(_:)), with: nil, afterDelay: 0, inModes: [.common, .modalPanel])
+                requestNormalQuit()
                 return
             }
             trace("Browser window opened")
@@ -351,8 +352,21 @@ enum AppSmokeTest {
             trace("Radius packaged-app smoke test passed.")
             // Return this actor job before AppKit enters its deferred-termination loop.
             // The extension-manager sheet can leave AppKit in modal-panel mode.
-            NSApp.perform(#selector(NSApplication.terminate(_:)), with: nil, afterDelay: 0, inModes: [.common, .modalPanel])
+            requestNormalQuit()
         } catch { fail(error.localizedDescription) }
+    }
+    private static func requestNormalQuit() {
+        trace("Scheduling normal quit on the main run loop")
+        let runLoop = CFRunLoopGetMain()
+        CFRunLoopPerformBlock(runLoop, CFRunLoopMode.commonModes.rawValue) {
+            MainActor.assumeIsolated {
+                let mode = CFRunLoopCopyCurrentMode(runLoop).map { String(describing: $0) } ?? "none"
+                trace("Requesting normal quit: main=\(Thread.isMainThread), mode=\(mode), delegate=\(String(describing: NSApp.delegate)), modal=\(NSApp.modalWindow != nil), sheet=\(NSApp.windows.contains { $0.attachedSheet != nil })")
+                NSApp.terminate(nil)
+                trace("Normal quit request returned")
+            }
+        }
+        CFRunLoopWakeUp(runLoop)
     }
     private static func moduleSectionPicker(in root: NSView) -> NSSegmentedControl? {
         if let picker = root as? NSSegmentedControl, !picker.isHidden,
