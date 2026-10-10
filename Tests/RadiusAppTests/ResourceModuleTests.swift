@@ -39,6 +39,7 @@ struct ResourceModuleTests {
             // Pause only this owned real worker. Its existing bounded SIGKILL
             // deadline makes the native wait service the run loop for 250 ms.
             try #require(kill(process.processIdentifier, SIGSTOP) == 0)
+            try await waitForStoppedProcess(process)
             var edited = app.library.preferences.configuration
             edited.layout.navigation = rollback ? .top : .bottom
             let probe = WorkerReentryProbe(app: app, id: widget.id, approval: approval, configuration: edited)
@@ -204,6 +205,23 @@ struct ResourceModuleTests {
         #expect(!process.isRunning)
         #expect(try app.resourceWorkerPackage().id == "org.radius.memory-monitor")
         #expect(await app.flush())
+    }
+
+    private func waitForStoppedProcess(_ process: Process) async throws {
+        for _ in 0..<50 {
+            var info = kinfo_proc()
+            var size = MemoryLayout<kinfo_proc>.size
+            var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, process.processIdentifier]
+            let result = mib.withUnsafeMutableBufferPointer {
+                sysctl($0.baseAddress, UInt32($0.count), &info, &size, nil, 0)
+            }
+            guard result == 0, size == MemoryLayout<kinfo_proc>.size, process.isRunning else {
+                throw ValidationError("The owned worker exited before its paused state could be confirmed.")
+            }
+            if Int(info.kp_proc.p_stat) == Int(SSTOP) { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        throw ValidationError("The owned worker did not enter its stopped state before repair.")
     }
 
     private func waitForFrame(_ worker: ResourceWorker) async throws {

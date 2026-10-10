@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 import AppKit
+import SwiftUI
 import Testing
 import CSQLite
 @preconcurrency import WebKit
@@ -11,6 +12,39 @@ extension NativeIntegrationTests {
 @Suite(.serialized)
 @MainActor
 struct BrowserIntegrationTests {
+    @Test func cachedDocumentSurvivesMountingInANewSwiftUILayoutAndOldLayoutTeardown() async throws {
+        let (app, directory) = try await fixture()
+        let browser = BrowserModel(app: app, isPrivate: false)
+        let source = try #require(browser.activeWebTab as? WebTab)
+        let firstWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 480), styleMask: [.titled], backing: .buffered, defer: false)
+        let secondWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 520), styleMask: [.titled], backing: .buffered, defer: false)
+        var outgoing: NSHostingView<WebViewHost>? = NSHostingView(rootView: WebViewHost(tab: source))
+        defer {
+            firstWindow.orderOut(nil); secondWindow.orderOut(nil)
+            firstWindow.contentView = nil; secondWindow.contentView = nil
+            browser.closeWindow(); try? FileManager.default.removeItem(at: directory)
+        }
+        firstWindow.contentView = outgoing
+        firstWindow.makeKeyAndOrderFront(nil)
+        try await waitUntil { source.nativeView.window === firstWindow }
+        source.webView.loadHTMLString("<html><title>Retained document</title><script>window.radiusUnsavedValue = 'kept';</script></html>", baseURL: nil)
+        try await waitUntil { source.webView.title == "Retained document" && !source.webView.isLoading }
+        let store = source.webView.configuration.websiteDataStore, history = source.webView.backForwardList
+
+        // A new layout can mount before SwiftUI dismantles the outgoing one.
+        secondWindow.contentView = NSHostingView(rootView: WebViewHost(tab: source))
+        secondWindow.makeKeyAndOrderFront(nil)
+        try await waitUntil { source.nativeView.window === secondWindow }
+        firstWindow.contentView = nil; outgoing = nil
+        try await Task.sleep(for: .milliseconds(100))
+        secondWindow.contentView?.layoutSubtreeIfNeeded()
+        #expect(source.nativeView.window === secondWindow)
+        #expect(source.webView.configuration.websiteDataStore === store && source.webView.backForwardList === history)
+        #expect(source.webView.navigationDelegate === source)
+        #expect(try await source.webView.evaluateJavaScript("window.radiusUnsavedValue") as? String == "kept")
+        #expect(await app.flush())
+    }
+
     @Test func startPageReplacesOnlyTheCurrentPageAndPreservesItsWorkspaceAndWebsiteStore() async throws {
         let (app, directory) = try await fixture()
         defer { try? FileManager.default.removeItem(at: directory) }

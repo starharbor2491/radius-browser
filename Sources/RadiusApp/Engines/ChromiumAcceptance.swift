@@ -1195,12 +1195,15 @@ enum ChromiumAcceptance {
         while ContinuousClock.now < deadline {
             NSApp.activate(ignoringOtherApps: true)
             tab.nativeView.window?.makeKeyAndOrderFront(nil)
-            tab.chromeWindow?.makeKeyAndOrderFront(nil)
-            tab.focus()
-            if tab.chromeWindow?.isKeyWindow == true {
+            if tab.isAuxiliary || tab.hasNativeNavigationChrome {
+                tab.chromeWindow?.makeKeyAndOrderFront(nil)
+                tab.focus()
+            }
+            if tab.chromeWindow?.isKeyWindow == true && (tab.isAuxiliary || tab.hasNativeNavigationChrome) {
                 if tab.isAuxiliary { return }
                 let data = try await tab.request("Radius.chromeHostState", parameters: [:])
-                if (try JSONSerialization.jsonObject(with: data) as? [String: Any])?["windowActive"] as? Bool == true { return }
+                if (try JSONSerialization.jsonObject(with: data) as? [String: Any])?["windowActive"] as? Bool == true,
+                   tab.hasNativeNavigationChrome { return }
             }
             try await Task.sleep(for: .milliseconds(100))
         }

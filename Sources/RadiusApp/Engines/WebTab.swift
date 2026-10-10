@@ -244,8 +244,38 @@ final class WebPageSnapshotRequest {
 }
 struct WebViewHost: NSViewRepresentable {
     let tab: BrowserEngineTab
-    func makeNSView(context: Context) -> NSView { tab.nativeView }
-    func updateNSView(_ nsView: NSView, context: Context) {}
+    func makeNSView(context: Context) -> EngineViewContainer { EngineViewContainer(page: tab.nativeView) }
+    func updateNSView(_ nsView: EngineViewContainer, context: Context) { nsView.mount(tab.nativeView) }
+    static func dismantleNSView(_ nsView: EngineViewContainer, coordinator: ()) { nsView.unmount() }
+}
+
+/// SwiftUI owns each container; the adapter retains its page across layouts.
+/// An outgoing representable must never detach a page already mounted elsewhere.
+@MainActor
+final class EngineViewContainer: NSView {
+    private var page: NSView?
+    init(page: NSView) { super.init(frame: .zero); mount(page) }
+    required init?(coder: NSCoder) { fatalError("Not used") }
+    func mount(_ page: NSView) {
+        guard self.page !== page else { return }
+        unmount()
+        self.page = page
+        if page.superview !== self {
+            page.removeFromSuperview()
+            page.translatesAutoresizingMaskIntoConstraints = true
+            page.autoresizingMask = [.width, .height]
+            addSubview(page)
+        }
+        page.frame = bounds
+    }
+    override func layout() {
+        super.layout()
+        if let page, page.superview === self { page.frame = bounds }
+    }
+    func unmount() {
+        if let page, page.superview === self { page.removeFromSuperview() }
+        page = nil
+    }
 }
 
 @MainActor
