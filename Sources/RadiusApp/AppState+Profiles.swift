@@ -5,6 +5,17 @@ import RadiusCore
 
 @MainActor
 extension AppState {
+    // Named stores release session cookies when their last wrapper disappears.
+    // Keep each regular profile signed in even when it has no open WebKit tab.
+    func webKitDataStore(profileID: UUID) -> WKWebsiteDataStore {
+        if let store = webKitDataStores[profileID] { return store }
+        let store = WKWebsiteDataStore(forIdentifier: profileID)
+        webKitDataStores[profileID] = store
+        return store
+    }
+    func releaseWebKitDataStore(profileID: UUID) {
+        webKitDataStores.removeValue(forKey: profileID)
+    }
     func deleteProfile(_ id: UUID, replacingWith replacement: UUID) async throws {
         guard !terminating, deletingProfileIDs.isEmpty else { throw ValidationError("Wait for the current operation to finish.") }
         var validation = library
@@ -53,6 +64,7 @@ extension AppState {
         for model in windows.values.compactMap(\.model) where profilesAwaitingWebsiteDataRemoval.contains(model.session.profileID) {
             model.disposeEngineTabs()
         }
+        for id in pending { releaseWebKitDataStore(profileID: id) }
         var completed = Set<UUID>()
         // Website-store removal has a deadline. All requests start together so a
         // damaged store cannot add an unbounded delay for each deleted profile.

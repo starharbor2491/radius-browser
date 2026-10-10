@@ -9,6 +9,7 @@ import plistlib
 import re
 import subprocess
 import sys
+import tempfile
 
 
 def version_tuple(text):
@@ -31,7 +32,13 @@ def runtime_minimum(runtime, baseline):
             if handle.read(4) not in magic:
                 continue
         native_count += 1
-        commands = subprocess.check_output(['/usr/bin/otool', '-l', str(path)], text=True)
+        # otool treats a filename ending in "(Renderer)" as archive(member).
+        # A simple alias reads the same bytes without copying large frameworks
+        # or modifying the bundle. Inspect every architecture in a fat binary.
+        with tempfile.TemporaryDirectory(prefix='radius-macos-minimum-') as temporary:
+            inspected = Path(temporary) / 'binary'
+            inspected.symlink_to(path.resolve(strict=True))
+            commands = subprocess.check_output(['/usr/bin/otool', '-arch', 'all', '-l', str(inspected)], text=True)
         versions = []
         for block in re.split(r'Load command \d+', commands):
             if re.search(r'\bcmd LC_BUILD_VERSION\b', block):

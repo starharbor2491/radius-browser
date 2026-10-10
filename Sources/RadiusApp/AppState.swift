@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 import AppKit
 import SwiftUI
+@preconcurrency import WebKit
 import RadiusCore
 
 @MainActor
@@ -29,6 +30,7 @@ final class AppState: ObservableObject {
     private var claimedSessions = Set<UUID>()
     var terminating = false
     var saveWithoutChromiumOnQuit = false
+    var webKitDataStores: [UUID: WKWebsiteDataStore] = [:]
     private(set) var windows: [UUID: BrowserReference] = [:]
     var configuration: Configuration { previewConfiguration ?? library.preferences.configuration }
 

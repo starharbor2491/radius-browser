@@ -66,7 +66,7 @@ final class BrowserModel: ObservableObject {
             do { tab = try ChromiumRuntime.shared.makeTab(profileID: session.profileID, privateSessionID: isPrivate ? session.id : nil, dataDirectory: app.dataDirectory, downloads: downloads) }
             catch { tab = UnavailableEngineTab(engine: engine, reason: error.localizedDescription) }
         } else {
-            let dataStore = privateDataStore ?? WKWebsiteDataStore(forIdentifier: session.profileID)
+            let dataStore = privateDataStore ?? app.webKitDataStore(profileID: session.profileID)
             tab = WebTab(dataStore: dataStore, downloads: downloads)
         }
         attach(tab, id: id)

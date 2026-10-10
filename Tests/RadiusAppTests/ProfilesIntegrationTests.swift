@@ -36,8 +36,8 @@ struct ProfilesIntegrationTests {
         let keptHistory = app.library.history.filter { $0.profileID == kept.id }
         let removedPath = try seedChromiumStorage(directory, profileID: removed.id, contents: "remove")
         let keptPath = try seedChromiumStorage(directory, profileID: kept.id, contents: "keep")
-        try await setCookie(profileID: removed.id, value: "remove")
-        try await setCookie(profileID: kept.id, value: "keep")
+        try await setCookie(app: app, profileID: removed.id, value: "remove")
+        try await setCookie(app: app, profileID: kept.id, value: "keep")
         #expect(await app.flush())
 
         try await app.deleteProfile(removed.id, replacingWith: kept.id)
@@ -66,14 +66,14 @@ struct ProfilesIntegrationTests {
         #expect(!FileManager.default.fileExists(atPath: removedPath.path))
         #expect(try Data(contentsOf: keptPath) == Data("keep".utf8))
         #expect(try await cookieValues(profileID: removed.id).isEmpty)
-        #expect(try await cookieValues(profileID: kept.id) == ["keep"])
+        #expect(try await cookieValues(store: app.webKitDataStore(profileID: kept.id)) == ["keep"])
         let database = try LibraryDatabase(url: directory.appendingPathComponent("library.sqlite"))
         let saved = try await database.load()
         #expect(saved.profiles == [kept])
         #expect(saved.sessions.first(where: { $0.id == regular.session.id }) == regular.session)
         #expect(!saved.sessions.contains { $0.id == privateWindow.session.id })
         #expect(!saved.sessions.flatMap(\.tabs).contains { $0.url?.host == "removed.invalid" })
-        try await removeStores([removed.id, kept.id])
+        try await removeStores([removed.id, kept.id], releasing: [app])
     }
 
     @Test func failedMetadataCommitRestoresTheProfileWithoutErasingItsFilesOrLeavingTabsBlocked() async throws {
@@ -122,17 +122,20 @@ struct ProfilesIntegrationTests {
         let expectedBookmarks = app.library.bookmarks, expectedNotes = app.library.notes, expectedHistory = app.library.history
         let clearedPath = try seedChromiumStorage(directory, profileID: cleared.id, contents: "clear")
         let keptPath = try seedChromiumStorage(directory, profileID: kept.id, contents: "keep")
-        try await setCookie(profileID: cleared.id, value: "clear")
-        try await setCookie(profileID: kept.id, value: "keep")
+        try await setCookie(app: app, profileID: cleared.id, value: "clear")
+        try await setCookie(app: app, profileID: kept.id, value: "keep")
 
         try await app.requestWebsiteDataClear(cleared.id)
         try await app.requestWebsiteDataClear(cleared.id)
         #expect(app.library.pendingWebsiteDataClears == [cleared.id])
         #expect(FileManager.default.fileExists(atPath: clearedPath.path))
-        #expect(try await cookieValues(profileID: cleared.id) == ["clear"])
+        #expect(try await cookieValues(store: app.webKitDataStore(profileID: cleared.id)) == ["clear"])
         let database = try LibraryDatabase(url: directory.appendingPathComponent("library.sqlite"))
         #expect(try await database.load().pendingWebsiteDataClears == [cleared.id])
 
+        // The queued profile's old owner must release its context before the
+        // simulated launch retries removal; the other profile stays untouched.
+        app.releaseWebKitDataStore(profileID: cleared.id)
         let restarted = AppState(directory: directory)
         await restarted.load()
         #expect(restarted.ready, Comment(rawValue: restarted.startupError ?? "Restart failed"))
@@ -145,9 +148,9 @@ struct ProfilesIntegrationTests {
         #expect(!FileManager.default.fileExists(atPath: clearedPath.path))
         #expect(try Data(contentsOf: keptPath) == Data("keep".utf8))
         #expect(try await cookieValues(profileID: cleared.id).isEmpty)
-        #expect(try await cookieValues(profileID: kept.id) == ["keep"])
+        #expect(try await cookieValues(store: app.webKitDataStore(profileID: kept.id)) == ["keep"])
         #expect((try await database.load().pendingWebsiteDataClears ?? []).isEmpty)
-        try await removeStores([cleared.id, kept.id])
+        try await removeStores([cleared.id, kept.id], releasing: [app, restarted])
     }
 
     @Test func callbacksCannotReinsertDataWhileTheirProfileIsBeingDeleted() async throws {
@@ -177,8 +180,9 @@ struct ProfilesIntegrationTests {
         let original = BrowserModel(app: app, isPrivate: false)
         defer { original.closeWindow() }
         var oldPage: WebTab? = try #require(original.activeWebTab as? WebTab)
+        weak var originalView = oldPage?.webView
         #expect(oldPage?.webView.configuration.websiteDataStore.identifier == profileID)
-        try await setCookie(profileID: profileID, value: "pending")
+        try await setCookie(app: app, profileID: profileID, value: "pending")
         try await app.requestWebsiteDataClear(profileID)
 
         // A live store cannot be removed. This models another running Radius
@@ -193,7 +197,12 @@ struct ProfilesIntegrationTests {
         #expect(restored.activeWebTab.errorMessage != nil)
 
         original.disposeEngineTabs(); oldPage = nil
+        app.releaseWebKitDataStore(profileID: profileID)
         let deadline = ContinuousClock().now.advanced(by: .seconds(10))
+        while originalView != nil && ContinuousClock().now < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try #require(originalView == nil, "Retry must release the old copy's actual web view first.")
         repeat {
             await restarted.finishPendingProfileDeletions()
             if (restarted.library.pendingWebsiteDataClears ?? []).isEmpty { break }
@@ -203,7 +212,7 @@ struct ProfilesIntegrationTests {
         #expect(restored.activeWebTab is WebTab)
         #expect(try await cookieValues(profileID: profileID).isEmpty)
         restored.disposeEngineTabs()
-        try await removeStores([profileID])
+        try await removeStores([profileID], releasing: [app, restarted])
     }
 
     @Test func switchingProfilesDuringDeletionKeepsBothSourceAndDestinationContextsIntact() async throws {
@@ -264,7 +273,7 @@ struct ProfilesIntegrationTests {
             try await Task.sleep(for: .milliseconds(50))
         }
         try #require(replacementView == nil, "The cookie fixture must release its replacement view before removing website storage.")
-        try await removeStores([profileID])
+        try await removeStores([profileID], releasing: [app])
     }
 
     @Test func stagedChromiumRemovalChangesOnlyTheRestartSnapshotAndARefusedQuitRestoresIt() async throws {
@@ -304,8 +313,10 @@ struct ProfilesIntegrationTests {
         app.saveWithoutChromiumOnQuit = false; app.terminating = false
         try #require(await app.flush())
         let restored = try await database.load()
-        #expect(restored.profiles == originalLibrary.profiles)
-        #expect(restored.sessions == originalLibrary.sessions)
+        var expectedDurableLibrary = originalLibrary
+        expectedDurableLibrary.normalize()
+        #expect(restored.profiles == expectedDurableLibrary.profiles)
+        #expect(restored.sessions == expectedDurableLibrary.sessions)
         #expect(browser.session == originalSession)
         #expect(browser.activeWebTab === cached)
     }
@@ -335,10 +346,11 @@ struct ProfilesIntegrationTests {
         try Data(contents.utf8).write(to: file)
         return file
     }
-    private func setCookie(profileID: UUID, value: String) async throws {
+    private func setCookie(app: AppState, profileID: UUID, value: String) async throws {
         let cookie = try #require(HTTPCookie(properties: [.domain: "profiles.fixture.invalid", .path: "/", .name: "radius-profile-test", .value: value,
                                                         .expires: Date().addingTimeInterval(3600)]))
-        let store = WKWebsiteDataStore(forIdentifier: profileID)
+        try #require(!cookie.isSessionOnly && cookie.expiresDate != nil, "The deletion fixture must use a persistent cookie.")
+        let store = app.webKitDataStore(profileID: profileID)
         try await ProfileCallbackWait<Void>.wait("setting profile cookie") { request in
             store.httpCookieStore.setCookie(cookie) {
                 Task { @MainActor in request.finish(.success(())) }
@@ -371,14 +383,25 @@ struct ProfilesIntegrationTests {
             }
         }
     }
-    private func removeStores(_ ids: [UUID]) async throws {
+    private func removeStores(_ ids: [UUID], releasing apps: [AppState] = []) async throws {
+        for app in apps { for id in ids { app.releaseWebKitDataStore(profileID: id) } }
         for id in ids {
-            try await ProfileCallbackWait<Void>.wait("removing test website storage") { request in
-                WKWebsiteDataStore.remove(forIdentifier: id) { error in
-                    Task { @MainActor in
-                        if let error { request.finish(.failure(error)) }
-                        else { request.finish(.success(())) }
+            let deadline = ContinuousClock().now.advanced(by: .seconds(10))
+            while true {
+                do {
+                    try await ProfileCallbackWait<Void>.wait("removing test website storage") { request in
+                        WKWebsiteDataStore.remove(forIdentifier: id) { error in
+                            Task { @MainActor in
+                                if let error { request.finish(.failure(error)) }
+                                else { request.finish(.success(())) }
+                            }
+                        }
                     }
+                    break
+                } catch let error as NSError where error.domain == "WKWebSiteDataStore" && error.code == 1 && ContinuousClock().now < deadline {
+                    // The fixture has released its owned views and store cache;
+                    // allow WebKit's asynchronous context teardown to finish.
+                    try await Task.sleep(for: .milliseconds(50))
                 }
             }
         }

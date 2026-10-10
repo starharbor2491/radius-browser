@@ -128,19 +128,25 @@ struct SettingsView: View {
         })
     }
     private func clearHistory() {
-        let alert = NSAlert(); alert.messageText = "Clear history for \(model.profile.name)?"; alert.informativeText = "Bookmarks, notes, and other profiles are kept. This cannot be undone."
+        let profileID = model.session.profileID
+        guard let profile = app.library.profiles.first(where: { $0.id == profileID }) else { return }
+        let alert = NSAlert(); alert.messageText = "Clear history for \(profile.name)?"; alert.informativeText = "Bookmarks, notes, and other profiles are kept. This cannot be undone."
         alert.addButton(withTitle: "Clear history"); alert.addButton(withTitle: "Cancel")
-        if alert.runModal() == .alertFirstButtonReturn { app.library.history.removeAll { $0.profileID == model.session.profileID } }
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard !app.terminating, !app.deletingProfileIDs.contains(profileID),
+              app.library.profiles.contains(where: { $0.id == profileID }) else { return }
+        app.library.history.removeAll { $0.profileID == profileID }
     }
     private func clearWebsiteData() {
         guard !model.isPrivate else { app.notice = "Close this private window to discard its temporary website storage."; return }
-        let alert = NSAlert(); alert.messageText = "Clear website data for \(model.profile.name)?"
+        let profileID = model.session.profileID
+        guard let profile = app.library.profiles.first(where: { $0.id == profileID }) else { return }
+        let profileName = profile.name
+        let alert = NSAlert(); alert.messageText = "Clear website data for \(profileName)?"
         alert.informativeText = "Cookies, caches, and local databases in both WebKit and Chromium will be cleared for this profile. You will be signed out. Close other windows using this profile first. Unsaved page work may be lost."
         alert.addButton(withTitle: "Clear website data"); alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         clearing = true
-        let profileID = model.session.profileID
-        let profileName = model.profile.name
         Task {
             defer { clearing = false }
             do {
