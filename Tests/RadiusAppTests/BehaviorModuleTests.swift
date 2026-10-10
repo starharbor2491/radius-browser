@@ -65,6 +65,34 @@ import RadiusCore
     #expect(app.library.notes.count == 1)
 }
 
+@Test @MainActor func tabReplacementPreflightsDisabledDependentsAndKeepsTabsAcrossRemoval() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("radius-tab-replacement-" + UUID().uuidString)
+    let previous = AppDelegate.state
+    defer { AppDelegate.state = previous; try? FileManager.default.removeItem(at: directory) }
+    let app = AppState(directory: directory)
+    let repo = try ModuleRepository(root: directory.appendingPathComponent("Modules")); app.repository = repo
+    let standard = ModuleManifest(id: "org.test.standard", name: "Standard", summary: "Tabs", capability: .tabSystem, runtime: .declarative)
+    var tree = standard; tree.id = "org.test.tree"; tree.name = "Tree"
+    let dependent = ModuleManifest(id: "org.test.dependent", name: "Dependent", summary: "Uses standard tabs", capability: .startWidget, dependencies: [standard.id], runtime: .declarative)
+    let normalBytes = Data(#"{"formatVersion":1,"treeTabs":false}"#.utf8), treeBytes = Data(#"{"formatVersion":1,"treeTabs":true}"#.utf8)
+    try repo.install(standard, payload: normalBytes)
+    try repo.install(dependent, enabled: false, payload: Data(#"{"formatVersion":1,"widgetTitle":"Dependent","widgetBody":"Uses the original provider"}"#.utf8))
+    app.catalog = [standard, tree]; app.modulePayloads = [standard.id: normalBytes, tree.id: treeBytes]
+    app.installedModules = try repo.installed()
+    let parent = BrowserTab(title: "Pinned", pinned: true), child = BrowserTab(title: "Child", parentID: parent.id)
+    app.library.sessions = [WindowSession(profileID: app.library.profiles[0].id, tabs: [parent, child])]
+    let sessions = app.library.sessions
+    #expect(throws: (any Error).self) { try app.replaceTabProviderApproved(currentID: standard.id, replacementID: tree.id, removeCurrent: true) }
+    #expect(try repo.installed().first(where: { $0.id == standard.id })?.enabled == true)
+    #expect(try repo.installed().allSatisfy { $0.id != tree.id })
+    #expect(app.library.sessions == sessions)
+    try repo.uninstall(dependent.id); app.installedModules = try repo.installed()
+    try app.replaceTabProviderApproved(currentID: standard.id, replacementID: tree.id, removeCurrent: true)
+    #expect(try repo.installed().map(\.id) == [tree.id])
+    #expect(try repo.definition(for: tree.id).treeTabs == true)
+    #expect(app.library.sessions == sessions)
+}
+
 private func completeBehaviorFixture(_ bytes: Data, capability: ModuleCapability) throws -> Data {
     var program = try ModuleProgram.decode(bytes)
     if capability == .notes {

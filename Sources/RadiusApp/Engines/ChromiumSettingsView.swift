@@ -42,29 +42,7 @@ struct ChromiumSettingsView: View {
         busy = true
         Task {
             defer { busy = false }
-            for index in app.library.profiles.indices { app.library.profiles[index].engineID = .webkit }
-            for sessionIndex in app.library.sessions.indices {
-                for tabIndex in app.library.sessions[sessionIndex].tabs.indices {
-                    let tab = app.library.sessions[sessionIndex].tabs[tabIndex]
-                    guard tab.engineID == .chromium else { continue }
-                    app.library.sessions[sessionIndex].tabs[tabIndex].engineID = .webkit
-                    if let url = tab.url, !AddressResolver.isWebURL(url) {
-                        app.library.sessions[sessionIndex].tabs[tabIndex].url = nil
-                        app.library.sessions[sessionIndex].tabs[tabIndex].title = "New tab"
-                    }
-                }
-            }
-            for model in app.windows.values.compactMap(\.model) {
-                for descriptor in model.session.tabs where descriptor.engineID == .chromium {
-                    if let url = descriptor.url, !AddressResolver.isWebURL(url),
-                       let index = model.session.tabs.firstIndex(where: { $0.id == descriptor.id }) {
-                        model.session.tabs[index].url = nil; model.session.tabs[index].title = "New tab"
-                    }
-                    model.changeEngine(descriptor.id, to: .webkit)
-                }
-                for index in model.closedTabs.indices { model.closedTabs[index].engineID = .webkit }
-                model.address = model.selectedTab.url?.absoluteString ?? ""
-            }
+            app.prepareForChromiumRemoval()
             guard await app.flush() else { message = app.notice ?? "Could not save the engine change. Retry before restarting."; return }
             message = "All tabs now use WebKit. Use Installation and updates to stage a WebKit-only Radius installer."
         }

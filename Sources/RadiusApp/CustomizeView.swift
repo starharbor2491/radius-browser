@@ -129,14 +129,14 @@ struct CustomizeView: View {
                     saved.requiredModuleIDs = requirements
                     app.library.preferences.savedConfigurations.append(saved)
                 }.disabled(setupName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                Button("Export…") { app.perform { exportSetup(SetupPack(name: setupName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "My setup" : String(setupName.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100)), configuration: draft, requiredModuleIDs: requirements)) } }
+                Button("Export…") { app.perform { try exportSetup(SetupPack(name: setupName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "My setup" : String(setupName.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100)), configuration: draft, requiredModuleIDs: requirements)) } }
                 Button("Import…") { importSetup() }
             }
             Text("Setup files contain appearance, layout, and required module IDs. No history, notes, cookies, or permission grants are shared.").font(.caption).foregroundStyle(.secondary)
             if !requirements.isEmpty {
                 Text("Required modules").font(.headline)
                 ForEach(requirements, id: \.self) { id in
-                    HStack { Text(app.catalog.first(where: { $0.id == id })?.name ?? id).font(.caption); Spacer(); Button("Remove requirement") { requirements.removeAll { $0 == id } }.font(.caption) }
+                    HStack { Text(app.catalog.first(where: { $0.id == id })?.name ?? id).font(.caption); Spacer(); Button("Remove requirement") { change { _ in }; requirements.removeAll { $0 == id } }.font(.caption) }
                 }
             }
             ForEach(app.library.preferences.savedConfigurations) { saved in
@@ -181,9 +181,11 @@ struct CustomizeView: View {
             guard (try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) <= 64 * 1024 else { throw ValidationError("Setup packs must be smaller than 64 KB.") }
             let pack = try SetupPack.decode(Data(contentsOf: url))
             let required = pack.requiredModuleIDs ?? []
-            let plan = try app.moduleInstallationPlan(for: required)
+            let available = required.filter { id in app.catalog.contains(where: { $0.id == id }) || app.installedModules.contains(where: { $0.id == id }) }
+            let missing = required.filter { !available.contains($0) }
+            let plan = (try? app.moduleInstallationPlan(for: available)) ?? []
             let alert = NSAlert(); alert.messageText = "Preview \(pack.name)"
-            alert.informativeText = "This setup changes appearance and layout.\n\nRequired packages:\n" + (plan.isEmpty ? "None" : plan.map { "\($0.name) · \($0.publisher)" }.joined(separator: "\n")) + "\n\nPackages and permissions are reviewed before Apply. Importing this preview does not install anything."
+            alert.informativeText = "This setup changes appearance and layout.\n\nRequired packages:\n" + (required.isEmpty ? "None" : (plan.map { "\($0.name) · \($0.publisher)" } + missing.map { "Unavailable: " + $0 }).joined(separator: "\n")) + "\n\nAdd unavailable catalogs in Modules or remove their requirements in Saved setups. Packages and permissions are reviewed before Apply. Importing this preview does not install anything."
             alert.addButton(withTitle: "Preview setup"); alert.addButton(withTitle: "Cancel")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
             change { $0 = pack.configuration }; setupName = pack.name; requirements = required

@@ -55,7 +55,8 @@ enum ChromiumAcceptance {
     }
     private static func evaluate(_ tab: ChromiumTab, _ expression: String) async throws -> String {
         let data = try await tab.request("Runtime.evaluate", parameters: [
-            "expression": "(async () => { return \(expression); })()", "awaitPromise": true, "returnByValue": true
+            "expression": "(async () => { return \(expression); })()", "awaitPromise": true, "returnByValue": true,
+            "userGesture": true
         ])
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               object["exceptionDetails"] == nil, let result = object["result"] as? [String: Any],

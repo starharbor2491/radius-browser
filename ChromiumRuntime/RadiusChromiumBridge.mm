@@ -256,6 +256,7 @@ class Client final : public CefClient, public CefLifeSpanHandler,
       // Chrome owns these complete auxiliary windows and their tab strip.
       // Preserve their actual WebContents/tab IDs for extension browser APIs.
       for (const auto& command : {std::pair{"IDC_EXIT","quit"},
+                                  std::pair{"IDC_NEW_WINDOW","newWindow"},
                                   std::pair{"IDC_NEW_INCOGNITO_WINDOW","privateWindow"},
                                   std::pair{"IDC_SHOW_DOWNLOADS","downloads"}}) {
         if (id == cef_id_for_command_id_name(command.first)) {
@@ -564,10 +565,13 @@ class WindowDelegate final : public CefWindowDelegate {
     layout->SetFlexForView(page_->browser_view,1);
     NSView* native = (NSView*)window->GetWindowHandle();
     page_->view.browserWindow = [native window];
-    page_->view.browserWindow.hasShadow = NO;
-    page_->view.browserWindow.excludedFromWindowsMenu = YES;
-    page_->view.browserWindow.collectionBehavior = NSWindowCollectionBehaviorFullScreenAuxiliary;
-    [page_->view synchronizeBrowserWindow];
+    if (page_->view.auxiliary) { window->Show(); }
+    else {
+      page_->view.browserWindow.hasShadow = NO;
+      page_->view.browserWindow.excludedFromWindowsMenu = YES;
+      page_->view.browserWindow.collectionBehavior = NSWindowCollectionBehaviorFullScreenAuxiliary;
+      [page_->view synchronizeBrowserWindow];
+    }
   }
   void OnWindowActivationChanged(CefRefPtr<CefWindow>,bool active) override {
     if (page_ && active) {
@@ -591,11 +595,11 @@ class WindowDelegate final : public CefWindowDelegate {
     return host->TryCloseBrowser();
   }
   CefSize GetPreferredSize(CefRefPtr<CefView>) override { return CefSize(800,600); }
-  cef_show_state_t GetInitialShowState(CefRefPtr<CefWindow>) override { return CEF_SHOW_STATE_HIDDEN; }
-  bool IsFrameless(CefRefPtr<CefWindow>) override { return true; }
-  bool CanResize(CefRefPtr<CefWindow>) override { return false; }
-  bool CanMaximize(CefRefPtr<CefWindow>) override { return false; }
-  bool CanMinimize(CefRefPtr<CefWindow>) override { return false; }
+  cef_show_state_t GetInitialShowState(CefRefPtr<CefWindow>) override { return page_ && page_->view.auxiliary ? CEF_SHOW_STATE_NORMAL : CEF_SHOW_STATE_HIDDEN; }
+  bool IsFrameless(CefRefPtr<CefWindow>) override { return !page_ || !page_->view.auxiliary; }
+  bool CanResize(CefRefPtr<CefWindow>) override { return page_ && page_->view.auxiliary; }
+  bool CanMaximize(CefRefPtr<CefWindow>) override { return page_ && page_->view.auxiliary; }
+  bool CanMinimize(CefRefPtr<CefWindow>) override { return page_ && page_->view.auxiliary; }
   cef_runtime_style_t GetWindowRuntimeStyle() override { return CEF_RUNTIME_STYLE_CHROME; }
  private:
   Page* page_;

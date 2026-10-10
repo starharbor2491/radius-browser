@@ -322,7 +322,11 @@ final class DistributionManager: ObservableObject {
         let values = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
         guard values.isRegularFile == true, values.isSymbolicLink != true,
               let size = values.fileSize, size > 0, size <= 64 else { throw ValidationError("The saved engine security version is invalid. Use Recovery to inspect the update files.") }
-        let accepted = try JSONDecoder().decode(Int.self, from: Data(contentsOf: file))
+        let handle = try FileHandle(forReadingFrom: file)
+        defer { try? handle.close() }
+        let data = try handle.read(upToCount: 65) ?? Data()
+        guard !data.isEmpty, data.count <= 64 else { throw ValidationError("The saved engine security version is invalid.") }
+        let accepted = try JSONDecoder().decode(Int.self, from: data)
         guard accepted >= 0 else { throw ValidationError("The saved security version is invalid.") }
         return max(currentEpoch, accepted)
     }

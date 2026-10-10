@@ -253,10 +253,10 @@ final class AppState: ObservableObject {
             if approveModules(plan) { try installApprovedModule(package.manifest.id) }
         }
     }
-    func approveModules(_ manifests: [ModuleManifest], local: Bool = false, activateDependencies: Bool = true, activateRequirements: Bool = false) -> Bool {
+    func approveModules(_ manifests: [ModuleManifest], local: Bool = false, activateDependencies: Bool = true, activateRequirements: Bool = false, activationTitle: String? = nil) -> Bool {
         guard !manifests.isEmpty else { return true }
         let alert = NSAlert()
-        alert.messageText = activateRequirements ? "Apply this setup's modules?" : manifests.count == 1 ? "Install or update \(manifests[0].name)?" : "Install or update \(manifests.count) packages?"
+        alert.messageText = activateRequirements ? activationTitle ?? "Apply this setup's modules?" : manifests.count == 1 ? "Install or update \(manifests[0].name)?" : "Install or update \(manifests.count) packages?"
         let permissions = Set(manifests.compactMap { $0.capability.permission }).sorted()
         let unverified = local || manifests.contains { !bundledModuleIDs.contains($0.id) }
         let requiredIDs = Set(manifests.flatMap(\.dependencies))
@@ -267,10 +267,10 @@ final class AppState: ObservableObject {
             packageDetails += "\(manifest.name) v\(manifest.version) · \(manifest.publisher)\n"
             if !manifest.dependencies.isEmpty { packageDetails += "Requires: " + manifest.dependencies.joined(separator: ", ") + "\n" }
             if let current = installedModules.first(where: { $0.id == manifest.id }), !current.enabled {
-                packageDetails += activateRequirements ? "Applying enables this required module.\n" : requiredIDs.contains(manifest.id) && activateDependencies ? "This required dependency is currently disabled; approving enables it.\n" : "Your disabled choice will be kept.\n"
+                packageDetails += activateRequirements ? "Approval enables this required module.\n" : requiredIDs.contains(manifest.id) && activateDependencies ? "This required dependency is currently disabled; approving enables it.\n" : "Your disabled choice will be kept.\n"
             }
             if manifest.capability.isExclusive, let active = installedModules.first(where: { $0.enabled && $0.manifest.capability == manifest.capability && $0.id != manifest.id }) {
-                packageDetails += activateRequirements ? "Applying replaces \(active.manifest.name) immediately. Browser data is kept.\n" : requiredIDs.contains(manifest.id) && activateDependencies ? "Required dependency replaces \(active.manifest.name). Browser data is kept.\n" : "Installs alongside \(active.manifest.name). Choose Replace before it becomes active.\n"
+                packageDetails += activateRequirements ? "Approval replaces \(active.manifest.name) immediately. Browser data is kept.\n" : requiredIDs.contains(manifest.id) && activateDependencies ? "Required dependency replaces \(active.manifest.name). Browser data is kept.\n" : "Installs alongside \(active.manifest.name). Choose Replace before it becomes active.\n"
             }
             packageDetails += "\n"
         }
@@ -290,7 +290,7 @@ final class AppState: ObservableObject {
             manager.ensureLayout(for: container); details.setFrameSize(NSSize(width: 500, height: max(scrollHeight, manager.usedRect(for: container).height + 16)))
         }
         scroll.documentView = details; alert.accessoryView = scroll
-        alert.addButton(withTitle: activateRequirements ? "Approve and apply" : "Approve and install"); alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: activateRequirements ? activationTitle == nil ? "Approve and apply" : "Approve and activate" : "Approve and install"); alert.addButton(withTitle: "Cancel")
         return alert.runModal() == .alertFirstButtonReturn
     }
     func toggleModule(_ module: InstalledModule) {
@@ -360,8 +360,10 @@ final class AppState: ObservableObject {
             return
         }
         let alert = NSAlert(); alert.messageText = "Uninstall \(module.manifest.name)?"
-        alert.informativeText = "The module stops and its installed package payload is deleted. Your tabs and browser data are kept. Choose whether to retain its settings and saved notes."
-        alert.addButton(withTitle: "Uninstall and keep data"); alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Uninstall and delete module data")
+        alert.informativeText = "The module stops and its installed package payload is deleted. Your tabs and browser data are kept. " +
+            (module.manifest.capability == .notes ? "Deleting data also permanently removes all saved notes in every profile." : "Choose whether to retain its settings.")
+        alert.addButton(withTitle: "Uninstall and keep data"); alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: module.manifest.capability == .notes ? "Uninstall and delete all notes" : "Uninstall and delete module data")
         let response = alert.runModal()
         guard response != .alertSecondButtonReturn else { return }
         perform {

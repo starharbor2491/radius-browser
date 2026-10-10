@@ -265,7 +265,7 @@ final class BrowserModel: ObservableObject {
             app.notice = "Generated pages cannot be reopened in another engine. Open the original website instead."; return
         }
         if engine == .chromium && !ChromiumRuntime.shared.isInstalled(in: app.dataDirectory) {
-            app.notice = "Chromium requires the optional Radius development build with a runtime for this Mac's architecture. See Settings → Browsing engines."; return
+            app.notice = "Install Chromium in Settings → Browsing engines → Installation and updates, then reopen this tab."; return
         }
         if descriptor.url != nil {
             let alert = NSAlert(); alert.messageText = "Reopen this page in \(engine.label)?"

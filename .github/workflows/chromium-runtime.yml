@@ -30,8 +30,20 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+      - name: Restore pinned Chromium SDK
+        id: cef-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/radius-cef-runtime
+          key: radius-cef154-chrome-2-${{ matrix.arch }}
       - name: Build pinned optional Chromium package
         run: python3 scripts/chromium-runtime.py --arch "${{ matrix.arch }}" --work-dir "$RUNNER_TEMP/radius-cef-runtime"
+      - name: Cache verified Chromium SDK
+        if: steps.cef-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/radius-cef-runtime
+          key: radius-cef154-chrome-2-${{ matrix.arch }}
       - name: Test native shell
         run: ./scripts/test.sh
       - name: Build universal Radius application

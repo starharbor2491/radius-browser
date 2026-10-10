@@ -59,9 +59,15 @@ final class ChromiumTab: BrowserEngineTab {
                 let tab = ChromiumTab(runtime: parent.runtime, page: child, downloads: parent.downloads, profileID: parent.profileID, privateSessionID: parent.privateSessionID)
                 if tab.isAuxiliary {
                     tab.onNotice = parent.onNotice
-                    tab.onBrowserCommand = { [weak parent] command in
-                        if command == "quit" { NSApp.terminate(nil) }
-                        else { parent?.onBrowserCommand?(command) }
+                    tab.onBrowserCommand = { [weak tab] command in
+                        switch command {
+                        case "quit": NSApp.terminate(nil)
+                        case "closeTab", "closeWindow": tab?.dispose()
+                        case "newWindow": Self.performApplicationMenuItem("New window")
+                        case "privateWindow": Self.performApplicationMenuItem("New private window")
+                        case "downloads": tab?.downloads.showWindow()
+                        default: break
+                        }
                     }
                     tab.allowPopups = parent.allowPopups
                     tab.updatePopupPolicy()
@@ -73,6 +79,18 @@ final class ChromiumTab: BrowserEngineTab {
                 return accepted ? 1 : 0
             }
         })
+    }
+    private static func performApplicationMenuItem(_ title: String) {
+        func perform(in menu: NSMenu) -> Bool {
+            for (index, item) in menu.items.enumerated() {
+                if item.title == title, item.isEnabled { menu.performActionForItem(at: index); return true }
+                if let submenu = item.submenu, perform(in: submenu) { return true }
+            }
+            return false
+        }
+        // Dispatch the app's existing File command, which remains available
+        // after the originating SwiftUI browser window has closed.
+        if let menu = NSApp.mainMenu { _ = perform(in: menu) }
     }
     private func command(_ command: Int, text: String = "", value: Double = 0) {
         guard let page, let api = runtime.api else { return }

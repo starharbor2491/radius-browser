@@ -224,7 +224,13 @@ extension AppState {
         return bytes
     }
     func presentTabReplacementBeforeRemoval(_ current: InstalledModule, removeAfterReplacement: Bool = true) {
-        let replacements = catalog.filter { $0.id != current.id && $0.capability == .tabSystem && $0.runtime == .declarative }
+        let dependents = installedModules.filter { $0.manifest.dependencies.contains(current.id) && (removeAfterReplacement || $0.enabled) }
+        guard dependents.isEmpty else {
+            notice = (removeAfterReplacement ? "Remove these dependent modules first: " : "Disable these dependent modules first: ") + dependents.map { $0.manifest.name }.joined(separator: ", ")
+            return
+        }
+        let candidates = Set(catalog.map(\.id) + installedModules.map(\.id))
+        let replacements = candidates.compactMap(moduleManifestCandidate).filter { $0.id != current.id && $0.capability == .tabSystem && $0.runtime == .declarative }.sorted { $0.name < $1.name }
         guard !replacements.isEmpty else { notice = "Install a compatible tab system before removing the active one. Your tabs are kept."; return }
         let alert = NSAlert(); alert.messageText = "Choose a replacement for \(current.manifest.name)"
         alert.informativeText = "Your open tabs, pinned tabs, tree relationships, and split panes are kept. The chosen replacement is validated before activation. " + (removeAfterReplacement ? "The current package is then removed." : "The current package stays installed and becomes inactive.")
@@ -234,12 +240,22 @@ extension AppState {
         guard alert.runModal() == .alertFirstButtonReturn, replacements.indices.contains(popup.indexOfSelectedItem) else { return }
         let replacement = replacements[popup.indexOfSelectedItem]
         perform {
-            let plan = try moduleInstallationPlan(for: [replacement.id])
-            guard approveModules(plan) else { return }
-            try installApprovedModule(replacement.id)
-            guard let repository else { throw ValidationError("Repair module storage first.") }
-            try repository.replaceProvider(role: .tabSystem, with: replacement.id)
-            if removeAfterReplacement { try repository.uninstall(current.id) }
+            let requirements = try validateModuleRequirements(for: [replacement.id])
+            guard approveModules(requirements, activateRequirements: true, activationTitle: "Activate \(replacement.name)?") else { return }
+            try replaceTabProviderApproved(currentID: current.id, replacementID: replacement.id, removeCurrent: removeAfterReplacement)
+        }
+    }
+    func replaceTabProviderApproved(currentID: String, replacementID: String, removeCurrent: Bool) throws {
+        guard let repository, currentID != replacementID,
+              let current = installedModules.first(where: { $0.id == currentID && $0.enabled && $0.manifest.capability == .tabSystem }),
+              moduleManifestCandidate(replacementID)?.capability == .tabSystem else { throw ValidationError("Choose a compatible replacement for the active tab system.") }
+        let dependents = installedModules.filter { $0.manifest.dependencies.contains(current.id) && (removeCurrent || $0.enabled) }
+        guard dependents.isEmpty else { throw ValidationError("Resolve these dependent modules before replacing the tab system: " + dependents.map { $0.manifest.name }.joined(separator: ", ")) }
+        let requirements = try validateModuleRequirements(for: [replacementID])
+        try withAtomicModuleChanges(for: Array(Set(requirements.map(\.id) + [currentID]))) {
+            try installApprovedModule(replacementID)
+            try repository.replaceProvider(role: .tabSystem, with: replacementID)
+            if removeCurrent { try repository.uninstall(currentID) }
             installedModules = try repository.installed()
         }
     }

@@ -14,7 +14,7 @@ info = plistlib.loads(info_path.read_bytes())
 build = int(os.environ.get('RADIUS_BUILD_NUMBER', info['CFBundleVersion']))
 version = os.environ.get('RADIUS_VERSION', info['CFBundleShortVersionString'])
 epoch = int(os.environ.get('RADIUS_SECURITY_EPOCH', '154'))
-if build < 1 or epoch < 154 or not re.fullmatch(r'\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?', version):
+if not 1 <= build <= 2**63 - 1 or not 154 <= epoch <= 2**63 - 1 or len(version) > 64 or not re.fullmatch(r'\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?', version):
     raise ValueError('Invalid release version, build number, or security epoch')
 manifest_path = app / 'Contents/Frameworks/Chromium.radiusengine/Contents/Resources/manifest.json'
 architecture = 'universal'

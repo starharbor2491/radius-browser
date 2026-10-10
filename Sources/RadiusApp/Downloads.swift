@@ -35,6 +35,14 @@ final class DownloadItem: ObservableObject, Identifiable {
 @MainActor
 final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
     @Published var items: [DownloadItem] = []
+    private var standaloneWindow: DownloadWindowController?
+    func showWindow() {
+        if standaloneWindow == nil {
+            standaloneWindow = DownloadWindowController(center: self) { [weak self] in self?.standaloneWindow = nil }
+        }
+        standaloneWindow?.showWindow(nil)
+        standaloneWindow?.window?.makeKeyAndOrderFront(nil)
+    }
     func track(_ download: WKDownload) {
         let item = DownloadItem(download); items.insert(item, at: 0); download.delegate = self
         item.progressObservation = download.progress.observe(\.fractionCompleted, options: [.new]) { [weak item] _, change in
@@ -225,4 +233,24 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
         }
     }
     var hasActive: Bool { items.contains(where: \.awaitsTerminalUpdate) }
+}
+
+/// Auxiliary Chrome windows can outlive their original Radius tab. Their
+/// native download list therefore has its own presentation and lifetime.
+@MainActor
+private final class DownloadWindowController: NSWindowController, NSWindowDelegate {
+    private let onClose: @MainActor () -> Void
+    init(center: DownloadCenter, onClose: @escaping @MainActor () -> Void) {
+        self.onClose = onClose
+        let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 460, height: 500),
+                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.title = "Downloads — Radius"
+        window.isReleasedWhenClosed = false
+        super.init(window: window)
+        window.contentView = NSHostingView(rootView: DownloadsPanel(center: center))
+        window.delegate = self
+        window.center()
+    }
+    required init?(coder: NSCoder) { nil }
+    func windowWillClose(_ notification: Notification) { onClose() }
 }

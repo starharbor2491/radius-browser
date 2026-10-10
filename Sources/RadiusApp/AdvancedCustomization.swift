@@ -127,9 +127,9 @@ struct ToolbarCustomizer: View {
             Text(item.command.label).font(.caption).lineLimit(1)
             Spacer(minLength: 0)
             Menu { ForEach(ToolbarRegion.allCases, id: \.self) { region in Button(region.label) { modify(item.id) { $0.region = region } } } } label: { Image(systemName: "arrow.up.arrow.down") }.menuStyle(.borderlessButton).fixedSize().accessibilityLabel("Placement for \(item.command.label)")
-            Button { move(item.id, by: -1) } label: { Image(systemName: "arrow.up") }.help("Move earlier").disabled(!canMove(item, by: -1))
-            Button { move(item.id, by: 1) } label: { Image(systemName: "arrow.down") }.help("Move later").disabled(!canMove(item, by: 1))
-            Button { layout.toolbarComponents = components.filter { $0.id != item.id } } label: { Image(systemName: "xmark") }.help("Remove \(item.command.label)")
+            Button { move(item.id, by: -1) } label: { Image(systemName: "arrow.up") }.help("Move earlier").accessibilityLabel("Move \(item.command.label) earlier").disabled(!canMove(item, by: -1))
+            Button { move(item.id, by: 1) } label: { Image(systemName: "arrow.down") }.help("Move later").accessibilityLabel("Move \(item.command.label) later").disabled(!canMove(item, by: 1))
+            Button { layout.toolbarComponents = components.filter { $0.id != item.id } } label: { Image(systemName: "xmark") }.help("Remove \(item.command.label)").accessibilityLabel("Remove \(item.command.label)")
         }.buttonStyle(.plain).padding(4).draggable(item.id.uuidString)
     }
     private func modify(_ id: UUID, mutation: (inout ToolbarComponent) -> Void) {
