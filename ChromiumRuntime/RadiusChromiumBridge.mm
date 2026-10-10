@@ -35,6 +35,8 @@
 - (void)synchronizeBrowserWindow;
 @end
 @implementation RadiusChromiumHostView
+@synthesize browserWindow;
+@synthesize contentHidden;
 - (void)synchronizeBrowserWindow {
   NSWindow* child = self.browserWindow;
   if (!child) return;

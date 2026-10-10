@@ -21,24 +21,48 @@ struct RadiusUpdater {
         defer {
             if helper.deletingLastPathComponent() == journal.deletingLastPathComponent(), helper.lastPathComponent.hasPrefix("RadiusUpdater-") {
                 try? FileManager.default.removeItem(at: helper)
+                try? FileManager.default.removeItem(at: helper.appendingPathExtension("ready"))
             }
         }
         do {
             let team = try ReleaseTrust.publisherTeam(of: currentApp)
             try ReleaseTrust.verifySignature(URL(fileURLWithPath: args[0]), team: team, identifier: "org.radius.updater", notarized: false)
-            let current = try ReleaseTrust.metadata(of: currentApp)
+            let current = try ReleaseTrust.metadata(of: currentApp, requireCompatibleArchitecture: false)
             let architecture: String
             #if arch(arm64)
             architecture = "arm64"
             #else
             architecture = "x86_64"
             #endif
+            let sourceRelease = try ReleaseTrust.metadata(of: source)
             let verify: (URL) throws -> Void = { app in
                 try ReleaseTrust.verifyBundleTree(app)
                 try ReleaseTrust.verifySignature(app, team: team, identifier: "org.radius.browser", notarized: true)
-                try ReleaseTrust.metadata(of: app).validate(current: current, minimumEpoch: epoch, architecture: architecture)
+                let release = try ReleaseTrust.metadata(of: app)
+                guard release == sourceRelease else { throw ValidationError("The staged application changed after approval.") }
+                try release.validate(current: current, minimumEpoch: epoch, architecture: architecture)
+            }
+            let verifyExisting: (URL) throws -> Void = { app in
+                // Restoring the original app after a failed rename is not
+                // activating an older candidate. It remains unlaunched; all new
+                // candidates must meet the current build/security floor above.
+                try ReleaseTrust.verifyBundleTree(app)
+                try ReleaseTrust.verifySignature(app, team: team, identifier: "org.radius.browser", notarized: true)
             }
             try verify(source)
+            let verifyInstalledForUpdate: (URL) throws -> Void = { app in
+                try verifyExisting(app)
+                let installed = try ReleaseTrust.metadata(of: app, requireCompatibleArchitecture: false)
+                try sourceRelease.validate(current: installed, minimumEpoch: epoch, architecture: architecture)
+            }
+            if FileManager.default.fileExists(atPath: destination.path) { try verifyInstalledForUpdate(destination) }
+            let ready = helper.appendingPathExtension("ready")
+            guard helper.deletingLastPathComponent() == journal.deletingLastPathComponent(),
+                  helper.lastPathComponent.hasPrefix("RadiusUpdater-"),
+                  UUID(uuidString: String(helper.lastPathComponent.dropFirst(14))) != nil else {
+                throw ValidationError("The updater must be launched from its private staging directory.")
+            }
+            try Data("READY".utf8).write(to: ready, options: [.atomic])
             let clock = ContinuousClock()
             let deadline = clock.now.advanced(by: .seconds(120))
             while kill(parent, 0) == 0 {
@@ -46,8 +70,8 @@ struct RadiusUpdater {
                 try await Task.sleep(for: .milliseconds(100))
             }
             guard errno == ESRCH else { throw ValidationError("Could not confirm that Radius has quit. The update was left staged.") }
-            try AppReplacementTransaction.recover(journalURL: journal, expectedDestination: destination, verify: verify)
-            try AppReplacementTransaction.install(source: source, destination: destination, journalURL: journal, verify: verify)
+            try AppReplacementTransaction.recover(journalURL: journal, expectedDestination: destination, verify: verify, verifyExisting: verifyExisting)
+            try AppReplacementTransaction.install(source: source, destination: destination, journalURL: journal, verify: verify, verifyExisting: verifyInstalledForUpdate)
             // Keep the security floor beside browser data. Removing Chromium must
             // not enable a subsequent older Chromium installation.
             let floor = journal.deletingLastPathComponent().appendingPathComponent("security-floor.json")

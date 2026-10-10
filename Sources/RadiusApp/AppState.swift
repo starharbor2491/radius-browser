@@ -9,7 +9,7 @@ final class AppState: ObservableObject {
     @Published var ready = false
     @Published var startupError: String?
     @Published var notice: String?
-    @Published var installedModules: [InstalledModule] = [] { didSet { resourceWorkerGeneration = UUID() } }
+    @Published var installedModules: [InstalledModule] = [] { didSet { resourceWorkerGeneration = UUID(); synchronizeModuleContributions(previous: oldValue) } }
     @Published private(set) var resourceWorkerGeneration = UUID()
     @Published var previewConfiguration: Configuration?
     @Published var deletingProfileIDs = Set<UUID>()
@@ -17,6 +17,7 @@ final class AppState: ObservableObject {
     @Published var catalog: [ModuleManifest] = []
     @Published var communityCatalogNames: [String] = []
     var bundledModuleIDs = Set<String>()
+    var suspendingModuleContributions = false
     var modulePayloads: [String: Data] = [:]
     private var readerRequests: [UUID: (moduleID: String, task: Task<String, any Error>)] = [:]
     private var startupTask: Task<Void, Never>?
@@ -178,6 +179,7 @@ final class AppState: ObservableObject {
     func install(_ id: String) {
         perform {
             guard let repository else { throw ValidationError("Open Recovery to repair module storage first.") }
+            _ = try validateModuleRequirements(for: [id], replacingRootProviders: false, preparingActivation: installedModules.first(where: { $0.id == id })?.enabled ?? true)
             let plan = try repository.installationPlan(for: id, catalog: catalog)
             if !approveModules(plan, activateDependencies: installedModules.first(where: { $0.id == id })?.enabled ?? true) { return }
             try installApprovedModule(id)
@@ -186,35 +188,37 @@ final class AppState: ObservableObject {
     /// Called after the install dialog approves the bundled package and any dependencies.
     func installApprovedModule(_ id: String) throws {
         guard let repository else { throw ValidationError("Open Recovery to repair module storage first.") }
-        let plan = try repository.installationPlan(for: id, catalog: catalog)
-        defer { resourceWorkerGeneration = UUID() }
         let activate = installedModules.first { $0.id == id }?.enabled ?? true
-        // Validate every candidate before stopping any healthy worker. Existing
-        // disabled dependencies can be enabled without reinstalling their code.
-        for manifest in plan {
-            if let existing = installedModules.first(where: { $0.id == manifest.id && $0.manifest == manifest }) {
-                try validateModulePayload(existing, requireEnabled: false)
-                continue
+        let requirements = try validateModuleRequirements(for: [id], replacingRootProviders: false, preparingActivation: activate)
+        let plan = try repository.installationPlan(for: id, catalog: catalog)
+        try withAtomicModuleChanges(for: requirements.map(\.id)) {
+            // Install every code candidate before activating dependency roles. An
+            // updated dependent must release its old provider before replacement.
+            for manifest in plan {
+                if installedModules.contains(where: { $0.id == manifest.id && $0.manifest == manifest }) { continue }
+                ResourceWorker.stopAll(moduleID: manifest.id); cancelReaderRequests(moduleID: manifest.id)
+                let previous = installedModules.first(where: { $0.id == manifest.id })?.enabled
+                try repository.install(manifest, enabled: previous, payload: modulePayloads[manifest.id])
             }
-            guard let payload = modulePayloads[manifest.id] else { throw ValidationError("The catalog is missing \(manifest.name)'s package payload.") }
-            if manifest.runtime == .behaviorProgram { try ModuleProgram.decode(payload).validate(capability: manifest.capability) }
-            else if manifest.runtime == .declarative { try validateDefinitionForPlatform(ModuleDefinition.decode(payload, capability: manifest.capability)) }
-            else { guard manifest.runtime?.isNative == true, bundledModuleIDs.contains(manifest.id), !payload.isEmpty, payload.count <= 8 * 1024 * 1024 else { throw ValidationError("This native package is not a trusted bundled worker.") } }
-        }
-        for manifest in plan {
-            if let existing = installedModules.first(where: { $0.id == manifest.id && $0.manifest == manifest }) {
-                if manifest.id != id && activate && !existing.enabled {
-                    if manifest.capability.isExclusive { try repository.replaceProvider(role: manifest.capability, with: manifest.id) }
-                    else { try repository.setEnabled(manifest.id, true) }
+            installedModules = try repository.installed()
+            if activate {
+                for manifest in requirements where manifest.id != id {
+                    guard let installed = installedModules.first(where: { $0.id == manifest.id }) else { throw ValidationError("A required package did not install.") }
+                    if !installed.enabled {
+                        if manifest.capability.isExclusive {
+                            if manifest.capability == .resourceMonitor { try replaceResourceProvider(with: manifest.id) }
+                            else { try repository.replaceProvider(role: manifest.capability, with: manifest.id) }
+                        } else { try repository.setEnabled(manifest.id, true) }
+                        installedModules = try repository.installed()
+                    }
                 }
-                continue
+                if let target = installedModules.first(where: { $0.id == id }), !target.enabled,
+                   !target.manifest.capability.isExclusive || !installedModules.contains(where: { $0.enabled && $0.manifest.capability == target.manifest.capability && $0.id != id }) {
+                    try repository.setEnabled(id, true)
+                }
             }
-            ResourceWorker.stopAll(moduleID: manifest.id)
-            cancelReaderRequests(moduleID: manifest.id)
-            try repository.install(manifest, enabled: manifest.id != id && activate && !manifest.capability.isExclusive ? true : nil, payload: modulePayloads[manifest.id])
-            if manifest.id != id && activate && manifest.capability.isExclusive { try repository.replaceProvider(role: manifest.capability, with: manifest.id) }
+            installedModules = try repository.installed()
         }
-        installedModules = try repository.installed()
     }
     func reinstallWorker(_ module: InstalledModule) {
         perform {
@@ -362,7 +366,7 @@ final class AppState: ObservableObject {
         return session
     }
     func updateSession(_ session: WindowSession) {
-        guard ready else { return }
+        guard ready, !deletingProfileIDs.contains(session.profileID), library.profiles.contains(where: { $0.id == session.profileID }) else { return }
         if let index = library.sessions.firstIndex(where: { $0.id == session.id }) { library.sessions[index] = session }
     }
     func registerWindow(_ model: BrowserModel) { windows[model.session.id] = BrowserReference(model) }
@@ -371,7 +375,7 @@ final class AppState: ObservableObject {
         if !terminating { library.sessions.removeAll { $0.id == id }; claimedSessions.remove(id) }
     }
     func addHistory(url: URL, title: String, profileID: UUID) {
-        guard AddressResolver.isWebURL(url) else { return }
+        guard AddressResolver.isWebURL(url), !deletingProfileIDs.contains(profileID), library.profiles.contains(where: { $0.id == profileID }) else { return }
         if let last = library.history.last, last.url == url, last.profileID == profileID,
            Date().timeIntervalSince(last.visitedAt) < 2 { return }
         library.history.append(HistoryEntry(profileID: profileID, title: String(title.prefix(512)), url: url))
@@ -483,22 +487,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             smokeTrace("No application state; returning terminateNow")
             return .terminateNow
         }
-        let activeWindows = state.windows.values.compactMap(\.model).filter { $0.downloads.hasActive }
-        if !activeWindows.isEmpty {
+        guard state.deletingProfileIDs.isEmpty else {
+            state.notice = "Wait for profile deletion to finish before quitting."
+            DistributionManager.shared.cancelledQuit()
+            return .terminateCancel
+        }
+        // Include extension manager pages and tabs awaiting cancellation after
+        // their window closed. Their runtime retains the download callbacks.
+        var seenCenters = Set<ObjectIdentifier>()
+        let centers = (state.windows.values.compactMap(\.model).map(\.downloads) + ChromiumRuntime.shared.downloadCenters)
+            .filter { seenCenters.insert(ObjectIdentifier($0)).inserted }
+        let activeCenters = centers.filter(\.hasActive)
+        if !activeCenters.isEmpty {
             let alert = NSAlert(); alert.messageText = "Cancel active downloads and quit Radius?"
-            alert.informativeText = "There are unfinished downloads in \(activeWindows.count) windows."
+            alert.informativeText = "There are unfinished downloads. Their temporary files are removed after the engine confirms cancellation."
             alert.addButton(withTitle: "Keep Radius open"); alert.addButton(withTitle: "Cancel downloads and quit")
-            guard alert.runModal() == .alertSecondButtonReturn else { return .terminateCancel }
+            guard alert.runModal() == .alertSecondButtonReturn else {
+                DistributionManager.shared.cancelledQuit()
+                return .terminateCancel
+            }
         }
         state.terminating = true
         Task {
             self.smokeTrace("Termination task started; cancelling active downloads")
-            do { for browser in activeWindows { try await browser.downloads.cancelAllAndWait() } }
+            do { for center in activeCenters { try await center.cancelAllAndWait() } }
             catch {
                 state.notice = error.localizedDescription; state.terminating = false
+                DistributionManager.shared.cancelledQuit()
                 sender.reply(toApplicationShouldTerminate: false); return
             }
-            if DistributionManager.shared.pending?.chromium == false { state.prepareForChromiumRemoval() }
+            if DistributionManager.shared.isRestartRequested && DistributionManager.shared.pending?.chromium == false { state.prepareForChromiumRemoval() }
             self.smokeTrace("Flushing application data before termination")
             let saved = await state.flush()
             self.smokeTrace("Termination flush completed: \(saved)")
@@ -511,20 +529,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 quit = alert.runModal() == .alertSecondButtonReturn
             }
             if quit {
+                // The updater waits for this process to exit. Start and validate
+                // it before irreversible CefShutdown; a cancelled quit stops it.
+                do { try await DistributionManager.shared.launchPendingInstaller() }
+                catch { quit = false; state.notice = error.localizedDescription }
+            }
+            if quit {
                 state.cancelReaderRequests()
                 ResourceWorker.stopAll()
                 stoppedWorkersForQuit = true
                 for browser in state.windows.values.compactMap(\.model) { browser.disposeEngineTabs() }
                 quit = await ChromiumRuntime.shared.shutdown()
                 if !quit { state.notice = ChromiumRuntime.shared.status }
-                if quit {
-                    do { try await DistributionManager.shared.launchPendingInstaller() }
-                    catch { quit = false; state.notice = error.localizedDescription }
-                }
+                if quit { await state.finishPendingProfileDeletions() }
             }
             self.smokeTrace("Sending termination reply: \(quit)")
             state.terminating = quit
-            if !quit && stoppedWorkersForQuit { state.resumeResourceWorkerAfterCancelledQuit() }
+            if !quit {
+                DistributionManager.shared.cancelledQuit()
+                if stoppedWorkersForQuit { state.resumeResourceWorkerAfterCancelledQuit() }
+            }
             sender.reply(toApplicationShouldTerminate: quit)
         }
         smokeTrace("Returning terminateLater")

@@ -117,17 +117,15 @@ final class ChromiumTab: BrowserEngineTab {
         }
         return html
     }
-    override func saveScreenshot(app: AppState) {
-        Task {
-            do {
-                let data = try await request("Page.captureScreenshot", parameters: ["format": "png"])
-                guard let result = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let encoded = result["data"] as? String, let image = Data(base64Encoded: encoded) else {
-                    throw ValidationError("Chromium returned an invalid screenshot.")
-                }
-                app.saveFile(image, name: "Page.png", type: .png)
-            } catch { app.notice = error.localizedDescription }
+    override func capturePNG() async throws -> Data {
+        let data = try await request("Page.captureScreenshot", parameters: ["format": "png", "captureBeyondViewport": false])
+        guard let result = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let encoded = result["data"] as? String, encoded.utf8.count <= 45 * 1024 * 1024,
+              let image = Data(base64Encoded: encoded), image.count <= 32 * 1024 * 1024,
+              image.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]) else {
+            throw ValidationError("Chromium returned an invalid or oversized page capture.")
         }
+        return image
     }
     /// Internal DevTools transport, never a listening debugging port.
     func request(_ method: String, parameters: [String: Any], timeout: Duration = .seconds(15)) async throws -> Data {
@@ -230,10 +228,15 @@ final class ChromiumTab: BrowserEngineTab {
         }
     }
     override func dispose() {
-        guard !disposing else { return }
-        disposing = true
+        guard page != nil, closeTask == nil else { return }
         let notice = onNotice
-        cancelRequests(); super.dispose()
+        if !disposing {
+            disposing = true
+            cancelRequests(); super.dispose()
+        }
+        // A previous cancellation attempt can time out while Chromium still
+        // owns a file. Subsequent quit/close attempts must send cancellation
+        // again, even after the outer tab and its model have disappeared.
         // CEF must retain the browser and callback receiver until cancellation
         // closes each download writer. Removing the native tab can happen now.
         if downloadIDs.isEmpty { closePage() }

@@ -14,6 +14,7 @@ final class WebTab: BrowserEngineTab, WKNavigationDelegate, WKUIDelegate {
     override var engineID: BrowserEngineID { .webkit }
     private let downloads: DownloadCenter
     private var observations: [NSKeyValueObservation] = []
+    private var imageSnapshots: [UUID: WebImageSnapshotRequest] = [:]
     private var pageSnapshots: [UUID: WebPageSnapshotRequest] = [:]
     init(dataStore: WKWebsiteDataStore, downloads: DownloadCenter, configuration: WKWebViewConfiguration? = nil) {
         let config = configuration ?? WKWebViewConfiguration()
@@ -43,6 +44,7 @@ final class WebTab: BrowserEngineTab, WKNavigationDelegate, WKUIDelegate {
     override func goForward() { webView.goForward() }
     override func setZoom(_ value: Double) { super.setZoom(value); webView.pageZoom = zoom }
     override func dispose() {
+        imageSnapshots.values.forEach { $0.cancel() }; imageSnapshots.removeAll()
         pageSnapshots.values.forEach { $0.cancel() }; pageSnapshots.removeAll()
         webView.stopLoading(); webView.navigationDelegate = nil; webView.uiDelegate = nil
         observations.removeAll(); super.dispose()
@@ -53,6 +55,7 @@ final class WebTab: BrowserEngineTab, WKNavigationDelegate, WKUIDelegate {
     }
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         didStartNavigation()
+        imageSnapshots.values.forEach { $0.cancel() }; imageSnapshots.removeAll()
         pageSnapshots.values.forEach { $0.cancel() }; pageSnapshots.removeAll()
         errorMessage = nil; loading = true; refresh(false)
     }
@@ -66,6 +69,7 @@ final class WebTab: BrowserEngineTab, WKNavigationDelegate, WKUIDelegate {
         refresh(false)
     }
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        imageSnapshots.values.forEach { $0.cancel() }; imageSnapshots.removeAll()
         pageSnapshots.values.forEach { $0.cancel() }; pageSnapshots.removeAll()
         loading = false; errorMessage = "The website's process stopped. Reload the page to continue."; refresh(false)
     }
@@ -140,16 +144,11 @@ final class WebTab: BrowserEngineTab, WKNavigationDelegate, WKUIDelegate {
         alert.addButton(withTitle: "Don't allow"); alert.addButton(withTitle: "Allow")
         decisionHandler(alert.runModal() == .alertSecondButtonReturn ? .grant : .deny)
     }
-    override func saveScreenshot(app: AppState) {
-        webView.takeSnapshot(with: nil) { [weak app] image, error in
-            Task { @MainActor in
-                guard let app else { return }
-                if let error { app.notice = error.localizedDescription; return }
-                guard let image, let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff),
-                      let png = bitmap.representation(using: .png, properties: [:]) else { app.notice = "The page could not be captured."; return }
-                app.saveFile(png, name: "Page Capture.png", type: .png)
-            }
-        }
+    override func capturePNG() async throws -> Data {
+        let id = UUID(), request = WebImageSnapshotRequest()
+        imageSnapshots[id] = request
+        defer { imageSnapshots.removeValue(forKey: id) }
+        return try await request.capture(webView)
     }
     override func pageHTML() async throws -> String {
         let script = "(() => { const html = document.documentElement ? new XMLSerializer().serializeToString(document.documentElement) : ''; if (html.length > 1048576) throw new Error('Page snapshot exceeds 1 MB.'); return html; })()"
@@ -214,4 +213,38 @@ struct WebViewHost: NSViewRepresentable {
     let tab: BrowserEngineTab
     func makeNSView(context: Context) -> NSView { tab.nativeView }
     func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
+@MainActor
+private final class WebImageSnapshotRequest {
+    private var continuation: CheckedContinuation<Data, any Error>?
+    private var watchdog: Task<Void, Never>?
+    private var cancelled = false
+    func capture(_ view: WKWebView) async throws -> Data {
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            guard !cancelled else { throw CancellationError() }
+            return try await withCheckedThrowingContinuation { continuation in
+                self.continuation = continuation
+                watchdog = Task { [weak self] in
+                    do { try await Task.sleep(for: .seconds(8)) } catch { return }
+                    self?.finish(nil, ValidationError("The page could not be captured in time."))
+                }
+                view.takeSnapshot(with: nil) { [weak self] image, error in
+                    Task { @MainActor in self?.finish(image, error) }
+                }
+            }
+        } onCancel: { Task { @MainActor [weak self] in self?.cancel() } }
+    }
+    func cancel() { cancelled = true; finish(nil, CancellationError()) }
+    private func finish(_ image: NSImage?, _ error: (any Error)?) {
+        guard let continuation else { return }
+        self.continuation = nil; watchdog?.cancel(); watchdog = nil
+        if let error { continuation.resume(throwing: error); return }
+        guard let image, let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff),
+              let png = bitmap.representation(using: .png, properties: [:]), png.count <= 32 * 1024 * 1024 else {
+            continuation.resume(throwing: ValidationError("The page could not be captured within the 32 MB limit.")); return
+        }
+        continuation.resume(returning: png)
+    }
 }

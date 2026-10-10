@@ -45,10 +45,20 @@ for worker in RadiusResourceMonitor RadiusMemoryMonitor RadiusReaderWorker; do
   codesign --verify --strict "$payload"
 done
 cp Resources/Info.plist "$app_directory/Contents/Info.plist"
-mkdir -p "$app_directory/Contents/Resources/Updater"
-lipo -create "$arm_binary_directory/RadiusUpdater" "$intel_binary_directory/RadiusUpdater" -output "$app_directory/Contents/Resources/Updater/RadiusUpdater"
-lipo "$app_directory/Contents/Resources/Updater/RadiusUpdater" -verify_arch arm64 x86_64
-codesign --force --sign - --identifier org.radius.updater "$app_directory/Contents/Resources/Updater/RadiusUpdater"
+# Separate signed helper slices preserve the running host's architecture under
+# Rosetta and let Radius directly own/stop the actual updater process.
+rm -rf "$app_directory/Contents/Resources/Updater"
+for architecture in arm64 x86_64; do
+  helper_directory="$app_directory/Contents/Resources/Updater/$architecture"
+  mkdir -p "$helper_directory"
+  if [[ "$architecture" == arm64 ]]; then
+    cp "$arm_binary_directory/RadiusUpdater" "$helper_directory/RadiusUpdater"
+  else
+    cp "$intel_binary_directory/RadiusUpdater" "$helper_directory/RadiusUpdater"
+  fi
+  lipo "$helper_directory/RadiusUpdater" -verify_arch "$architecture"
+  codesign --force --sign - --identifier org.radius.updater "$helper_directory/RadiusUpdater"
+done
 cp LICENSE COPYING.MPL docs/LICENSING.md "$app_directory/Contents/Resources/Legal/"
 swift scripts/build-icon.swift dist/AppIcon.iconset
 iconutil -c icns dist/AppIcon.iconset -o "$app_directory/Contents/Resources/AppIcon.icns"

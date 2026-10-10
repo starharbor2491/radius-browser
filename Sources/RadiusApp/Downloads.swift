@@ -18,13 +18,13 @@ final class DownloadItem: ObservableObject, Identifiable {
     let download: WKDownload?
     let chromiumID: String?
     var sourceURL: URL?
-    var cancelChromium: (() -> Void)?
+    var cancelChromium: (@MainActor @Sendable () -> Void)?
     var destinationPanel: NSSavePanel?
     var cancellationRequested = false
     var transferEnded = false
     var progressObservation: NSKeyValueObservation?
     init(_ download: WKDownload) { self.download = download; chromiumID = nil }
-    init(chromiumID: String, sourceURL: URL?, cancel: @escaping () -> Void) {
+    init(chromiumID: String, sourceURL: URL?, cancel: @escaping @MainActor @Sendable () -> Void) {
         download = nil; self.chromiumID = chromiumID; self.sourceURL = sourceURL; cancelChromium = cancel
     }
 }
@@ -48,8 +48,8 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
         chooseDestination(for: item, suggestedName: suggestedFilename, completion: completionHandler)
     }
     /// IDs must be unique across the runtime, including downloads from different tabs.
-    func beginChromium(id: String, suggestedName: String, sourceURL: URL?, cancel: @escaping () -> Void,
-                       completion: @escaping (URL?) -> Void) {
+    func beginChromium(id: String, suggestedName: String, sourceURL: URL?, cancel: @escaping @MainActor @Sendable () -> Void,
+                       completion: @escaping @MainActor @Sendable (URL?) -> Void) {
         guard !items.contains(where: { $0.chromiumID == id }) else { completion(nil); return }
         let item = DownloadItem(chromiumID: id, sourceURL: sourceURL, cancel: cancel)
         items.insert(item, at: 0)
@@ -68,7 +68,7 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
             item.fraction = min(1, max(0, fraction))
         }
     }
-    private func chooseDestination(for item: DownloadItem, suggestedName: String, completion: @MainActor (URL?) -> Void) {
+    private func chooseDestination(for item: DownloadItem, suggestedName: String, completion: @MainActor @Sendable (URL?) -> Void) {
         guard item.active else { completion(nil); return }
         let cleanName = URL(fileURLWithPath: suggestedName).lastPathComponent
         item.name = cleanName.isEmpty ? "Download" : cleanName

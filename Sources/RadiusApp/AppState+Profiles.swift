@@ -10,7 +10,10 @@ extension AppState {
         var validation = library
         _ = try validation.removeProfile(id, replacingWith: replacement)
         deletingProfileIDs.insert(id)
-        defer { deletingProfileIDs.remove(id) }
+        defer {
+            deletingProfileIDs.remove(id)
+            ChromiumRuntime.shared.blockProfilesPendingDeletion(Set((library.pendingProfileDeletions ?? []) + (library.pendingWebsiteDataClears ?? [])))
+        }
         let affected = windows.values.compactMap(\.model).filter { $0.session.profileID == id }
         for window in affected { try await window.downloads.cancelAllAndWait() }
         try await ChromiumRuntime.shared.prepareToDeleteProfile(id)
@@ -18,10 +21,11 @@ extension AppState {
         let removed = try library.removeProfile(id, replacingWith: replacement)
         guard await flush() else {
             library.restoreProfile(removed)
-            ChromiumRuntime.shared.blockProfilesPendingDeletion(Set(library.pendingProfileDeletions ?? []))
+            for window in affected { window.disposeEngineTabs() }
+            ChromiumRuntime.shared.blockProfilesPendingDeletion(Set((library.pendingProfileDeletions ?? []) + (library.pendingWebsiteDataClears ?? [])))
             throw ValidationError(notice ?? "The profile could not be saved. Nothing was erased.")
         }
-        ChromiumRuntime.shared.blockProfilesPendingDeletion(Set(library.pendingProfileDeletions ?? []))
+        ChromiumRuntime.shared.blockProfilesPendingDeletion(Set((library.pendingProfileDeletions ?? []) + (library.pendingWebsiteDataClears ?? [])))
         for window in affected { window.resetAfterProfileDeletion(replacementID: replacement) }
         NotificationCenter.default.post(name: .radiusProfileDeleted, object: id)
         await finishPendingProfileDeletions()
@@ -32,7 +36,9 @@ extension AppState {
 
     /// Durable tombstones are processed before any restored tab can open its engine.
     func finishPendingProfileDeletions() async {
-        let pending = library.pendingProfileDeletions ?? []
+        let deleted = library.pendingProfileDeletions ?? []
+        let clearRequests = library.pendingWebsiteDataClears ?? []
+        let pending = Array(Set(deleted + clearRequests))
         ChromiumRuntime.shared.blockProfilesPendingDeletion(Set(pending))
         guard !pending.isEmpty else { return }
         var completed = Set<UUID>()
@@ -57,12 +63,24 @@ extension AppState {
         }
         if !completed.isEmpty {
             library.pendingProfileDeletions?.removeAll { completed.contains($0) }
+            library.pendingWebsiteDataClears?.removeAll { completed.contains($0) }
             if !(await flush()) {
                 // Keep the retry record if its removal could not be committed.
-                library.pendingProfileDeletions = pending
+                library.pendingProfileDeletions = deleted
+                library.pendingWebsiteDataClears = clearRequests
             }
         }
-        ChromiumRuntime.shared.blockProfilesPendingDeletion(Set(library.pendingProfileDeletions ?? []))
+        ChromiumRuntime.shared.blockProfilesPendingDeletion(Set((library.pendingProfileDeletions ?? []) + (library.pendingWebsiteDataClears ?? [])))
+    }
+
+    func requestWebsiteDataClear(_ id: UUID) async throws {
+        guard !terminating, deletingProfileIDs.isEmpty, library.profiles.contains(where: { $0.id == id }) else { throw ValidationError("This profile is unavailable.") }
+        let old = library.pendingWebsiteDataClears
+        library.pendingWebsiteDataClears = Array(Set((old ?? []) + [id]))
+        guard await flush() else { library.pendingWebsiteDataClears = old; throw ValidationError(notice ?? "The website data request could not be saved.") }
+        // Storage can be in use in other tabs and extension workers. Retain the
+        // durable request and perform removal before engines start next time.
+        notice = "Quit and reopen Radius to clear this profile's website data. Your bookmarks, notes, history, and tab addresses are kept."
     }
 
     func prepareForChromiumRemoval() {

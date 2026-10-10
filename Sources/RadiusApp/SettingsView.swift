@@ -68,8 +68,8 @@ struct SettingsView: View {
                 }.disabled(profileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || app.library.profiles.count >= 20)
             }
             Text("Switching profiles reloads open pages and keeps sign-ins separate.").font(.caption).foregroundStyle(.secondary)
-            if !(app.library.pendingProfileDeletions ?? []).isEmpty {
-                HStack { Text("Deleted profile storage is waiting for a restart.").font(.caption); Spacer(); Button("Quit Radius") { NSApp.terminate(nil) } }
+            if !(app.library.pendingProfileDeletions ?? []).isEmpty || !(app.library.pendingWebsiteDataClears ?? []).isEmpty {
+                HStack { Text("Website storage removal is waiting for a restart.").font(.caption); Spacer(); Button("Quit Radius") { NSApp.terminate(nil) } }
             }
         }
     }
@@ -103,12 +103,13 @@ struct SettingsView: View {
                 }.padding(8)
             }
             ChromiumSettingsView(dataDirectory: app.dataDirectory)
+            DistributionSettingsView(dataDirectory: app.dataDirectory)
             Picker("Default for new tabs in \(model.profile.name)", selection: Binding(get: { model.profile.engineID ?? .webkit }, set: { engine in
                 guard let index = app.library.profiles.firstIndex(where: { $0.id == model.session.profileID }) else { return }
                 app.library.profiles[index].engineID = engine
             })) {
                 Text("WebKit").tag(BrowserEngineID.webkit)
-                Text(chromiumRuntime.isInstalled(in: app.dataDirectory) ? "Chromium Alloy" : "Chromium Alloy (unavailable)").tag(BrowserEngineID.chromium).disabled(!chromiumRuntime.isInstalled(in: app.dataDirectory))
+                Text(chromiumRuntime.isInstalled(in: app.dataDirectory) ? "Chromium" : "Chromium (unavailable)").tag(BrowserEngineID.chromium).disabled(!chromiumRuntime.isInstalled(in: app.dataDirectory))
             }
             Text("Existing tabs keep their engine. Use a tab's context menu to reopen it in another engine.").font(.caption).foregroundStyle(.secondary)
             Link("Engine compatibility and release status", destination: URL(string: "https://github.com/starharbor2491/radius-browser/blob/codex/radius-v1/docs/CHROMIUM.md")!)
@@ -141,11 +142,11 @@ struct SettingsView: View {
         Task {
             defer { clearing = false }
             do {
-                try await ChromiumRuntime.shared.clearWebsiteData(profileID: profileID, dataDirectory: app.dataDirectory)
-                let store = WKWebsiteDataStore(forIdentifier: profileID)
-                await store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
-                if model.session.profileID == profileID { model.activeWebTab.reload() }
-                app.notice = "Website data for \(profileName) was cleared."
+                try await app.requestWebsiteDataClear(profileID)
+                let ready = NSAlert(); ready.messageText = "Website data removal is queued for \(profileName)"
+                ready.informativeText = "Quit and reopen Radius to complete removal before either engine loads. Bookmarks, history, notes, and tab addresses are kept."
+                ready.addButton(withTitle: "Quit Radius"); ready.addButton(withTitle: "Later")
+                if ready.runModal() == .alertFirstButtonReturn { NSApp.terminate(nil) }
             } catch { app.notice = error.localizedDescription }
         }
     }

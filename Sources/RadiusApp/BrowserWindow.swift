@@ -46,10 +46,24 @@ struct BrowserWindow: View {
     @State private var readerTitle = ""
     @State private var extracting = false
     @State private var readerTask: Task<Void, Never>?
+    @State private var captureTask: Task<Void, Never>?
+    @State private var capturing = false
+    @State private var navigationEpoch = 0
+    @State private var windowWidth: CGFloat = 1000
     @Environment(\.openWindow) private var openWindow
     @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
     private var layout: BrowserLayout { app.configuration.layout }
     private var theme: Theme { app.configuration.theme }
+    private var tabsTheme: Theme { theme.component(theme.tabsAppearance) }
+    private var navigationTheme: Theme { theme.component(theme.navigationAppearance) }
+    private var sidebarTheme: Theme { theme.component(theme.sidebarAppearance) }
+    private var treeTabs: Bool { layout.treeTabs == true && (app.previewConfiguration != nil || app.declarativeDefinition(.tabSystem)?.treeTabs == true) }
+    private var usesChromeNavigation: Bool { navigationEpoch >= 0 && model.activeWebTab.hasNativeNavigationChrome }
+    private func hidden(_ component: String) -> Bool { model.focusMode && model.focusHiddenComponents.contains(component) }
+    private var showTabs: Bool { !hidden("tabs") && layout.hideTabStrip != true }
+    private var secondaryPanel: BrowserPanel? {
+        guard windowWidth >= 1100, let value = layout.secondaryPanel, let panel = BrowserPanel(rawValue: value), available(panel), panel != visiblePanel, !hidden("sidebar") else { return nil }; return panel
+    }
     private var visiblePanel: BrowserPanel? {
         guard let panel = model.panel else { return nil }
         if panel == .notes && !app.enabled(.notes) { return nil }
@@ -62,23 +76,30 @@ struct BrowserWindow: View {
     }
     private var browserLayout: some View {
         VStack(spacing: 0) {
-            if !model.focusMode {
-                if layout.tabs == .top { tabs(vertical: false) }
+            if model.focusMode {
+                HStack { Text("Focus mode").font(.caption); Spacer(); Button("Exit focus · Esc") { model.exitFocus() } }.padding(.horizontal, 12).padding(.vertical, 6).background(.bar)
+            }
+            if showTabs && layout.tabs == .top { tabs(vertical: false) }
+            if !hidden("navigation") {
+                customStrip(.top)
                 if layout.navigation == .top { navigation }
-                if layout.bookmarksBar { bookmarksBar }
             }
+            if !hidden("bookmarks") && layout.bookmarksBar { bookmarksBar }
             HStack(spacing: 0) {
-                if !model.focusMode && layout.tabs == .leading { tabs(vertical: true).frame(width: 190) }
-                if !model.focusMode && layout.sidebar == .leading && visiblePanel != nil { sidebar }
+                if showTabs && layout.tabs == .leading { tabs(vertical: true).frame(width: min(layout.tabsWidth ?? 190, max(140, windowWidth * 0.22))) }
+                if !hidden("sidebar") && layout.sidebar == .leading && visiblePanel != nil { sidebar }
+                if let secondaryPanel, layout.sidebar != .leading { secondarySidebar(secondaryPanel) }
                 page.frame(maxWidth: .infinity, maxHeight: .infinity)
-                if !model.focusMode && layout.sidebar == .trailing && visiblePanel != nil { sidebar }
-                if !model.focusMode && layout.tabs == .trailing { tabs(vertical: true).frame(width: 190) }
+                if !hidden("sidebar") && layout.sidebar == .trailing && visiblePanel != nil { sidebar }
+                if let secondaryPanel, layout.sidebar == .leading { secondarySidebar(secondaryPanel) }
+                if showTabs && layout.tabs == .trailing { tabs(vertical: true).frame(width: min(layout.tabsWidth ?? 190, max(140, windowWidth * 0.22))) }
             }
-            if !model.focusMode {
+            if !hidden("navigation") {
                 if layout.navigation == .bottom { navigation }
-                if layout.tabs == .bottom { tabs(vertical: false) }
-                if layout.statusBar { statusBar }
+                customStrip(.bottom)
             }
+            if showTabs && layout.tabs == .bottom { tabs(vertical: false) }
+            if !hidden("status") && layout.statusBar { statusBar }
             if let notice = app.notice {
                 HStack(spacing: 10) {
                     Image(systemName: "info.circle"); Text(notice).font(.callout).textSelection(.enabled)
@@ -86,11 +107,13 @@ struct BrowserWindow: View {
                 }.padding(.horizontal, 14).padding(.vertical, 5).background(.bar)
             }
         }
-        .tint(theme.accent.color).preferredColorScheme(theme.scheme).controlSize(theme.controlSize)
+        .tint(theme.tint).environment(\.browserTheme, theme).environment(\.browserSymbols, app.declarativeDefinition(.icons)?.icons ?? [:]).font(theme.interfaceFont()).preferredColorScheme(theme.scheme).controlSize(theme.controlSize)
         .background(Color(nsColor: .windowBackgroundColor))
         .focusedSceneObject(model)
         .animation(theme.reducedMotion || systemReduceMotion ? nil : .easeOut(duration: 0.16), value: visiblePanel)
         .background(WindowCloseObserver(model: model))
+        .background(GeometryReader { geometry in Color.clear.preference(key: BrowserWindowWidthKey.self, value: geometry.size.width) })
+        .onPreferenceChange(BrowserWindowWidthKey.self) { windowWidth = $0 }
     }
     private var presentation: some View {
         browserLayout
@@ -101,7 +124,7 @@ struct BrowserWindow: View {
                 case .customize: CustomizeView()
                 case .settings: SettingsView(model: model)
                 case .recovery: RecoveryView()
-                case .extensions: ChromiumExtensionsView()
+                case .extensions: ChromiumExtensionsView(initialProfileID: model.session.profileID)
                 }
             }
             .background(Color(nsColor: .windowBackgroundColor))
@@ -123,20 +146,22 @@ struct BrowserWindow: View {
             openWindow(id: notification.userInfo?["private"] as? Bool == true ? "private" : "browser")
         }
         .onReceive(NotificationCenter.default.publisher(for: .radiusFind)) { notification in if notification.object as? UUID == model.session.id { findVisible = true; findFocused = true } }
-        .onExitCommand { model.focusMode = false; findVisible = false; addressFocused = false; readerTask?.cancel(); reader = nil }
+        .onExitCommand { model.exitFocus(); findVisible = false; addressFocused = false; readerTask?.cancel(); reader = nil }
         .onChange(of: app.installedModules) { _, _ in
-            if !app.enabled(.focusMode) { model.focusMode = false }
+            if !app.installedModules.contains(where: { $0.id == model.focusProviderID && $0.enabled }) { model.exitFocus() }
             if !app.enabled(.reader) { readerTask?.cancel(); reader = nil }
+            captureTask?.cancel()
         }
-        .onChange(of: model.session.selectedTabID) { _, _ in findVisible = false; model.addressEditing = addressFocused; readerTask?.cancel(); reader = nil }
+        .onChange(of: model.session.selectedTabID) { _, _ in captureTask?.cancel(); if layout.sidebarAutoHide == true { model.panel = nil }; findVisible = false; model.addressEditing = addressFocused; readerTask?.cancel(); reader = nil }
     }
     private var readerLifecycle: some View {
         windowCommands
-        .onChange(of: model.session.profileID) { _, _ in readerTask?.cancel(); reader = nil }
+        .onChange(of: model.session.profileID) { _, _ in captureTask?.cancel(); readerTask?.cancel(); reader = nil }
         .onChange(of: model.selectedTab.url) { _, _ in readerTask?.cancel(); reader = nil }
-        .onReceive(model.activeWebTab.$navigationRevision.dropFirst()) { _ in readerTask?.cancel(); reader = nil }
+        .onReceive(model.activeWebTab.$navigationRevision.dropFirst()) { _ in captureTask?.cancel(); readerTask?.cancel(); reader = nil }
+        .onReceive(model.activeWebTab.objectWillChange) { _ in navigationEpoch &+= 1 }
         .onChange(of: model.sheet) { _, sheet in if sheet != nil { readerTask?.cancel(); reader = nil } }
-        .onDisappear { readerTask?.cancel(); reader = nil }
+        .onDisappear { captureTask?.cancel(); readerTask?.cancel(); reader = nil }
     }
     private var content: some View {
         readerLifecycle
@@ -149,46 +174,71 @@ struct BrowserWindow: View {
     }
     private var navigation: some View {
         HStack(spacing: theme.spacing) {
-            navigationButtons
+            componentStrip(.beforeAddress)
+            if !usesChromeNavigation {
             HStack(spacing: 6) {
                 Image(systemName: model.isPrivate ? "hand.raised" : (model.selectedTab.url?.scheme == "https" ? "lock" : "globe"))
                     .foregroundStyle(.secondary).help(model.isPrivate ? "Private browsing" : (model.selectedTab.url?.scheme == "https" ? "HTTPS connection" : "Website address"))
                 TextField("Search or enter website", text: $model.address)
+                    .foregroundStyle(Color(nsColor: .textColor)).font(navigationTheme.interfaceFont())
                     .textFieldStyle(.plain).focused($addressFocused).onSubmit { model.addressEditing = false; model.navigate(model.address); addressFocused = false }
                     .accessibilityLabel("Website address or search")
                 if model.selectedTab.url.map(AddressResolver.isWebURL) == true && !model.isPrivate {
                     IconButton(title: "Bookmark this page", icon: isBookmarked ? "star.fill" : "star", active: isBookmarked) { model.toggleBookmark() }
                 }
             }
-            .padding(.horizontal, 10).padding(.vertical, theme.density == .compact ? 3 : 5)
-            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: theme.cornerRadius))
-            .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius).stroke(addressFocused ? Color.accentColor : .primary.opacity(0.16), lineWidth: addressFocused ? 2 : 1))
+            .padding(.horizontal, 10).padding(.vertical, navigationTheme.density == .compact ? 3 : 5)
+            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: navigationTheme.cornerRadius))
+            .overlay(RoundedRectangle(cornerRadius: navigationTheme.cornerRadius).stroke(addressFocused ? Color.accentColor : .primary.opacity(0.16), lineWidth: addressFocused ? 2 : 1))
+            .frame(maxWidth: layout.addressWidth.map { CGFloat(640 * $0) } ?? .infinity)
+            } else {
+                Text(model.isPrivate ? "Private Chromium" : "Chromium").font(navigationTheme.interfaceFont()).foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+            }
+            componentStrip(.afterAddress)
+            browserMenu
+        }.padding(.horizontal, 12).padding(.vertical, 6).modifier(ChromeSurface(theme: navigationTheme))
+    }
+    private var panelMenu: some View {
             Menu {
                 ForEach(BrowserPanel.allCases.filter { available($0) }) { panel in
                     Button { model.togglePanel(panel) } label: { Label(panel.label, systemImage: panel.icon) }
                 }
             } label: { Image(systemName: "sidebar.left").frame(width: 28, height: 28) }.menuStyle(.borderlessButton).fixedSize().help("Open a sidebar panel")
-            Menu {
-                Button("Modules") { model.sheet = .modules }
-                Button("Customize") { model.sheet = .customize }
-                Button("Settings") { model.sheet = .settings }
-                Divider()
-                if app.enabled(.reader) { Button(extracting ? "Preparing reader…" : "Reader") { openReader() }.disabled(!model.hasPage || extracting) }
-                if app.enabled(.screenshot) { Button("Save screenshot…") { model.activeWebTab.saveScreenshot(app: app) }.disabled(!model.hasPage) }
-                if app.enabled(.focusMode) { Button("Focus mode") { model.focusMode = true } }
-                Button("Find in page…") { findVisible = true }.disabled(!model.hasPage)
-                Menu("Split view") {
-                    Button("Side by side") { model.beginSplit(.sideBySide) }
-                    Button("Stacked") { model.beginSplit(.stacked) }
-                    Button("Return to one pane") { model.endSplit() }.disabled(model.session.split == nil)
-                }
-                Divider()
-                Button("New private window") { openWindow(id: "private") }
-                Button("Recovery") { model.sheet = .recovery }
-            } label: { Image(systemName: "ellipsis").frame(width: 28, height: 28) }.menuStyle(.borderlessButton).fixedSize().accessibilityLabel("Browser menu")
-        }.padding(.horizontal, 12).padding(.vertical, 6).modifier(ChromeSurface(theme: theme))
     }
-    private var navigationButtons: some View { NavigationButtons(tab: model.activeWebTab, hasPage: model.hasPage) }
+    private var browserMenu: some View {
+        Menu {
+            ForEach(Array((app.declarativeDefinition(.menu)?.menu ?? []).enumerated()), id: \.offset) { _, item in
+                Button(item.title) { contributedAction(item.action) }
+            }
+            ForEach(components(in: .overflow)) { item in
+                if item.command == .separator { Divider() }
+                else { Button(item.command.label) { execute(item.command) }.disabled(!commandAvailable(item.command)) }
+            }
+            Button("Modules") { model.sheet = .modules }
+            Button("Customize") { model.sheet = .customize }
+            Button("Settings") { model.sheet = .settings }
+            if layout.secondaryPanel != nil && windowWidth < 1100 { Text("Widen this window to show the second sidebar") }
+            Button("Chromium extensions…") { model.sheet = .extensions }.disabled(model.isPrivate)
+            Menu("Tabs") {
+                Button("New tab") { model.newTab(); focusAddress() }
+                ForEach(model.session.tabs) { tab in Button(tab.title) { model.selectTab(tab.id) } }
+            }
+            Divider()
+            if app.enabled(.reader) { Button(extracting ? "Preparing reader…" : "Reader") { openReader() }.disabled(!model.hasPage || extracting) }
+            if app.enabled(.screenshot) { Button(capturing ? "Capturing…" : "Save screenshot…") { capturePage() }.disabled(!model.hasPage || capturing) }
+            if app.enabled(.focusMode) { Button("Focus mode") { model.enterFocus() } }
+            Button("Find in page…") { findVisible = true }.disabled(!model.hasPage)
+            Menu("Split view") {
+                Button("Side by side") { model.beginSplit(.sideBySide) }
+                Button("Stacked") { model.beginSplit(.stacked) }
+                Button("Return to one pane") { model.endSplit() }.disabled(model.session.split == nil)
+            }
+            Divider()
+            Button("New private window") { openWindow(id: "private") }
+            Button("Recovery") { model.sheet = .recovery }
+        } label: { BrowserSymbol(name: "ellipsis").frame(width: 28, height: 28) }.menuStyle(.borderlessButton).fixedSize().accessibilityLabel("Browser menu")
+    }
     private var isBookmarked: Bool { model.bookmarks.contains { $0.url == model.selectedTab.url } }
     private func available(_ panel: BrowserPanel) -> Bool {
         switch panel { case .notes: app.enabled(.notes); case .resources: app.enabled(.resourceMonitor); case .history: !model.isPrivate; default: true }
@@ -198,7 +248,7 @@ struct BrowserWindow: View {
             if vertical {
                 VStack(spacing: 6) {
                     HStack { Text("Tabs").font(.headline); Spacer(); newTabButton }.padding(.horizontal, 12).padding(.top, 12)
-                    ScrollView { LazyVStack(spacing: 4) { ForEach(layout.treeTabs == true ? model.session.visibleTreeTabs : model.session.tabs) { tabRow($0, vertical: true) } }.padding(6) }
+                    ScrollView { LazyVStack(spacing: 4) { ForEach(treeTabs ? model.session.visibleTreeTabs : model.session.tabs) { tabRow($0, vertical: true) } }.padding(6) }
                     profileMenu.padding(12)
                 }
             } else {
@@ -208,27 +258,27 @@ struct BrowserWindow: View {
                     profileMenu
                 }.padding(.horizontal, 12).padding(.vertical, 6)
             }
-        }.modifier(ChromeSurface(theme: theme))
+        }.modifier(ChromeSurface(theme: tabsTheme))
     }
     private func tabRow(_ tab: BrowserTab, vertical: Bool) -> some View {
         HStack(spacing: 5) {
-            if vertical && layout.treeTabs == true && model.session.tabs.contains(where: { $0.parentID == tab.id }) {
+            if vertical && treeTabs && model.session.tabs.contains(where: { $0.parentID == tab.id }) {
                 Button { model.toggleBranch(tab.id) } label: { Image(systemName: tab.collapsed == true ? "chevron.right" : "chevron.down").font(.caption).frame(width: 18, height: 24) }
                     .buttonStyle(.plain).accessibilityLabel("\(tab.collapsed == true ? "Expand" : "Collapse") \(tab.title)")
             }
             Button { model.selectTab(tab.id) } label: {
                 HStack(spacing: 7) {
                     Image(systemName: tab.pinned ? "pin.fill" : "globe").font(.caption).foregroundStyle(.secondary)
-                    Text(tab.title).font(.callout).lineLimit(1)
+                    Text(tab.title).font(tabsTheme.interfaceFont()).foregroundStyle(tab.id == model.session.selectedTabID ? Color(nsColor: .textColor) : (theme.textHex.flatMap(InterfaceColor.init(hex:))?.color ?? Color.primary)).lineLimit(1)
                 }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
             }.buttonStyle(.plain).help(tab.title)
             Button { model.closeTab(tab.id) } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .semibold)).frame(width: 22, height: 24) }
                 .buttonStyle(.plain).help("Close \(tab.title)").accessibilityLabel("Close \(tab.title)")
         }
-        .padding(.leading, 10).padding(.trailing, 4).padding(.vertical, theme.density == .compact ? 2 : 5)
+        .padding(.leading, 10).padding(.trailing, 4).padding(.vertical, tabsTheme.density == .compact ? 2 : 5)
         .frame(width: vertical ? nil : 180)
-        .background(tab.id == model.session.selectedTabID ? Color(nsColor: .textBackgroundColor) : Color.clear, in: RoundedRectangle(cornerRadius: theme.cornerRadius))
-        .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius).stroke(tab.id == model.session.selectedTabID ? Color.primary.opacity(0.18) : .clear))
+        .background(tab.id == model.session.selectedTabID ? Color(nsColor: .textBackgroundColor) : Color.clear, in: RoundedRectangle(cornerRadius: tabsTheme.cornerRadius))
+        .overlay(RoundedRectangle(cornerRadius: tabsTheme.cornerRadius).stroke(tab.id == model.session.selectedTabID ? Color.primary.opacity(0.18) : .clear))
         .contextMenu {
             Button(tab.pinned ? "Unpin tab" : "Pin tab") { model.pinTab(tab.id) }
             Button("Move earlier") { model.moveTab(tab.id, by: -1) }
@@ -239,7 +289,7 @@ struct BrowserWindow: View {
                     Button(engine.label) { model.reopenTab(tab.id, with: engine) }.disabled(engine == (tab.engineID ?? .webkit))
                 }
             }
-            if layout.treeTabs == true {
+            if treeTabs {
                 Button("New child tab") { model.newTab(parentID: tab.id); addressFocused = true }
                 Button("Move to top level") { _ = model.session.setParent(tab.id, to: nil) }.disabled(tab.parentID == nil)
                 Menu("Move under tab") {
@@ -258,9 +308,9 @@ struct BrowserWindow: View {
             return model.moveTab(id, before: tab.id)
         }
         .accessibilityElement(children: .contain).accessibilityValue(tab.id == model.session.selectedTabID ? "Selected tab" : "Tab")
-        .padding(.leading, vertical && layout.treeTabs == true ? CGFloat(model.session.ancestors(of: tab.id).count * 10) : 0)
+        .padding(.leading, vertical && treeTabs ? CGFloat(model.session.ancestors(of: tab.id).count * 10) : 0)
     }
-    private var newTabButton: some View { IconButton(title: "New tab", icon: "plus") { model.newTab(); addressFocused = true } }
+    private var newTabButton: some View { IconButton(title: "New tab", icon: "plus") { model.newTab(); focusAddress() } }
     private var profileMenu: some View {
         Menu {
             ForEach(app.library.profiles) { profile in Button(profile.name) { model.switchProfile(profile.id) } }
@@ -286,9 +336,6 @@ struct BrowserWindow: View {
                 BrowserTabContent(tab: model.activeWebTab, hasPage: model.hasPage, onUseWebKit: { model.reopenTab(model.session.selectedTabID, with: .webkit) }) { startPage }
                     .id(ObjectIdentifier(model.activeWebTab))
             }
-        }
-        .overlay(alignment: .topTrailing) {
-            if model.focusMode { Button("Exit focus  esc") { model.focusMode = false }.padding(10).background(.regularMaterial, in: Capsule()).padding(12) }
         }
     }
     private func splitPane(_ id: UUID) -> some View {
@@ -343,6 +390,12 @@ struct BrowserWindow: View {
                     }
                 }
             }
+            ForEach(Array(app.startWidgets.enumerated()), id: \.offset) { _, widget in
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(widget.widgetTitle ?? "").font(theme.interfaceFont(17, weight: .semibold))
+                    Text(widget.widgetBody ?? "").font(theme.interfaceFont()).foregroundStyle(.secondary).textSelection(.enabled)
+                }.padding(16).frame(maxWidth: .infinity, alignment: .leading).background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: theme.cornerRadius))
+            }
             HStack(spacing: 16) {
                 Button("Modules") { model.sheet = .modules }
                 Button("Customize") { model.sheet = .customize }
@@ -352,8 +405,8 @@ struct BrowserWindow: View {
             .background(Color(nsColor: .textBackgroundColor))
     }
     private var sidebar: some View {
-        SidebarView(model: model, panel: visiblePanel ?? .bookmarks).frame(width: layout.sidebarWidth)
-            .background(Color(nsColor: .windowBackgroundColor)).overlay(alignment: layout.sidebar == .leading ? .trailing : .leading) { Divider() }
+        SidebarView(model: model, panel: visiblePanel ?? .bookmarks).frame(width: min(layout.sidebarWidth, max(180, windowWidth * 0.24)))
+            .modifier(ChromeSurface(theme: sidebarTheme)).overlay(alignment: layout.sidebar == .leading ? .trailing : .leading) { Divider() }
     }
     private var bookmarksBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -368,6 +421,110 @@ struct BrowserWindow: View {
             Spacer()
             if model.hasPage { ZoomControls(tab: model.activeWebTab) }
         }.font(.caption).foregroundStyle(.secondary).padding(.horizontal, 14).padding(.vertical, 6).background(.bar)
+    }
+    private func focusAddress() { addressFocused = !model.activeWebTab.focusAddressBar() }
+    private func secondarySidebar(_ panel: BrowserPanel) -> some View {
+        SidebarView(model: model, panel: panel).frame(width: min(layout.sidebarWidth, max(180, windowWidth * 0.24))).modifier(ChromeSurface(theme: sidebarTheme))
+    }
+    private func components(in region: ToolbarRegion) -> [ToolbarComponent] {
+        (layout.toolbarComponents ?? ToolbarComponent.browserDefaults).filter {
+            $0.region == region && !(usesChromeNavigation && [.back, .forward, .reload, .bookmark].contains($0.command))
+        }
+    }
+    @ViewBuilder private func customStrip(_ region: ToolbarRegion) -> some View {
+        if !components(in: region).isEmpty {
+            HStack { componentStrip(region); Spacer(minLength: 0) }.padding(.horizontal, 12).padding(.vertical, 4).modifier(ChromeSurface(theme: navigationTheme))
+        }
+    }
+    private func componentStrip(_ region: ToolbarRegion) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: navigationTheme.spacing) {
+                ForEach(components(in: region)) { item in
+                    if item.command == .separator { Divider().frame(height: 22) }
+                    else if item.command == .sidebar { panelMenu }
+                    else { IconButton(title: item.command.label, icon: commandIcon(item.command)) { execute(item.command) }.disabled(!commandAvailable(item.command)) }
+                }
+            }
+            Menu {
+                ForEach(components(in: region)) { item in
+                    if item.command == .separator { Divider() }
+                    else if item.command == .sidebar {
+                        ForEach(BrowserPanel.allCases.filter { available($0) }) { panel in Button(panel.label) { model.togglePanel(panel) } }
+                    } else { Button(item.command.label) { execute(item.command) }.disabled(!commandAvailable(item.command)) }
+                }
+            } label: { BrowserSymbol(name: "line.3.horizontal").frame(width: 28, height: 28) }.menuStyle(.borderlessButton).fixedSize().accessibilityLabel("\(region.label) controls")
+        }.frame(maxWidth: region == .beforeAddress || region == .afterAddress ? 240 : nil, alignment: .leading)
+    }
+    private func commandAvailable(_ command: ToolbarCommand) -> Bool {
+        switch command {
+        case .back: return model.activeWebTab.canGoBack
+        case .forward: return model.activeWebTab.canGoForward
+        case .reload: return model.hasPage
+        case .bookmark: return !model.isPrivate && model.selectedTab.url.map(AddressResolver.isWebURL) == true
+        case .reader: return app.enabled(.reader) && model.hasPage && !extracting
+        case .screenshot: return app.enabled(.screenshot) && model.hasPage && !capturing
+        case .focus: return app.enabled(.focusMode)
+        default: return true
+        }
+    }
+    private func commandIcon(_ command: ToolbarCommand) -> String {
+        switch command {
+        case .back: "chevron.left"; case .forward: "chevron.right"; case .reload: model.activeWebTab.loading ? "xmark" : "arrow.clockwise"
+        case .newTab: "plus"; case .home: "house"; case .bookmark: isBookmarked ? "star.fill" : "star"; case .sidebar: "sidebar.left"
+        case .reader: "doc.plaintext"; case .screenshot: "camera.viewfinder"; case .focus: "viewfinder"; case .downloads: "arrow.down.circle"
+        case .modules: "square.grid.2x2"; case .customize: "slider.horizontal.3"; case .settings: "gearshape"; case .separator: "minus"
+        }
+    }
+    private func execute(_ command: ToolbarCommand) {
+        guard commandAvailable(command) else { return }
+        switch command {
+        case .back: model.activeWebTab.goBack()
+        case .forward: model.activeWebTab.goForward()
+        case .reload: if model.activeWebTab.loading { model.activeWebTab.stop() } else { model.activeWebTab.reload() }
+        case .newTab, .home: model.newTab(); focusAddress()
+        case .bookmark: model.toggleBookmark()
+        case .sidebar: model.togglePanel(.bookmarks)
+        case .reader: openReader()
+        case .screenshot: capturePage()
+        case .focus: model.enterFocus()
+        case .downloads: model.togglePanel(.downloads)
+        case .modules: model.sheet = .modules
+        case .customize: model.sheet = .customize
+        case .settings: model.sheet = .settings
+        case .separator: break
+        }
+    }
+    private func contributedAction(_ action: NativeModuleAction) {
+        switch action {
+        case .newTab: model.newTab(); focusAddress()
+        case .bookmarks: model.togglePanel(.bookmarks)
+        case .history: if !model.isPrivate { model.togglePanel(.history) }
+        case .downloads: model.togglePanel(.downloads)
+        case .modules: model.sheet = .modules
+        case .customize: model.sheet = .customize
+        case .settings: model.sheet = .settings
+        case .recovery: model.sheet = .recovery
+        }
+    }
+    private func capturePage() {
+        let source = model.activeWebTab, descriptor = model.selectedTab, profileID = model.session.profileID
+        let revision = source.navigationRevision, generation = app.resourceWorkerGeneration
+        do {
+            let specification = try app.pageCaptureSpecification()
+            capturing = true
+            captureTask = Task {
+                defer { capturing = false }
+                do {
+                    let bytes = try await source.capturePNG()
+                    try Task.checkCancellation()
+                    guard !model.isClosed, !app.terminating, app.resourceWorkerGeneration == generation,
+                          model.session.profileID == profileID, model.selectedTab.id == descriptor.id,
+                          model.activeWebTab === source, source.navigationRevision == revision, app.enabled(.screenshot) else { return }
+                    app.saveFile(bytes, name: specification.filename, type: .png)
+                } catch is CancellationError { }
+                catch { if !model.isClosed, app.resourceWorkerGeneration == generation, source.navigationRevision == revision { app.notice = error.localizedDescription } }
+            }
+        } catch { app.notice = error.localizedDescription }
     }
     private func openReader() {
         let source = model.activeWebTab, descriptor = model.selectedTab, profileID = model.session.profileID
@@ -473,4 +630,9 @@ struct ZoomControls: View {
             Button("+") { tab.setZoom(tab.zoom + 0.1) }.buttonStyle(.plain).accessibilityLabel("Zoom in")
         }
     }
+}
+
+private struct BrowserWindowWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat = 1000
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }

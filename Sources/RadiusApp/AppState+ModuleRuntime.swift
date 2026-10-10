@@ -121,6 +121,62 @@ extension AppState {
         }
         return result
     }
+    func moduleManifestCandidate(_ id: String) -> ModuleManifest? {
+        let available = catalog.first(where: { $0.id == id }), existing = installedModules.first(where: { $0.id == id })?.manifest
+        if let existing, existing.version >= (available?.version ?? 0) { return existing }
+        return available ?? existing
+    }
+    func validateModuleRequirements(for ids: [String], replacingRootProviders: Bool = true, preparingActivation: Bool = true) throws -> [ModuleManifest] {
+        guard ids.count <= 64, let repository else { throw ValidationError("Repair module storage first.") }
+        var result: [ModuleManifest] = [], seen = Set<String>(), roles: [ModuleCapability: String] = [:]
+        for id in ids {
+            for manifest in try repository.installationPlan(for: id, catalog: catalog, includeInstalled: true) where seen.insert(manifest.id).inserted {
+                if manifest.capability.isExclusive, let other = roles[manifest.capability], other != manifest.id {
+                    throw ValidationError("These requirements choose multiple providers for \(manifest.capability.rawValue). Choose one before applying the setup.")
+                }
+                if manifest.capability.isExclusive { roles[manifest.capability] = manifest.id }
+                if let existing = installedModules.first(where: { $0.id == manifest.id && $0.manifest == manifest }) {
+                    try validateModulePayload(existing, requireEnabled: false)
+                } else {
+                    guard let payload = modulePayloads[manifest.id] else { throw ValidationError("The catalog is missing \(manifest.name)'s package payload.") }
+                    if manifest.runtime == .behaviorProgram { try ModuleProgram.decode(payload).validate(capability: manifest.capability) }
+                    else if manifest.runtime == .declarative { try validateDefinitionForPlatform(ModuleDefinition.decode(payload, capability: manifest.capability)) }
+                    else { guard manifest.runtime?.isNative == true, bundledModuleIDs.contains(manifest.id), !payload.isEmpty, payload.count <= 8 * 1024 * 1024 else { throw ValidationError("This native package is not a trusted bundled worker.") } }
+                }
+                result.append(manifest)
+            }
+        }
+        // An enabled external dependent cannot be left attached to a provider
+        // that a setup replaces. Dependencies included in this plan are checked
+        // against their candidate manifests instead of their old manifests.
+        for active in installedModules where active.enabled && active.manifest.capability.isExclusive {
+            guard let next = roles[active.manifest.capability], next != active.id else { continue }
+            if !preparingActivation || (!replacingRootProviders && ids.contains(next)) { continue }
+            for dependent in installedModules where dependent.enabled && dependent.manifest.dependencies.contains(active.id) {
+                let candidate = result.first(where: { $0.id == dependent.id })?.dependencies
+                guard candidate != nil && candidate?.contains(active.id) == false else { throw ValidationError("Disable \(dependent.manifest.name) before replacing \(active.manifest.name).") }
+            }
+        }
+        return result
+    }
+    func withAtomicModuleChanges<T>(for ids: [String], _ operation: () throws -> T) throws -> T {
+        guard let repository else { throw ValidationError("Repair module storage first.") }
+        if suspendingModuleContributions { return try operation() }
+        let previous = installedModules, configuration = library.preferences.configuration
+        suspendingModuleContributions = true
+        defer { suspendingModuleContributions = false; resourceWorkerGeneration = UUID() }
+        do {
+            let result = try repository.withAtomicChanges(for: ids, operation)
+            installedModules = try repository.installed()
+            suspendingModuleContributions = false
+            synchronizeModuleContributions(previous: previous)
+            return result
+        } catch {
+            installedModules = (try? repository.installed()) ?? previous
+            applyConfiguration(configuration)
+            throw error
+        }
+    }
     func loadCommunityCatalogs() throws {
         guard let repository else { return }
         let communities = try repository.communityCatalogs()

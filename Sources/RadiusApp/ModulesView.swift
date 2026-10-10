@@ -70,7 +70,7 @@ struct ModuleCard: View {
                 if let installed {
                     if manifest.version > installed.manifest.version { Button("Update") { app.install(manifest.id) } }
                     else { Button(installed.enabled ? manifest.capability == .tabSystem ? "Replace…" : "Disable" : enableLabel) { app.toggleModule(installed) } }
-                    if !(manifest.settings ?? []).isEmpty { Button("Settings") { showingSettings = true }.popover(isPresented: $showingSettings) { ModuleSettingsView(manifest: manifest) } }
+                    if !(installed.manifest.settings ?? []).isEmpty { Button("Settings") { showingSettings = true }.popover(isPresented: $showingSettings) { ModuleSettingsView(manifest: installed.manifest) } }
                     Menu {
                         if manifest.runtime != nil { Button("Reinstall package…") { app.reinstallWorker(installed) } }
                         Button("Uninstall…", role: .destructive) { app.uninstall(installed) }

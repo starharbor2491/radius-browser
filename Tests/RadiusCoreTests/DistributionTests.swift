@@ -99,4 +99,33 @@ final class DistributionTests: XCTestCase {
         XCTAssertThrowsError(try old.validate(current: new, minimumEpoch: 155, architecture: "arm64"))
     }
 
+    func testNewInstallerCanReplaceOlderTrustedDestinationWithoutAuthorizingOldCandidate() throws {
+        let root = try temporary(), source = try app(root, "Candidate", contents: "20"), destination = try app(root, "Radius", contents: "19")
+        let journal = root.appendingPathComponent("journal.json")
+        let candidatePolicy: (URL) throws -> Void = { path in
+            guard try String(contentsOf: path.appendingPathComponent("version"), encoding: .utf8) == "20" else { throw ValidationError("Older candidate") }
+        }
+        let existingTrust: (URL) throws -> Void = { path in
+            let version = try String(contentsOf: path.appendingPathComponent("version"), encoding: .utf8)
+            guard ["19", "20"].contains(version) else { throw ValidationError("Untrusted original app") }
+        }
+        XCTAssertThrowsError(try candidatePolicy(destination))
+        try AppReplacementTransaction.install(source: source, destination: destination, journalURL: journal, verify: candidatePolicy, verifyExisting: existingTrust)
+        XCTAssertEqual(try String(contentsOf: destination.appendingPathComponent("version"), encoding: .utf8), "20")
+    }
+
+    func testOlderRunningInstallerCannotOverwriteNewerDestination() throws {
+        let root = try temporary(), source = try app(root, "Candidate", contents: "20"), destination = try app(root, "Radius", contents: "30")
+        let journal = root.appendingPathComponent("journal.json")
+        let candidate = DistributionRelease(build: 20, version: "1.0.0", securityEpoch: 155, architecture: "arm64", chromium: true)
+        let running = DistributionRelease(build: 20, version: "1.0.0", securityEpoch: 155, architecture: "arm64", chromium: true)
+        let installed = DistributionRelease(build: 30, version: "1.0.1", securityEpoch: 156, architecture: "arm64", chromium: true)
+        try candidate.validate(current: running, minimumEpoch: 155, architecture: "arm64")
+        XCTAssertThrowsError(try AppReplacementTransaction.install(source: source, destination: destination, journalURL: journal,
+            verify: { _ in try candidate.validate(current: running, minimumEpoch: 155, architecture: "arm64") },
+            verifyExisting: { _ in try candidate.validate(current: installed, minimumEpoch: 155, architecture: "arm64") }))
+        XCTAssertEqual(try String(contentsOf: destination.appendingPathComponent("version"), encoding: .utf8), "30")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: journal.path))
+    }
+
 }

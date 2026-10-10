@@ -6,6 +6,7 @@ import RadiusCore
 /// The native entry point selects a Radius profile. Chromium owns installation,
 /// permission prompts, updates and extension configuration inside that profile.
 struct ChromiumExtensionsView: View {
+    var initialProfileID: UUID? = nil
     @EnvironmentObject private var app: AppState
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var runtime = ChromiumRuntime.shared
@@ -47,7 +48,7 @@ struct ChromiumExtensionsView: View {
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding(20).frame(minWidth: 760, minHeight: 560)
-        .onAppear { if profileID == nil { profileID = app.library.profiles.first?.id } }
+        .onAppear { if profileID == nil { profileID = app.library.profiles.first(where: { $0.id == initialProfileID })?.id ?? app.library.profiles.first?.id } }
         .onChange(of: profileID) { _, _ in openProfile() }
         .onChange(of: app.library.profiles.map(\.id)) { _, ids in
             if let profileID, !ids.contains(profileID) { self.profileID = ids.first }

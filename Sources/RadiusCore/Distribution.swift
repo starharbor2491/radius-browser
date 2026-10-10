@@ -65,7 +65,7 @@ public enum AppReplacementTransaction {
         public var phase: String
     }
     public static func install(source: URL, destination: URL, journalURL: URL,
-                               verify: (URL) throws -> Void, checkpoint: (String) throws -> Void = { _ in }) throws {
+                               verify: (URL) throws -> Void, verifyExisting: ((URL) throws -> Void)? = nil, checkpoint: (String) throws -> Void = { _ in }) throws {
         let fm = FileManager.default
         guard source.standardizedFileURL != destination.standardizedFileURL,
               source.isFileURL, destination.isFileURL, journalURL.isFileURL,
@@ -82,7 +82,7 @@ public enum AppReplacementTransaction {
                   (try destination.resourceValues(forKeys: [.isDirectoryKey])).isDirectory == true else {
                 throw ValidationError("The installed application is not a regular app bundle.")
             }
-            try verify(destination)
+            if let verifyExisting { try verifyExisting(destination) } else { try verify(destination) }
         }
         try verify(source)
         let token = UUID().uuidString
@@ -118,7 +118,7 @@ public enum AppReplacementTransaction {
             throw error
         }
     }
-    public static func recover(journalURL: URL, expectedDestination: URL, verify: (URL) throws -> Void) throws {
+    public static func recover(journalURL: URL, expectedDestination: URL, verify: (URL) throws -> Void, verifyExisting: ((URL) throws -> Void)? = nil) throws {
         let fm = FileManager.default
         guard fm.fileExists(atPath: journalURL.path) else { return }
         let values = try journalURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
@@ -153,7 +153,7 @@ public enum AppReplacementTransaction {
             }
         }
         if !fm.fileExists(atPath: journal.destination.path), fm.fileExists(atPath: journal.backup.path) {
-            try verify(journal.backup)
+            if let verifyExisting { try verifyExisting(journal.backup) } else { try verify(journal.backup) }
             try fm.moveItem(at: journal.backup, to: journal.destination)
         }
         if !fm.fileExists(atPath: journal.destination.path), !fm.fileExists(atPath: journal.backup.path) {
@@ -168,7 +168,7 @@ public enum AppReplacementTransaction {
             }
         }
         if fm.fileExists(atPath: journal.destination.path) {
-            try verify(journal.destination)
+            if let verifyExisting { try verifyExisting(journal.destination) } else { try verify(journal.destination) }
             try? fm.removeItem(at: journal.candidate)
             try? fm.removeItem(at: journal.backup)
             if !fm.fileExists(atPath: journal.candidate.path), !fm.fileExists(atPath: journal.backup.path) { try fm.removeItem(at: journalURL) }

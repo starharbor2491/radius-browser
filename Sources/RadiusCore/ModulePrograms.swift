@@ -185,6 +185,11 @@ public struct ModuleDefinition: Codable, Equatable, Sendable {
             guard let theme else { throw ValidationError("Invalid theme values.") }
             var normalized = theme; normalized.normalize()
             guard normalized == theme else { throw ValidationError("Theme values exceed Radius's supported ranges.") }
+            guard (theme.surfaceHex == nil) == (theme.textHex == nil) else { throw ValidationError("Custom theme surface and text colors must be supplied together.") }
+            if let surface = theme.surfaceHex, let text = theme.textHex,
+               let a = InterfaceColor(hex: surface), let b = InterfaceColor(hex: text) {
+                guard a.contrastRatio(against: b) >= 4.5 else { throw ValidationError("Theme text must meet the 4.5:1 contrast threshold against its surface.") }
+            }
         case .layout:
             guard let layout else { throw ValidationError("Invalid layout values.") }
             var normalized = layout; normalized.normalize()

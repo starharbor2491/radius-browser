@@ -11,7 +11,22 @@ final class BrowserModel: ObservableObject {
     @Published var panel: BrowserPanel? = nil
     @Published var address = ""
     var addressEditing = false
-    @Published var focusMode = false
+    @Published var focusMode = false { didSet { if !focusMode { focusHiddenComponents = []; focusProviderID = nil } } }
+    @Published var focusHiddenComponents = Set<String>()
+    var focusProviderID: String?
+    func enterFocus() {
+        app.perform {
+            let requested = try app.requestedFocusPresentation()
+            focusHiddenComponents = requested.hiddenComponents; focusProviderID = requested.moduleID
+            focusMode = !requested.hiddenComponents.isEmpty
+        }
+    }
+    func exitFocus() {
+        if focusMode, app.installedModules.contains(where: { $0.id == focusProviderID && $0.enabled }) {
+            app.perform { _ = try app.behaviorResult(.focusMode, event: "exit") }
+        }
+        focusMode = false
+    }
     @Published var sheet: BrowserSheet?
     @Published var closedTabs: [BrowserTab] = []
     let isPrivate: Bool
@@ -32,6 +47,7 @@ final class BrowserModel: ObservableObject {
         app.registerWindow(self)
     }
     func webTab(_ id: UUID) -> BrowserEngineTab {
+        if app.deletingProfileIDs.contains(session.profileID) { return UnavailableEngineTab(engine: selectedTab.engineID ?? .webkit, reason: "This profile is being deleted.") }
         if let cached = webTabs[id] { return cached }
         let engine = session.tabs.first(where: { $0.id == id })?.engineID ?? .webkit
         // Quitting may be cancelled. Keep this placeholder out of the cache so
@@ -55,7 +71,7 @@ final class BrowserModel: ObservableObject {
     }
     private func attach(_ tab: BrowserEngineTab, id: UUID) {
         tab.onChange = { [weak self, weak tab] finished in
-            guard let self, !self.isClosed, let tab, let index = self.session.tabs.firstIndex(where: { $0.id == id }) else { return }
+            guard let self, !self.isClosed, !self.app.deletingProfileIDs.contains(self.session.profileID), self.app.library.profiles.contains(where: { $0.id == self.session.profileID }), let tab, let index = self.session.tabs.firstIndex(where: { $0.id == id }) else { return }
             if let url = tab.url, AddressResolver.isWebURL(url) || url.scheme == "blob" || url.absoluteString == "about:blank" ||
                 (tab.engineID == .chromium && ["chrome", "chrome-extension"].contains(url.scheme ?? "")) {
                 self.session.tabs[index].url = url

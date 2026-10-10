@@ -5,6 +5,7 @@ import Darwin
 import RadiusCore
 import RadiusDistribution
 import SwiftUI
+import UniformTypeIdentifiers
 
 @MainActor
 final class DistributionManager: ObservableObject {
@@ -19,6 +20,8 @@ final class DistributionManager: ObservableObject {
     private var directory: URL?
     private var operation: Task<Void, Never>?
     private var installerStarted = false
+    private var installerProcess: Process?
+    private var installerHelper: URL?
     private var generation = UUID()
     private var installOnQuit = false
     var isRestartRequested: Bool { installOnQuit }
@@ -35,7 +38,7 @@ final class DistributionManager: ObservableObject {
     func configure(dataDirectory: URL) {
         guard directory == nil else { return }
         directory = dataDirectory.resolvingSymlinksInPath().appendingPathComponent("Updates", isDirectory: true)
-        current = try? ReleaseTrust.metadata(of: Bundle.main.bundleURL)
+        current = try? ReleaseTrust.metadata(of: Bundle.main.bundleURL, requireCompatibleArchitecture: false)
         do {
             try FileManager.default.createDirectory(at: directory!, withIntermediateDirectories: true,
                                                     attributes: [.posixPermissions: 0o700])
@@ -69,7 +72,7 @@ final class DistributionManager: ObservableObject {
             try Task.checkCancellation()
             let catalog = try JSONDecoder().decode(DistributionCatalog.self, from: Data(contentsOf: file))
             try catalog.validate()
-            let current = try ReleaseTrust.metadata(of: Bundle.main.bundleURL)
+            let current = try ReleaseTrust.metadata(of: Bundle.main.bundleURL, requireCompatibleArchitecture: false)
             let floor = try self.securityFloor()
             self.available = catalog.releases.filter {
                 (try? $0.release.validate(current: current, minimumEpoch: floor, architecture: Self.architecture)) != nil
@@ -81,7 +84,7 @@ final class DistributionManager: ObservableObject {
         start(dataDirectory: dataDirectory) {
             try asset.validate()
             guard self.publisher != nil else { throw ValidationError("An official Developer ID signed Radius app is required for installation and updates.") }
-            let current = try ReleaseTrust.metadata(of: Bundle.main.bundleURL)
+            let current = try ReleaseTrust.metadata(of: Bundle.main.bundleURL, requireCompatibleArchitecture: false)
             try asset.release.validate(current: current, minimumEpoch: self.securityFloor(), architecture: Self.architecture)
             let file = self.directory!.appendingPathComponent("download-\(UUID().uuidString).dmg")
             defer { try? FileManager.default.removeItem(at: file) }
@@ -105,6 +108,7 @@ final class DistributionManager: ObservableObject {
         let panel = NSOpenPanel()
         panel.title = "Import a Radius installer"
         panel.message = "Choose an official signed Radius.app or offline Radius disk image. Browser data and your chosen modules are kept."
+        panel.allowedContentTypes = [.applicationBundle, .diskImage]
         panel.canChooseDirectories = true; panel.canChooseFiles = true; panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url,
               ["app", "dmg"].contains(url.pathExtension.lowercased()) else { return }
@@ -118,7 +122,16 @@ final class DistributionManager: ObservableObject {
         installOnQuit = true
         NSApp.terminate(nil)
     }
-    func cancelledQuit() { installOnQuit = false }
+    func cancelledQuit() {
+        installOnQuit = false
+        if let process = installerProcess, process.isRunning { process.terminate() }
+        if let executable = installerHelper,
+           executable.deletingLastPathComponent() == directory, executable.lastPathComponent.hasPrefix("RadiusUpdater-") {
+            try? FileManager.default.removeItem(at: executable)
+            try? FileManager.default.removeItem(at: executable.appendingPathExtension("ready"))
+        }
+        installerProcess = nil; installerHelper = nil; installerStarted = false
+    }
     func discardPending() {
         guard !busy, !installerStarted else { return }
         if let candidate { try? FileManager.default.removeItem(at: candidate.deletingLastPathComponent()) }
@@ -126,15 +139,15 @@ final class DistributionManager: ObservableObject {
         candidate = nil; destination = nil; pending = nil; installOnQuit = false; pendingRecordInvalid = false
         message = "The staged installer was removed. Your installed application is unchanged."
     }
-    /// Called by the quit delegate only after data flush, download cancellation,
-    /// worker shutdown and engine shutdown succeeded. A cancelled quit never
-    /// replaces the running bundle.
+    /// Start after data flush/quit approval and before irreversible engine
+    /// shutdown. The helper only activates after this PID exits. If quit is
+    /// refused, cancelledQuit() stops the helper while the parent remains alive.
     func launchPendingInstaller() async throws {
         guard let candidate, let destination, let directory, pending != nil, installOnQuit, !installerStarted else { return }
         guard let team = publisher else { throw ValidationError("The Radius publisher identity is unavailable.") }
-        let current = try ReleaseTrust.metadata(of: Bundle.main.bundleURL), floor = try securityFloor()
+        let current = try ReleaseTrust.metadata(of: Bundle.main.bundleURL, requireCompatibleArchitecture: false), floor = try securityFloor()
         try await Self.background { try Self.verify(candidate, team: team, current: current, floor: floor) }
-        let bundledHelper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/Updater/RadiusUpdater")
+        let bundledHelper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/Updater/" + Self.architecture + "/RadiusUpdater")
         let helper = directory.appendingPathComponent("RadiusUpdater-\(UUID().uuidString)")
         try await Self.background {
             try ReleaseTrust.verifySignature(bundledHelper, team: team, identifier: "org.radius.updater", notarized: false)
@@ -145,8 +158,27 @@ final class DistributionManager: ObservableObject {
         process.arguments = [String(ProcessInfo.processInfo.processIdentifier), candidate.path, destination.path,
                              journalURL!.path, String(floor), Bundle.main.bundlePath]
         process.standardInput = FileHandle.nullDevice
-        do { try process.run(); installerStarted = true }
-        catch { try? FileManager.default.removeItem(at: helper); throw error }
+        do {
+            try process.run(); installerProcess = process; installerHelper = helper
+            let ready = helper.appendingPathExtension("ready")
+            let clock = ContinuousClock(), deadline = ContinuousClock().now.advanced(by: .seconds(60))
+            while !FileManager.default.fileExists(atPath: ready.path) {
+                try Task.checkCancellation()
+                guard process.isRunning, clock.now < deadline else { throw ValidationError("The verified updater did not become ready. Radius has stayed open.") }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            let values = try ready.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+            guard values.isRegularFile == true, values.isSymbolicLink != true, values.fileSize == 5,
+                  try Data(contentsOf: ready) == Data("READY".utf8), process.isRunning else {
+                throw ValidationError("The updater's readiness response was invalid. Radius has stayed open.")
+            }
+            try FileManager.default.removeItem(at: ready)
+            installerStarted = true
+        } catch {
+            cancelledQuit()
+            try? FileManager.default.removeItem(at: helper)
+            throw error
+        }
     }
     private func start(dataDirectory: URL, action: @escaping @MainActor () async throws -> Void) {
         guard !busy, pending == nil else { return }
@@ -162,7 +194,7 @@ final class DistributionManager: ObservableObject {
     }
     private func stage(_ installer: URL, expected: DistributionRelease?) async throws {
         guard let team = publisher else { throw ValidationError("The Radius publisher identity is unavailable.") }
-        let current = try ReleaseTrust.metadata(of: Bundle.main.bundleURL)
+        let current = try ReleaseTrust.metadata(of: Bundle.main.bundleURL, requireCompatibleArchitecture: false)
         let stage = directory!.appendingPathComponent("stage-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         let imported = stage.appendingPathComponent("Radius.app", isDirectory: true)
@@ -212,6 +244,8 @@ final class DistributionManager: ObservableObject {
             try await Self.background {
                 try ReleaseTrust.verifyBundleTree(installDestination)
                 try ReleaseTrust.verifySignature(installDestination, team: team, identifier: "org.radius.browser", notarized: true)
+                let installed = try ReleaseTrust.metadata(of: installDestination, requireCompatibleArchitecture: false)
+                try release.validate(current: installed, minimumEpoch: floor, architecture: Self.architecture)
             }
         }
         try Task.checkCancellation()
@@ -248,7 +282,7 @@ final class DistributionManager: ObservableObject {
             return
         }
         guard (try stage.resourceValues(forKeys: [.isSymbolicLinkKey])).isSymbolicLink != true else { throw ValidationError("The staged installer location is a symbolic link.") }
-        let current = try ReleaseTrust.metadata(of: Bundle.main.bundleURL), floor = try securityFloor()
+        let current = try ReleaseTrust.metadata(of: Bundle.main.bundleURL, requireCompatibleArchitecture: false), floor = try securityFloor()
         try await Self.background {
             try Self.verify(saved.candidate, team: team, current: current, floor: floor)
             guard try ReleaseTrust.metadata(of: saved.candidate) == saved.release else { throw ValidationError("The staged installer version changed.") }

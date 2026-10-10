@@ -64,6 +64,7 @@ curl --noproxy '*' --connect-timeout 2 --max-time 5 -fsS "$smoke_url" >/dev/null
 RADIUS_SMOKE_TEST_DATA="$PWD/dist/smoke-data" \
 RADIUS_SMOKE_TEST_OUTPUT="$PWD/dist/screenshots" \
 RADIUS_SMOKE_TEST_URL="$smoke_url" \
+RADIUS_SMOKE_TEST_EXTENSION_FIXTURE="$PWD/Tests/Fixtures/ChromiumExtension" \
   dist/Radius.app/Contents/MacOS/Radius --smoke-test >dist/smoke-app.log 2>&1 &
 smoke_app_pid=$!
 (

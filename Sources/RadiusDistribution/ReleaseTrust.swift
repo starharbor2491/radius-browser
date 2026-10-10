@@ -36,7 +36,7 @@ public enum ReleaseTrust {
             throw ValidationError("The application is damaged, unnotarized, or signed by a different publisher. The installed app has been kept.")
         }
     }
-    public static func metadata(of app: URL) throws -> DistributionRelease {
+    public static func metadata(of app: URL, requireCompatibleArchitecture: Bool = true) throws -> DistributionRelease {
         guard let bundle = Bundle(url: app), bundle.bundleIdentifier == "org.radius.browser",
               bundle.executableURL?.lastPathComponent == "Radius" else {
             throw ValidationError("Choose a complete Radius application or Radius installer.")
@@ -57,7 +57,7 @@ public enum ReleaseTrust {
         #else
         let architecture = "x86_64", cpu = 16_777_223
         #endif
-        guard bundle.executableArchitectures?.contains(NSNumber(value: cpu)) == true else {
+        guard !requireCompatibleArchitecture || bundle.executableArchitectures?.contains(NSNumber(value: cpu)) == true else {
             throw ValidationError("The Radius executable does not support this Mac.")
         }
         let runtime = app.appendingPathComponent("Contents/Frameworks/Chromium.radiusengine", isDirectory: true)
@@ -68,10 +68,10 @@ public enum ReleaseTrust {
             let size = try manifest.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
             guard size > 0, size <= 4096,
                   let dictionary = try JSONSerialization.jsonObject(with: Data(contentsOf: manifest)) as? [String: Any],
-                  dictionary["architecture"] as? String == architecture,
+                  dictionary["architecture"] as? String == release.architecture,
+                  !requireCompatibleArchitecture || dictionary["architecture"] as? String == architecture,
                   dictionary["format"] as? Int == 2,
-                  dictionary["abi"] as? Int == 2,
-                  dictionary["runtimeStyle"] as? String == "chrome",
+                  !requireCompatibleArchitecture || (dictionary["abi"] as? Int == 2 && dictionary["runtimeStyle"] as? String == "chrome"),
                   let cef = dictionary["cefVersion"] as? String,
                   let major = cef.split(separator: ".").first.flatMap({ Int($0) }),
                   release.securityEpoch >= major else {

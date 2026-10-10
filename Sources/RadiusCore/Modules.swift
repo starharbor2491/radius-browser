@@ -11,7 +11,7 @@ public enum ModuleCapability: String, Codable, CaseIterable, Sendable {
         case .notes, .focusMode, .tabSystem, .theme, .layout, .icons, .menu, .startWidget: nil
         }
     }
-    public var isExclusive: Bool { [.resourceMonitor, .tabSystem, .theme, .layout, .icons, .menu].contains(self) }
+    public var isExclusive: Bool { [.resourceMonitor, .notes, .screenshot, .focusMode, .tabSystem, .theme, .layout, .icons, .menu].contains(self) }
 }
 public enum ModuleRuntime: String, Codable, Sendable {
     case nativeResourceWorker, nativeReaderWorker, behaviorProgram, declarative
@@ -80,6 +80,13 @@ public struct InstalledModule: Identifiable, Equatable, Sendable {
 }
 private struct ModuleReceipt: Codable { var enabled: Bool; var payloadSHA256: String? }
 private struct ModuleTransaction: Codable { let id: String; let stage: String; let backup: String }
+private struct ModuleBatchEntry: Codable { let id: String; let existed: Bool }
+private struct ModuleBatchTransaction: Codable {
+    let directory: String
+    let entries: [ModuleBatchEntry]
+    let selectors: [String: Data]
+    let absentSelectors: [String]
+}
 
 /// Every modern package stores its native code, behavior program, or declarative definition.
 /// Execution trust is checked by the application against its bundled first-party worker bytes.
@@ -90,6 +97,8 @@ public struct ModuleRepository: Sendable {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         try rejectLink(root)
         try recoverInterruptedInstallation()
+        try recoverBatchChanges()
+        try cleanOrphanBatchBackups()
     }
     public func installed() throws -> [InstalledModule] {
         let folders = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isSymbolicLinkKey, .isDirectoryKey], options: [.skipsHiddenFiles])
@@ -127,7 +136,8 @@ public struct ModuleRepository: Sendable {
             result[index].enabled = result[index].id == selected
         }
         for role in ModuleCapability.allCases where role.isExclusive && role != .resourceMonitor {
-            let selected = try roleSelection(role) ?? result.first(where: { $0.enabled && $0.manifest.capability == role })?.id
+            let selected = try roleSelection(role) ?? result.first(where: { $0.enabled && $0.manifest.capability == role && $0.manifest.runtime != nil })?.id
+                ?? result.first(where: { $0.enabled && $0.manifest.capability == role })?.id
             for index in result.indices where result[index].manifest.capability == role {
                 result[index].enabled = result[index].id == selected
             }
@@ -146,7 +156,7 @@ public struct ModuleRepository: Sendable {
         }
         return result
     }
-    public func installationPlan(for id: String, catalog: [ModuleManifest]) throws -> [ModuleManifest] {
+    public func installationPlan(for id: String, catalog: [ModuleManifest], includeInstalled: Bool = false) throws -> [ModuleManifest] {
         let existing = try installed()
         var index: [String: ModuleManifest] = [:]
         for manifest in catalog {
@@ -160,7 +170,7 @@ public struct ModuleRepository: Sendable {
             let catalogManifest = index[current]
             let installedManifest = existing.first(where: { $0.id == current })?.manifest
             let candidate: ModuleManifest?
-            if let installedManifest, installedManifest.version > (catalogManifest?.version ?? 0) { candidate = installedManifest }
+            if let installedManifest, installedManifest.version >= (catalogManifest?.version ?? 0) { candidate = installedManifest }
             else { candidate = catalogManifest ?? installedManifest }
             guard let manifest = candidate else {
                 throw ValidationError("A required module is missing: \(current).")
@@ -173,12 +183,63 @@ public struct ModuleRepository: Sendable {
                 try visit(dependency)
             }
             visiting.remove(current); visited.insert(current)
-            if !existing.contains(where: { $0.id == current && $0.manifest.version >= manifest.version && $0.enabled }) {
+            if includeInstalled || !existing.contains(where: { $0.id == current && $0.manifest.version >= manifest.version && $0.enabled }) {
                 result.append(manifest)
             }
         }
         try visit(id)
         return result
+    }
+    /// Dependency/setup changes either commit together or restore their package
+    /// and provider snapshots, including after a process interruption. Module data
+    /// lives separately and is deliberately not changed by this transaction.
+    public func withAtomicChanges<T>(for ids: [String], _ operation: () throws -> T) throws -> T {
+        guard !ids.isEmpty else { return try operation() }
+        guard ids.count <= 128, Set(ids).count == ids.count, ids.allSatisfy(ModuleManifest.validID) else { throw ValidationError("A module transaction exceeds its package limit.") }
+        let journal = root.appendingPathComponent(".batch-transaction.json")
+        guard !FileManager.default.fileExists(atPath: journal.path) else { throw ValidationError("Another module operation is pending. Relaunch Radius to recover it.") }
+        try recoverInterruptedInstallation()
+        let modules = try installed()
+        let backup = root.appendingPathComponent(".batch-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: backup, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        var journalWritten = false
+        defer { if !journalWritten { try? FileManager.default.removeItem(at: backup) } }
+        var entries: [ModuleBatchEntry] = [], bytes = 0
+        for id in ids {
+            let existing = modules.first(where: { $0.id == id })
+            entries.append(ModuleBatchEntry(id: id, existed: existing != nil))
+            if let existing {
+                let directory = root.appendingPathComponent(id), destination = backup.appendingPathComponent(id, isDirectory: true)
+                try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false)
+                let payload = existing.manifest.runtime?.isNative == true ? "worker" : existing.manifest.runtime == .behaviorProgram ? "program.json" : "definition.json"
+                for name in ["manifest.json", "receipt.json"] + (existing.manifest.runtime == nil ? [] : [payload]) {
+                    let file = directory.appendingPathComponent(name)
+                    guard FileManager.default.fileExists(atPath: file.path) else { continue }
+                    guard let size = try workerPayloadSize(file), size <= (name == "worker" ? 8 * 1024 * 1024 : name == "manifest.json" ? 32 * 1024 : name == "receipt.json" ? 1024 : 128 * 1024) else { throw ValidationError("A damaged package cannot be backed up. Reinstall it before changing a setup.") }
+                    bytes += size
+                    guard bytes <= 128 * 1024 * 1024 else { throw ValidationError("This module operation exceeds the 128 MB backup limit.") }
+                    try FileManager.default.copyItem(at: file, to: destination.appendingPathComponent(name))
+                }
+            }
+        }
+        var selectors: [String: Data] = [:], absent: [String] = []
+        for name in selectorNames {
+            let file = root.appendingPathComponent(name)
+            if FileManager.default.fileExists(atPath: file.path) { try rejectLink(file); selectors[name] = try boundedRead(file, limit: 1024) }
+            else { absent.append(name) }
+        }
+        let transaction = ModuleBatchTransaction(directory: backup.lastPathComponent, entries: entries, selectors: selectors, absentSelectors: absent)
+        try JSONEncoder().encode(transaction).write(to: journal, options: .atomic); journalWritten = true
+        do {
+            let result = try operation()
+            try FileManager.default.removeItem(at: journal)
+            journalWritten = false
+            return result
+        } catch {
+            try recoverInterruptedInstallation()
+            try recoverBatchChanges(); journalWritten = false
+            throw error
+        }
     }
     public func install(_ manifest: ModuleManifest, enabled: Bool? = nil, payload: Data? = nil) throws {
         try manifest.validate()
@@ -195,7 +256,7 @@ public struct ModuleRepository: Sendable {
         let existing = try installed()
         let previous = existing.first { $0.id == manifest.id }
         let exclusive = manifest.capability.isExclusive
-        let hasProvider = existing.contains { exclusive && $0.enabled && $0.manifest.capability == manifest.capability && $0.id != manifest.id }
+        let hasProvider = existing.contains { exclusive && $0.enabled && $0.manifest.capability == manifest.capability && $0.id != manifest.id && (manifest.runtime == nil || $0.manifest.runtime != nil) }
         let activate = enabled ?? previous?.enabled ?? !hasProvider
         let directory = root.appendingPathComponent(manifest.id, isDirectory: true)
         let staging = root.appendingPathComponent(".stage-" + UUID().uuidString, isDirectory: true)
@@ -270,9 +331,10 @@ public struct ModuleRepository: Sendable {
         guard role.isExclusive else { throw ValidationError("This module role allows multiple independent modules.") }
         if role == .resourceMonitor { try replaceResourceProvider(with: id); return }
         let modules = try installed()
-        guard let replacement = modules.first(where: { $0.id == id && $0.manifest.capability == role }),
-              replacement.manifest.runtime == .declarative else { throw ValidationError("Choose an installed declarative provider for this role.") }
-        _ = try definition(for: id, requireEnabled: false)
+        guard let replacement = modules.first(where: { $0.id == id && $0.manifest.capability == role }) else { throw ValidationError("Choose an installed provider for this role.") }
+        if replacement.manifest.runtime == .behaviorProgram { _ = try behaviorProgram(for: id, requireEnabled: false) }
+        else if replacement.manifest.runtime == .declarative { _ = try definition(for: id, requireEnabled: false) }
+        else { throw ValidationError("Choose a compatible data program or declarative provider.") }
         guard replacement.manifest.dependencies.allSatisfy({ dependency in modules.contains { $0.id == dependency && $0.enabled && $0.manifest.version >= (replacement.manifest.dependencyVersions?[dependency] ?? 1) } }) else {
             throw ValidationError("Enable this provider's dependencies first.")
         }
@@ -432,6 +494,59 @@ public struct ModuleRepository: Sendable {
         }
         for file in [stage, backup] where FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
         try FileManager.default.removeItem(at: journal)
+    }
+    private var selectorNames: [String] {
+        [".resource-provider.json"] + ModuleCapability.allCases.filter { $0.isExclusive && $0 != .resourceMonitor }.map { ".role-" + $0.rawValue + ".json" }
+    }
+    private func recoverBatchChanges() throws {
+        let journal = root.appendingPathComponent(".batch-transaction.json")
+        guard FileManager.default.fileExists(atPath: journal.path) else { return }
+        try rejectLink(journal)
+        let transaction = try JSONDecoder().decode(ModuleBatchTransaction.self, from: boundedRead(journal, limit: 32 * 1024))
+        guard transaction.directory.hasPrefix(".batch-"), UUID(uuidString: String(transaction.directory.dropFirst(7))) != nil,
+              transaction.entries.count <= 128, !transaction.entries.isEmpty,
+              transaction.entries.allSatisfy({ ModuleManifest.validID($0.id) }),
+              Set(transaction.entries.map(\.id)).count == transaction.entries.count,
+              Set(transaction.selectors.keys).isDisjoint(with: transaction.absentSelectors),
+              Set(transaction.selectors.keys).union(transaction.absentSelectors) == Set(selectorNames),
+              transaction.selectors.values.allSatisfy({ $0.count <= 1024 }) else { throw ValidationError("An interrupted module operation has an invalid recovery journal.") }
+        let backup = root.appendingPathComponent(transaction.directory, isDirectory: true)
+        try rejectLink(backup)
+        guard try backup.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else { throw ValidationError("Module recovery backups are missing. Open Recovery.") }
+        // Validate every backup before restoring any package.
+        for entry in transaction.entries where entry.existed {
+            let directory = backup.appendingPathComponent(entry.id); try rejectLink(directory)
+            let file = directory.appendingPathComponent("manifest.json"); try rejectLink(file)
+            guard try ModuleManifest.decode(boundedRead(file, limit: 32 * 1024)).id == entry.id else { throw ValidationError("A module recovery backup has invalid metadata.") }
+            for child in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) { try rejectLink(child) }
+        }
+        for entry in transaction.entries {
+            let destination = root.appendingPathComponent(entry.id)
+            if entry.existed {
+                let restore = root.appendingPathComponent(".restore-" + UUID().uuidString)
+                try FileManager.default.copyItem(at: backup.appendingPathComponent(entry.id), to: restore)
+                defer { try? FileManager.default.removeItem(at: restore) }
+                if FileManager.default.fileExists(atPath: destination.path) { try rejectLink(destination); try FileManager.default.removeItem(at: destination) }
+                try FileManager.default.moveItem(at: restore, to: destination)
+            } else if FileManager.default.fileExists(atPath: destination.path) { try rejectLink(destination); try FileManager.default.removeItem(at: destination) }
+        }
+        for (name, data) in transaction.selectors {
+            let file = root.appendingPathComponent(name)
+            if FileManager.default.fileExists(atPath: file.path) { try rejectLink(file) }
+            try data.write(to: file, options: .atomic)
+        }
+        for name in transaction.absentSelectors {
+            let file = root.appendingPathComponent(name)
+            if FileManager.default.fileExists(atPath: file.path) { try rejectLink(file); try FileManager.default.removeItem(at: file) }
+        }
+        try FileManager.default.removeItem(at: journal)
+        try FileManager.default.removeItem(at: backup)
+    }
+    private func cleanOrphanBatchBackups() throws {
+        for path in try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+            where path.lastPathComponent.hasPrefix(".batch-") && UUID(uuidString: String(path.lastPathComponent.dropFirst(7))) != nil {
+            try rejectLink(path); try FileManager.default.removeItem(at: path)
+        }
     }
     private func requireNoDependents(_ id: String, modules: [InstalledModule]) throws {
         if let dependent = modules.first(where: { $0.manifest.dependencies.contains(id) }) {

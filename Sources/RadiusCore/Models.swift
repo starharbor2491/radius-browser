@@ -354,6 +354,7 @@ public struct LibraryState: Codable, Equatable, Sendable {
     public var notes: [Note] = []
     public var sessions: [WindowSession] = []
     public var pendingProfileDeletions: [UUID]?
+    public var pendingWebsiteDataClears: [UUID]?
     public var preferences = Preferences()
     public init() {}
     public mutating func normalize() {
@@ -361,6 +362,7 @@ public struct LibraryState: Codable, Equatable, Sendable {
         profiles = Array(profiles.filter { profilesSeen.insert($0.id).inserted }.prefix(20))
         if profiles.isEmpty { profiles = [Profile(name: "Personal")] }
         let profileIDs = Set(profiles.map(\.id))
+        if let pendingWebsiteDataClears { self.pendingWebsiteDataClears = Array(Set(pendingWebsiteDataClears).intersection(profileIDs)).sorted { $0.uuidString < $1.uuidString } }
         if let pendingProfileDeletions {
             var seen = Set<UUID>()
             self.pendingProfileDeletions = Array(pendingProfileDeletions.filter { !profileIDs.contains($0) && seen.insert($0).inserted }.prefix(100))
