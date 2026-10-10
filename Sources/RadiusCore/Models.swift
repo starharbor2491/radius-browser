@@ -292,6 +292,9 @@ public struct Theme: Codable, Equatable, Sendable {
         if let value = accentHex, InterfaceColor(hex: value) == nil { accentHex = nil }
         if let value = surfaceHex, InterfaceColor(hex: value) == nil { surfaceHex = nil }
         if let value = textHex, InterfaceColor(hex: value) == nil { textHex = nil }
+        // Imported and persisted configurations need the same paired colors as
+        // the editor; one custom color cannot safely follow system appearance.
+        if (surfaceHex == nil) != (textHex == nil) { surfaceHex = nil; textHex = nil }
         tabsAppearance?.normalize(); navigationAppearance?.normalize(); sidebarAppearance?.normalize()
     }
 }

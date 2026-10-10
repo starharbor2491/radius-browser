@@ -87,9 +87,11 @@ final class ChromiumTab: BrowserEngineTab {
         // Views activation transition. Use the actual owned NSWindow event to
         // keep Radius's selected split pane and native commands synchronized.
         chromeFocusObserver = NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main) { [weak self] notification in
+            guard let window = notification.object as? NSWindow else { return }
+            let windowID = ObjectIdentifier(window)
             MainActor.assumeIsolated {
-                guard let self, let window = notification.object as? NSWindow,
-                      window === self.chromeWindow else { return }
+                guard let self, let chrome = self.chromeWindow,
+                      windowID == ObjectIdentifier(chrome) else { return }
                 self.onActivate?()
             }
         }

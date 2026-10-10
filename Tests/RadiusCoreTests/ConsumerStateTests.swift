@@ -130,7 +130,7 @@ import Testing
     config.normalize()
     #expect(config.theme.cornerRadius == 10 && config.theme.fontScale == 1 && config.theme.spacingScale == 0.75)
     #expect(config.theme.borderWidth == 2 && config.theme.shadowStrength == 0)
-    #expect(config.theme.accentHex == nil && config.theme.textHex == nil && config.theme.surfaceHex == "#12aBf0")
+    #expect(config.theme.accentHex == nil && config.theme.textHex == nil && config.theme.surfaceHex == nil)
     #expect(config.theme.navigationAppearance?.cornerRadius == 10 && config.theme.navigationAppearance?.fontScale == 1.4)
     #expect(config.layout.sidebarWidth == 240 && config.layout.addressWidth == 0.4 && config.layout.tabsWidth == 320)
     #expect(config.layout.tabs == .leading && config.layout.secondaryPanel == nil)
@@ -150,6 +150,43 @@ import Testing
     #expect(InterfaceColor(hex: "12abCD") == InterfaceColor(hex: "#12ABcd"))
     for input in ["FFF", "FFFFFFFF", "#GGGGGG", "#１２３４５６", " 123456", "123456 ", "##123456"] {
         #expect(InterfaceColor(hex: input) == nil)
+    }
+}
+
+@Test func importedAndPersistedCustomColorsStayPairedAcrossSystemAppearances() async throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("radius-color-pair-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let cases: [(surface: String?, text: String?, mode: ColorMode)] = [
+        (nil, "#FFFFFF", .light), ("#000000", nil, .dark),
+        ("#FFFFFF", "invalid", .light), ("#17212B", "#F1F5F9", .dark)
+    ]
+    for (index, colors) in cases.enumerated() {
+        var configuration = Configuration()
+        configuration.theme.surfaceHex = colors.surface; configuration.theme.textHex = colors.text
+        configuration.theme.colorMode = colors.mode; configuration.theme.accentHex = "#66D9CC"
+        configuration.theme.typography = .rounded
+        let imported = try SetupPack.decode(JSONEncoder().encode(SetupPack(name: "Color setup", configuration: configuration)))
+        let expectedSurface = index == cases.count - 1 ? "#17212B" : nil
+        let expectedText = index == cases.count - 1 ? "#F1F5F9" : nil
+        #expect(imported.configuration.theme.surfaceHex == expectedSurface)
+        #expect(imported.configuration.theme.textHex == expectedText)
+        #expect(imported.configuration.theme.colorMode == colors.mode)
+        #expect(imported.configuration.theme.accentHex == "#66D9CC" && imported.configuration.theme.typography == .rounded)
+
+        // Save the original malformed values to exercise startup repair, including
+        // named setups; an export/import round trip alone would miss this path.
+        let databaseURL = directory.appendingPathComponent("library-\(index).sqlite")
+        let database = try LibraryDatabase(url: databaseURL)
+        var library = LibraryState()
+        library.preferences.configuration = configuration
+        library.preferences.savedConfigurations = [NamedConfiguration(name: "Saved colors", configuration: configuration)]
+        try await database.save(library, revision: 1)
+        try await database.checkpoint()
+        let reopened = try LibraryDatabase(url: databaseURL)
+        let restored = try await reopened.load()
+        #expect(restored.preferences.configuration == imported.configuration)
+        #expect(restored.preferences.savedConfigurations.first?.configuration == imported.configuration)
+        #expect(restored.profiles == library.profiles)
     }
 }
 

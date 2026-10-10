@@ -166,6 +166,10 @@ import Testing
     #expect(throws: (any Error).self) { try ModuleDefinition.decode(badTheme, capability: .theme) }
     let lowContrast = Data(##"{"formatVersion":1,"theme":{"design":"native","colorMode":"light","accent":"blue","density":"comfortable","cornerRadius":10,"transparency":false,"reducedMotion":false,"surfaceHex":"#ffffff","textHex":"#eeeeee"}}"##.utf8)
     #expect(throws: (any Error).self) { try ModuleDefinition.decode(lowContrast, capability: .theme) }
+    let unpairedColors = Data(##"{"formatVersion":1,"theme":{"design":"native","colorMode":"light","accent":"blue","density":"comfortable","cornerRadius":10,"transparency":false,"reducedMotion":false,"textHex":"#ffffff"}}"##.utf8)
+    #expect(throws: ValidationError("Custom theme surface and text colors must be supplied together.")) {
+        try ModuleDefinition.decode(unpairedColors, capability: .theme)
+    }
     #expect(throws: (any Error).self) { try ModuleDefinition.decode(Data(#"{"formatVersion":1,"icons":{"arbitraryComponent":"bookmark"}}"#.utf8), capability: .icons) }
 }
 
