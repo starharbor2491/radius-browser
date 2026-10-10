@@ -28,14 +28,17 @@ enum ChromiumAcceptance {
             guard ContinuousClock.now < pickerDeadline else { throw ValidationError("The extension sheet's native profile selector was not available.") }
             if profilePicker == nil { try await Task.sleep(for: .milliseconds(100)) }
         }
-        guard let profilePicker, let action = profilePicker.action else { throw ValidationError("The extension profile selector has no native action.") }
+        // SwiftUI routes popup selections through each native menu item; the
+        // NSPopUpButton itself need not have an action.
+        guard let profilePicker, let selection = profilePicker.item(withTitle: profile.name),
+              let action = selection.action else { throw ValidationError("The extension profile selector has no native menu selection action.") }
         // A profile selection can arrive while an asynchronous Quit is still
         // awaiting its save decision. It must hide the old profile immediately
         // and create the selected manager only after cancellation resumes work.
         browser.app.terminating = true
         defer { browser.app.terminating = false }
         profilePicker.selectItem(withTitle: profile.name)
-        guard NSApp.sendAction(action, to: profilePicker.target, from: profilePicker) else {
+        guard NSApp.sendAction(action, to: selection.target, from: selection) else {
             throw ValidationError("The extension profile selector did not handle its native selection action.")
         }
         try await Task.sleep(for: .milliseconds(300))
