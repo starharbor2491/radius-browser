@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 import AppKit
+import CoreServices
+import RadiusCore
 import SwiftUI
 @preconcurrency import WebKit
 
@@ -13,9 +15,18 @@ final class DownloadItem: ObservableObject, Identifiable {
     var approvedReplacement = false
     @Published var active = true
     @Published var fraction = 0.0
-    let download: WKDownload
+    let download: WKDownload?
+    let chromiumID: String?
+    var sourceURL: URL?
+    var cancelChromium: (() -> Void)?
+    var destinationPanel: NSSavePanel?
+    var cancellationRequested = false
+    var transferEnded = false
     var progressObservation: NSKeyValueObservation?
-    init(_ download: WKDownload) { self.download = download }
+    init(_ download: WKDownload) { self.download = download; chromiumID = nil }
+    init(chromiumID: String, sourceURL: URL?, cancel: @escaping () -> Void) {
+        download = nil; self.chromiumID = chromiumID; self.sourceURL = sourceURL; cancelChromium = cancel
+    }
 }
 @MainActor
 final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
@@ -24,28 +35,80 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
         let item = DownloadItem(download); items.insert(item, at: 0); download.delegate = self
         item.progressObservation = download.progress.observe(\.fractionCompleted, options: [.new]) { [weak item] _, change in
             let fraction = change.newValue ?? 0
-            Task { @MainActor [weak item] in item?.fraction = fraction }
+            Task { @MainActor [weak item] in
+                guard let item, item.active else { return }
+                item.fraction = fraction
+            }
         }
     }
     private func item(_ download: WKDownload) -> DownloadItem? { items.first { $0.download === download } }
     func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping @MainActor @Sendable (URL?) -> Void) {
         guard let item = item(download) else { completionHandler(nil); return }
-        let cleanName = URL(fileURLWithPath: suggestedFilename).lastPathComponent
+        item.sourceURL = response.url
+        chooseDestination(for: item, suggestedName: suggestedFilename, completion: completionHandler)
+    }
+    /// IDs must be unique across the runtime, including downloads from different tabs.
+    func beginChromium(id: String, suggestedName: String, sourceURL: URL?, cancel: @escaping () -> Void,
+                       completion: @escaping (URL?) -> Void) {
+        guard !items.contains(where: { $0.chromiumID == id }) else { completion(nil); return }
+        let item = DownloadItem(chromiumID: id, sourceURL: sourceURL, cancel: cancel)
+        items.insert(item, at: 0)
+        chooseDestination(for: item, suggestedName: suggestedName, completion: completion)
+    }
+    /// A terminal update acknowledges that Chromium has closed the staging file.
+    /// Keep these updates connected after cancellation so shutdown can await cleanup.
+    func updateChromium(id: String, fraction: Double, complete: Bool, cancelled: Bool, interrupted: Bool) {
+        guard let item = items.first(where: { $0.chromiumID == id }), !item.transferEnded else { return }
+        if complete || cancelled || interrupted {
+            item.destinationPanel?.cancel(nil)
+            if item.cancellationRequested || cancelled { finishCancellation(item) }
+            else if interrupted { fail(item, message: "Download interrupted") }
+            else { finish(item) }
+        } else if item.active, fraction.isFinite {
+            item.fraction = min(1, max(0, fraction))
+        }
+    }
+    private func chooseDestination(for item: DownloadItem, suggestedName: String, completion: @MainActor (URL?) -> Void) {
+        guard item.active else { completion(nil); return }
+        let cleanName = URL(fileURLWithPath: suggestedName).lastPathComponent
         item.name = cleanName.isEmpty ? "Download" : cleanName
         let panel = NSSavePanel(); panel.nameFieldStringValue = item.name
         panel.message = "Save this download. Files are never opened automatically."
-        guard panel.runModal() == .OK, let url = panel.url else {
-            item.status = "Cancelled"; item.active = false; item.progressObservation = nil; completionHandler(nil); return
+        item.destinationPanel = panel
+        let choice = panel.runModal()
+        item.destinationPanel = nil
+        guard item.active, choice == .OK, let url = panel.url else {
+            if item.active { cancel(item) }
+            completion(nil)
+            return
         }
         let staging = url.deletingLastPathComponent().appendingPathComponent(".radius-download-" + UUID().uuidString + ".part")
         item.approvedReplacement = FileManager.default.fileExists(atPath: url.path)
-        item.destination = url; item.staging = staging; item.status = "Downloading"; completionHandler(staging)
+        item.destination = url; item.staging = staging; item.status = "Downloading"; completion(staging)
     }
     func downloadDidFinish(_ download: WKDownload) {
         guard let item = item(download) else { return }
+        if item.cancellationRequested { finishCancellation(item) }
+        else { finish(item) }
+    }
+    private func finish(_ item: DownloadItem) {
+        guard !item.transferEnded else { return }
+        // Mark the writer finished before presenting a replacement alert, whose
+        // nested run loop can deliver additional Chromium terminal updates.
+        item.transferEnded = true
         item.active = false; item.progressObservation = nil
+        defer { endTransfer(item) }
         guard let staging = item.staging, let destination = item.destination else { item.status = "Failed: missing destination"; return }
         do {
+            // Apply quarantine before moving or replacing anything. A failed save
+            // retains the completed staging file for the user's Finder action.
+            var quarantine: [String: Any] = [
+                kLSQuarantineTypeKey as String: kLSQuarantineTypeWebDownload,
+                kLSQuarantineAgentNameKey as String: "Radius",
+                kLSQuarantineTimeStampKey as String: Date()
+            ]
+            if let sourceURL = item.sourceURL { quarantine[kLSQuarantineDataURLKey as String] = sourceURL }
+            try (staging as NSURL).setResourceValue(quarantine, forKey: .quarantinePropertiesKey)
             if FileManager.default.fileExists(atPath: destination.path) {
                 if !item.approvedReplacement {
                     let alert = NSAlert(); alert.messageText = "Replace a file that appeared during this download?"
@@ -55,33 +118,84 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
                         item.status = "Download complete. Existing file kept; downloaded copy is available in Finder."; item.fraction = 1; return
                     }
                 }
-                _ = try FileManager.default.replaceItemAt(destination, withItemAt: staging)
+                _ = try FileManager.default.replaceItemAt(destination, withItemAt: staging,
+                                                         backupItemName: nil, options: .usingNewMetadataOnly)
             } else { try FileManager.default.moveItem(at: staging, to: destination) }
             item.staging = nil; item.fraction = 1; item.status = "Finished"
         } catch { item.status = "Failed to save: \(error.localizedDescription). Temporary file kept at \(staging.path)." }
     }
     func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
         guard let item = item(download) else { return }
-        item.active = false; item.status = "Failed: \(error.localizedDescription)"; item.progressObservation = nil
-        if let staging = item.staging { try? FileManager.default.removeItem(at: staging); item.staging = nil }
+        if item.cancellationRequested { finishCancellation(item) }
+        else { fail(item, message: error.localizedDescription) }
+    }
+    private func fail(_ item: DownloadItem, message: String) {
+        guard !item.transferEnded else { return }
+        item.active = false; item.status = "Failed: \(message)"
+        removeStaging(item); endTransfer(item)
+    }
+    private func finishCancellation(_ item: DownloadItem) {
+        guard !item.transferEnded else { return }
+        item.active = false; item.status = "Cancelled"
+        removeStaging(item); endTransfer(item)
+    }
+    private func removeStaging(_ item: DownloadItem) {
+        if let staging = item.staging {
+            do { try FileManager.default.removeItem(at: staging); item.staging = nil }
+            catch {
+                if !FileManager.default.fileExists(atPath: staging.path) { item.staging = nil }
+                else { item.status += ". Temporary file could not be removed: \(error.localizedDescription)" }
+            }
+        }
+    }
+    private func endTransfer(_ item: DownloadItem) {
+        item.transferEnded = true; item.progressObservation = nil; item.cancelChromium = nil
     }
     func cancel(_ item: DownloadItem) {
         guard item.active else { return }
-        let staging = item.staging
-        item.download.cancel { _ in if let staging { try? FileManager.default.removeItem(at: staging) } }
-        item.staging = nil
-        item.active = false; item.status = "Cancelled"; item.progressObservation = nil
-    }
-    func cancelAll() { items.filter(\.active).forEach(cancel) }
-    func cancelAllAndWait() async {
-        for item in items where item.active {
-            let staging = item.staging
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                item.download.cancel { _ in continuation.resume() }
+        item.cancellationRequested = true
+        item.active = false; item.status = "Cancelling…"; item.progressObservation = nil
+        item.destinationPanel?.cancel(nil)
+        if let download = item.download {
+            download.cancel { [self, item] _ in
+                Task { @MainActor in
+                    self.finishCancellation(item)
+                }
             }
-            item.active = false; item.status = "Cancelled"; item.progressObservation = nil; item.staging = nil
-            if let staging { try? FileManager.default.removeItem(at: staging) }
+        } else {
+            // Chromium's terminal update performs cleanup after its writer closes.
+            item.cancelChromium?()
         }
     }
-    var hasActive: Bool { items.contains(where: \.active) }
+    func cancelAll() { items.filter(\.active).forEach(cancel) }
+    func cancelAllAndWait(timeout: Duration = .seconds(10)) async throws {
+        try await cancelAndWait(items.filter { !$0.transferEnded }, timeout: timeout)
+    }
+    func cancelChromiumAndWait(ids: Set<String>, timeout: Duration = .seconds(10)) async throws {
+        try await cancelAndWait(items.filter { item in
+            !item.transferEnded && item.chromiumID.map { ids.contains($0) } == true
+        }, timeout: timeout)
+    }
+    private func cancelAndWait(_ pending: [DownloadItem], timeout: Duration) async throws {
+        pending.forEach(cancel)
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while pending.contains(where: { !$0.transferEnded }) {
+            try Task.checkCancellation()
+            if clock.now >= deadline {
+                // An engine failure may prevent the final callback. Keep both the
+                // item and staging file intact so a late update can still clean
+                // up safely, and allow the user to retry cancellation.
+                for item in pending where !item.transferEnded {
+                    item.active = true
+                    item.status = item.staging == nil
+                        ? "Cancellation not confirmed. Try cancelling again."
+                        : "Cancellation not confirmed. Temporary file kept; try cancelling again."
+                }
+                throw ValidationError("The browser engine has not confirmed that all downloads stopped. Any temporary files have been kept. Try cancelling again before closing Radius.")
+            }
+            try await clock.sleep(until: min(deadline, clock.now.advanced(by: .milliseconds(50))))
+        }
+    }
+    var hasActive: Bool { items.contains { !$0.transferEnded } }
 }

@@ -12,13 +12,16 @@ final class AppState: ObservableObject {
     @Published var installedModules: [InstalledModule] = [] { didSet { resourceWorkerGeneration = UUID() } }
     @Published private(set) var resourceWorkerGeneration = UUID()
     @Published var previewConfiguration: Configuration?
+    @Published var deletingProfileIDs = Set<UUID>()
     let dataDirectory: URL
-    private(set) var catalog: [ModuleManifest] = []
-    private var modulePayloads: [String: Data] = [:]
+    @Published var catalog: [ModuleManifest] = []
+    @Published var communityCatalogNames: [String] = []
+    var bundledModuleIDs = Set<String>()
+    var modulePayloads: [String: Data] = [:]
     private var readerRequests: [UUID: (moduleID: String, task: Task<String, any Error>)] = [:]
     private var startupTask: Task<Void, Never>?
     private var database: LibraryDatabase?
-    private var repository: ModuleRepository?
+    var repository: ModuleRepository?
     private var saveTask: Task<Void, Never>?
     private var revision: UInt64 = 0
     private var claimedSessions = Set<UUID>()
@@ -56,7 +59,11 @@ final class AppState: ObservableObject {
                 let available = catalog.filter { $0.runtime == nil || modulePayloads[$0.id] != nil }
                 try repo.seedDefaults(available, payloads: modulePayloads)
                 installedModules = try repo.installed()
+                try refreshBundledNativePackages()
+                try loadCommunityCatalogs()
             } catch { notice = "Optional modules could not load: \(error.localizedDescription). Open Recovery to repair them." }
+            await finishPendingProfileDeletions()
+            DistributionManager.shared.configure(dataDirectory: dataDirectory)
             ready = true; startupError = nil
         } catch { startupError = error.localizedDescription }
     }
@@ -72,10 +79,21 @@ final class AppState: ObservableObject {
         catalog = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
             .filter { $0.hasDirectoryPath }.map { try ModuleManifest.decode(Data(contentsOf: $0.appendingPathComponent("manifest.json"))) }
             .sorted { $0.name < $1.name }
+        bundledModuleIDs = Set(catalog.map(\.id))
         modulePayloads = [:]
         let workers = ["org.radius.resource-monitor": "RadiusResourceMonitor", "org.radius.memory-monitor": "RadiusMemoryMonitor", "org.radius.reader": "RadiusReaderWorker"]
         for manifest in catalog where manifest.runtime != nil {
             do {
+                if manifest.runtime == .behaviorProgram || manifest.runtime == .declarative {
+                    let url = directory.appendingPathComponent(manifest.id).appendingPathComponent(manifest.runtime == .behaviorProgram ? "program.json" : "definition.json")
+                    let size = try url.resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey])
+                    guard size.isSymbolicLink != true, (size.fileSize ?? 0) > 0, (size.fileSize ?? 0) <= 128 * 1024 else { throw ValidationError("Invalid bundled module payload.") }
+                    let bytes = try Data(contentsOf: url)
+                    if manifest.runtime == .behaviorProgram { try ModuleProgram.decode(bytes).validate(capability: manifest.capability) }
+                    else { try validateDefinitionForPlatform(ModuleDefinition.decode(bytes, capability: manifest.capability)) }
+                    modulePayloads[manifest.id] = bytes
+                    continue
+                }
                 guard let product = workers[manifest.id] else { throw ValidationError("An unrecognized native worker is bundled with Radius.") }
                 let packaged = directory.appendingPathComponent(manifest.id).appendingPathComponent("worker")
                 // SwiftPM development builds put executable products beside their resource bundle.
@@ -83,12 +101,18 @@ final class AppState: ObservableObject {
                 let size = try executable.resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey])
                 guard size.isSymbolicLink != true, (size.fileSize ?? 0) > 0, (size.fileSize ?? 0) <= 8 * 1024 * 1024 else { throw ValidationError("Invalid bundled worker payload.") }
                 modulePayloads[manifest.id] = try Data(contentsOf: executable)
-            } catch { notice = "\(manifest.name) is unavailable because its bundled worker could not load. Rebuild or reinstall Radius to use it. Browsing is still available." }
+            } catch { notice = "\(manifest.name) is unavailable because its bundled package could not load. Rebuild or reinstall Radius to use it. Browsing is still available." }
         }
     }
     func enabled(_ capability: ModuleCapability) -> Bool {
         installedModules.contains {
-            $0.enabled && $0.manifest.capability == capability && (capability != .reader || $0.manifest.runtime == .nativeReaderWorker)
+            guard $0.enabled && $0.manifest.capability == capability else { return false }
+            switch capability {
+            case .reader: return $0.manifest.runtime == .nativeReaderWorker
+            case .resourceMonitor: return $0.manifest.runtime == .nativeResourceWorker
+            case .notes, .screenshot, .focusMode: return $0.manifest.runtime == .behaviorProgram
+            default: return $0.manifest.runtime == .declarative
+            }
         }
     }
     func resourceWorkerPackage() throws -> (id: String, url: URL) {
@@ -100,8 +124,8 @@ final class AppState: ObservableObject {
         }
         return try validatedWorkerPackage(id: module.id)
     }
-    private func validatedWorkerPackage(id: String, requireEnabled: Bool = true) throws -> (id: String, url: URL) {
-        guard let module = installedModules.first(where: { $0.id == id }), module.manifest.runtime != nil,
+    func validatedWorkerPackage(id: String, requireEnabled: Bool = true) throws -> (id: String, url: URL) {
+        guard let module = installedModules.first(where: { $0.id == id }), module.manifest.runtime?.isNative == true,
               let repository, let trusted = modulePayloads[id],
               catalog.contains(module.manifest) else { throw ValidationError("This worker is not a trusted package from this Radius build. Update it in Modules.") }
         let url = try repository.workerURL(for: id, requireEnabled: requireEnabled)
@@ -155,7 +179,7 @@ final class AppState: ObservableObject {
         perform {
             guard let repository else { throw ValidationError("Open Recovery to repair module storage first.") }
             let plan = try repository.installationPlan(for: id, catalog: catalog)
-            if !approveModules(plan) { return }
+            if !approveModules(plan, activateDependencies: installedModules.first(where: { $0.id == id })?.enabled ?? true) { return }
             try installApprovedModule(id)
         }
     }
@@ -165,10 +189,30 @@ final class AppState: ObservableObject {
         let plan = try repository.installationPlan(for: id, catalog: catalog)
         defer { resourceWorkerGeneration = UUID() }
         let activate = installedModules.first { $0.id == id }?.enabled ?? true
+        // Validate every candidate before stopping any healthy worker. Existing
+        // disabled dependencies can be enabled without reinstalling their code.
         for manifest in plan {
+            if let existing = installedModules.first(where: { $0.id == manifest.id && $0.manifest == manifest }) {
+                try validateModulePayload(existing, requireEnabled: false)
+                continue
+            }
+            guard let payload = modulePayloads[manifest.id] else { throw ValidationError("The catalog is missing \(manifest.name)'s package payload.") }
+            if manifest.runtime == .behaviorProgram { try ModuleProgram.decode(payload).validate(capability: manifest.capability) }
+            else if manifest.runtime == .declarative { try validateDefinitionForPlatform(ModuleDefinition.decode(payload, capability: manifest.capability)) }
+            else { guard manifest.runtime?.isNative == true, bundledModuleIDs.contains(manifest.id), !payload.isEmpty, payload.count <= 8 * 1024 * 1024 else { throw ValidationError("This native package is not a trusted bundled worker.") } }
+        }
+        for manifest in plan {
+            if let existing = installedModules.first(where: { $0.id == manifest.id && $0.manifest == manifest }) {
+                if manifest.id != id && activate && !existing.enabled {
+                    if manifest.capability.isExclusive { try repository.replaceProvider(role: manifest.capability, with: manifest.id) }
+                    else { try repository.setEnabled(manifest.id, true) }
+                }
+                continue
+            }
             ResourceWorker.stopAll(moduleID: manifest.id)
             cancelReaderRequests(moduleID: manifest.id)
-            try repository.install(manifest, enabled: manifest.id != id && activate ? true : nil, payload: modulePayloads[manifest.id])
+            try repository.install(manifest, enabled: manifest.id != id && activate && !manifest.capability.isExclusive ? true : nil, payload: modulePayloads[manifest.id])
+            if manifest.id != id && activate && manifest.capability.isExclusive { try repository.replaceProvider(role: manifest.capability, with: manifest.id) }
         }
         installedModules = try repository.installed()
     }
@@ -192,56 +236,82 @@ final class AppState: ObservableObject {
     }
     func importModule() {
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.json]; panel.canChooseDirectories = false
-        panel.message = "Choose a declarative Radius module manifest. Native code and engine packages are not supported in this build."
+        panel.message = "Choose a Radius data package containing a manifest and its program or definition. Native code must come from the bundled official catalog."
         guard panel.runModal() == .OK, let url = panel.url else { return }
         perform {
             guard let repository else { throw ValidationError("Repair module storage before importing packages.") }
-            let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-            guard size <= 32 * 1024 else { throw ValidationError("Module manifests must be smaller than 32 KB.") }
-            let manifest = try ModuleManifest.decode(Data(contentsOf: url))
-            guard manifest.runtime == nil, manifest.capability != .resourceMonitor, manifest.capability != .reader else {
-                throw ValidationError("Native workers must come from this Radius build. Install them from Discover; local native publisher verification is not available yet.")
-            }
-            guard manifest.dependencies.isEmpty else { throw ValidationError("Local modules with dependencies are not supported yet.") }
-            guard !catalog.contains(where: { $0.id == manifest.id }), !installedModules.contains(where: { $0.id == manifest.id }) else {
-                throw ValidationError("A module with that ID already exists. Use its official update instead.")
-            }
-            if approveModules([manifest], local: true) {
-                try repository.install(manifest); installedModules = try repository.installed()
-            }
+            let package = try DeclarativeModulePackage.decode(readModuleFile(url, limit: 192 * 1024))
+            let local = DeclarativeModuleCatalog(formatVersion: 1, name: "Local · " + package.manifest.name, packages: [package])
+            try repository.addCommunityCatalog(local, reservedIDs: bundledModuleIDs)
+            try loadCommunityCatalogs()
+            let plan = try moduleInstallationPlan(for: [package.manifest.id])
+            if approveModules(plan) { try installApprovedModule(package.manifest.id) }
         }
     }
-    private func approveModules(_ manifests: [ModuleManifest], local: Bool = false) -> Bool {
+    func approveModules(_ manifests: [ModuleManifest], local: Bool = false, activateDependencies: Bool = true) -> Bool {
         guard !manifests.isEmpty else { return true }
         let alert = NSAlert()
-        alert.messageText = "Install \(manifests.map(\.name).joined(separator: ", "))?"
+        alert.messageText = "Install or update \(manifests.map(\.name).joined(separator: ", "))?"
         let permissions = Set(manifests.compactMap { $0.capability.permission }).sorted()
-        alert.informativeText = (local ? "Publisher information is self-reported. This package can only use Radius's listed declarative capabilities.\n\n" : "Packages are bundled with this Radius build.\n\n") +
+        let unverified = local || manifests.contains { !bundledModuleIDs.contains($0.id) }
+        let requiredIDs = Set(manifests.flatMap(\.dependencies))
+        alert.informativeText = (unverified ? "Community publisher information is self-reported. Data programs cannot access the network, filesystem, or arbitrary native code.\n\n" : "Official packages are sealed into this Radius application.\n\n") +
             (permissions.isEmpty ? "No website or system permissions are requested." : permissions.joined(separator: "\n\n"))
-        if manifests.contains(where: { $0.runtime != nil }) {
-            alert.informativeText += "\n\nThis installs trusted first-party native code. Reader workers run for one requested extraction; resource workers run while their panel is open. Both run outside the app with the same macOS user access as Radius. They are not sandboxed by the permissions listed above."
+        for manifest in manifests {
+            alert.informativeText += "\n\n\(manifest.name) v\(manifest.version) · \(manifest.publisher)"
+            if !manifest.dependencies.isEmpty { alert.informativeText += "\nRequires: " + manifest.dependencies.joined(separator: ", ") }
+            if let current = installedModules.first(where: { $0.id == manifest.id }), !current.enabled {
+                alert.informativeText += requiredIDs.contains(manifest.id) && activateDependencies ? "\nThis required dependency is currently disabled; approving enables it." : "\nYour disabled choice will be kept."
+            }
+            if manifest.capability.isExclusive, let active = installedModules.first(where: { $0.enabled && $0.manifest.capability == manifest.capability && $0.id != manifest.id }) {
+                alert.informativeText += requiredIDs.contains(manifest.id) && activateDependencies ? "\nRequired dependency replaces \(active.manifest.name). Browser data is kept." : "\nInstalls alongside \(active.manifest.name). Choose Replace before it becomes active."
+            }
         }
-        alert.addButton(withTitle: "Install"); alert.addButton(withTitle: "Cancel")
+        if manifests.contains(where: { $0.runtime?.isNative == true }) {
+            alert.informativeText += "\n\nFirst-party native workers run with the same macOS user access as Radius. Reader runs for one extraction; resources run while their panel is open. Native code is not sandboxed by these permission descriptions."
+        }
+        alert.informativeText += "\n\nSaved browser data is kept. Installs and updates do not restore modules you removed."
+        alert.addButton(withTitle: "Approve and install"); alert.addButton(withTitle: "Cancel")
         return alert.runModal() == .alertFirstButtonReturn
     }
     func toggleModule(_ module: InstalledModule) {
-        if !module.enabled, module.manifest.runtime == .nativeResourceWorker,
-           let active = installedModules.first(where: { $0.enabled && $0.manifest.capability == .resourceMonitor && $0.id != module.id }) {
-            let alert = NSAlert(); alert.messageText = "Replace \(active.manifest.name) with \(module.manifest.name)?"
-            alert.informativeText = "The current worker will stop. The replacement will run when its panel is open. Your saved browser data is kept."
-            alert.addButton(withTitle: "Replace"); alert.addButton(withTitle: "Cancel")
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-            perform { try replaceResourceProvider(with: module.id) }
+        if module.enabled && module.manifest.capability == .tabSystem {
+            presentTabReplacementBeforeRemoval(module, removeAfterReplacement: false)
             return
         }
         perform {
-            if !module.enabled, module.manifest.runtime != nil { _ = try validatedWorkerPackage(id: module.id, requireEnabled: false) }
-            defer { resourceWorkerGeneration = UUID() }
-            ResourceWorker.stopAll(moduleID: module.id)
-            cancelReaderRequests(moduleID: module.id)
-            try repository?.setEnabled(module.id, !module.enabled)
-            installedModules = try repository?.installed() ?? []
+            guard let repository else { throw ValidationError("Repair module storage first.") }
+            if !module.enabled {
+                try validateModulePayload(module, requireEnabled: false)
+                if module.manifest.capability.isExclusive,
+                   let active = installedModules.first(where: { $0.enabled && $0.manifest.capability == module.manifest.capability && $0.id != module.id }) {
+                    let dependents = installedModules.filter { $0.enabled && $0.manifest.dependencies.contains(active.id) }
+                    let alert = NSAlert(); alert.messageText = "Replace \(active.manifest.name) with \(module.manifest.name)?"
+                    alert.informativeText = "Your tabs and saved browser data are kept. " + (dependents.isEmpty ? "The replacement takes effect immediately." : "Disable dependent modules first: " + dependents.map { $0.manifest.name }.joined(separator: ", "))
+                    if let permission = module.manifest.capability.permission { alert.informativeText += "\n\n" + permission }
+                    alert.addButton(withTitle: "Replace"); alert.addButton(withTitle: "Cancel")
+                    guard alert.runModal() == .alertFirstButtonReturn else { return }
+                    if module.manifest.capability == .resourceMonitor { try replaceResourceProvider(with: module.id) }
+                    else { try repository.replaceProvider(role: module.manifest.capability, with: module.id); installedModules = try repository.installed() }
+                    return
+                }
+                if let permission = module.manifest.capability.permission {
+                    let alert = NSAlert(); alert.messageText = "Enable \(module.manifest.name)?"; alert.informativeText = permission
+                    alert.addButton(withTitle: "Approve and enable"); alert.addButton(withTitle: "Cancel")
+                    guard alert.runModal() == .alertFirstButtonReturn else { return }
+                }
+            }
+            try setModuleEnabledApproved(module.id, enabled: !module.enabled)
         }
+    }
+    /// Mutation after the graphical permission preview, also used by native
+    /// integration tests to avoid interacting with a modal approval dialog.
+    func setModuleEnabledApproved(_ id: String, enabled: Bool) throws {
+        guard let repository, let module = installedModules.first(where: { $0.id == id }) else { throw ValidationError("This module is not installed.") }
+        if enabled { try validateModulePayload(module, requireEnabled: false) }
+        defer { resourceWorkerGeneration = UUID() }
+        ResourceWorker.stopAll(moduleID: id); cancelReaderRequests(moduleID: id)
+        try repository.setEnabled(id, enabled); installedModules = try repository.installed()
     }
     func replaceResourceProvider(with id: String) throws {
         guard let repository else { throw ValidationError("Repair module storage first.") }
@@ -261,18 +331,26 @@ final class AppState: ObservableObject {
         installedModules = try repository.installed()
     }
     func uninstall(_ module: InstalledModule) {
+        if module.enabled && module.manifest.capability == .tabSystem {
+            presentTabReplacementBeforeRemoval(module)
+            return
+        }
+        let dependents = installedModules.filter { $0.manifest.dependencies.contains(module.id) }
+        guard dependents.isEmpty else {
+            notice = "Remove these dependent modules first: " + dependents.map { $0.manifest.name }.joined(separator: ", ")
+            return
+        }
         let alert = NSAlert(); alert.messageText = "Uninstall \(module.manifest.name)?"
-        alert.informativeText = module.manifest.capability == .reader && module.manifest.runtime == nil ?
-            "The legacy Reader descriptor will be deleted. Saved browser data and separately installed Reader packages are kept." : module.manifest.runtime == nil ?
-            "The package descriptor will be deleted and its feature will stop. The implementation remains in Radius. Saved notes and settings are kept unless you choose to delete them." :
-            "The worker will stop and its installed executable package will be deleted. Saved browser data is kept. You can install this provider again from Discover."
-        alert.addButton(withTitle: "Uninstall and keep data"); alert.addButton(withTitle: "Cancel")
-        if module.manifest.capability == .notes { alert.addButton(withTitle: "Uninstall and delete all notes") }
+        alert.informativeText = "The module stops and its installed package payload is deleted. Your tabs and browser data are kept. Choose whether to retain its settings and saved notes."
+        alert.addButton(withTitle: "Uninstall and keep data"); alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Uninstall and delete module data")
         let response = alert.runModal()
         guard response != .alertSecondButtonReturn else { return }
         perform {
             try removeModule(module.id)
-            if response == .alertThirdButtonReturn { library.notes.removeAll() }
+            if response == .alertThirdButtonReturn {
+                try repository?.deleteSettings(for: module.id)
+                if module.manifest.capability == .notes { library.notes.removeAll() }
+            }
         }
     }
     func claimSession(privateBrowsing: Bool) -> WindowSession {
@@ -358,7 +436,7 @@ final class AppState: ObservableObject {
     }
     func flush() async -> Bool {
         saveTask?.cancel()
-        guard ready, let database else { return true }
+        guard let database else { return false }
         revision += 1
         var snapshot = library; snapshot.normalize()
         do { try await database.save(snapshot, revision: revision); try await database.checkpoint(); return true }
@@ -415,7 +493,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         state.terminating = true
         Task {
             self.smokeTrace("Termination task started; cancelling active downloads")
-            for browser in activeWindows { await browser.downloads.cancelAllAndWait() }
+            do { for browser in activeWindows { try await browser.downloads.cancelAllAndWait() } }
+            catch {
+                state.notice = error.localizedDescription; state.terminating = false
+                sender.reply(toApplicationShouldTerminate: false); return
+            }
+            if DistributionManager.shared.pending?.chromium == false { state.prepareForChromiumRemoval() }
             self.smokeTrace("Flushing application data before termination")
             let saved = await state.flush()
             self.smokeTrace("Termination flush completed: \(saved)")
@@ -434,6 +517,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 for browser in state.windows.values.compactMap(\.model) { browser.disposeEngineTabs() }
                 quit = await ChromiumRuntime.shared.shutdown()
                 if !quit { state.notice = ChromiumRuntime.shared.status }
+                if quit {
+                    do { try await DistributionManager.shared.launchPendingInstaller() }
+                    catch { quit = false; state.notice = error.localizedDescription }
+                }
             }
             self.smokeTrace("Sending termination reply: \(quit)")
             state.terminating = quit

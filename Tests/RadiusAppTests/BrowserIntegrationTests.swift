@@ -208,6 +208,30 @@ struct BrowserIntegrationTests {
         browser.closeWindow()
         #expect(await app.flush())
     }
+    @Test func reopeningPinnedTabPreservesPinnedSectionAndFreshIdentity() async throws {
+        let (app, directory) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = BrowserModel(app: app, isPrivate: true)
+        let firstPinned = BrowserTab(title: "First pinned", url: URL(string: "https://first.invalid"), pinned: true)
+        let reopening = BrowserTab(title: "Reopening", url: URL(string: "https://example.com"), pinned: true)
+        let ordinary = BrowserTab(title: "Ordinary")
+        browser.session.tabs = [firstPinned, reopening, ordinary]
+        browser.session.selectedTabID = ordinary.id
+        browser.closeTab(reopening.id)
+        browser.reopenClosedTab()
+        #expect(browser.session.tabs.map(\.title) == ["First pinned", "Reopening", "Ordinary"])
+        #expect(browser.session.tabs.map(\.pinned) == [true, true, false])
+        #expect(browser.selectedTab.id != reopening.id)
+        #expect(browser.selectedTab.pinned)
+        #expect(browser.selectedTab.parentID == nil)
+        browser.closeTab(browser.selectedTab.id)
+        browser.closeTab(firstPinned.id)
+        browser.reopenClosedTab()
+        #expect(browser.session.tabs.first?.title == "First pinned")
+        #expect(browser.session.tabs.last?.id == ordinary.id)
+        browser.closeWindow()
+        #expect(await app.flush())
+    }
     @Test func generatedDocumentCanOpenWithoutPersistingItsURL() async throws {
         let (app, directory) = try await fixture()
         defer { try? FileManager.default.removeItem(at: directory) }

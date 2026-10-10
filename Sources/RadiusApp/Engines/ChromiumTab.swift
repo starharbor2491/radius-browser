@@ -7,6 +7,21 @@ import UniformTypeIdentifiers
 @MainActor
 final class ChromiumTab: BrowserEngineTab {
     private let runtime: ChromiumRuntime
+    private let downloads: DownloadCenter
+    let profileID: UUID
+    let privateSessionID: UUID?
+    var downloadCenter: DownloadCenter { downloads }
+    func cancelDownloads() async throws { try await downloads.cancelChromiumAndWait(ids: downloadIDs) }
+    private let downloadPrefix = UUID().uuidString
+    private var downloadIDs = Set<String>()
+    private var disposing = false
+    private var closeTask: Task<Void, Never>?
+    @Published private(set) var chromeStyle = false
+    override var hasNativeNavigationChrome: Bool { chromeStyle }
+    override func focusAddressBar() -> Bool {
+        guard chromeStyle else { return false }
+        command(Int(RADIUS_CEF_FOCUS_LOCATION)); return true
+    }
     private var page: UnsafeMutableRawPointer?
     private let hostView: NSView
     private var pageURL: URL?
@@ -19,14 +34,17 @@ final class ChromiumTab: BrowserEngineTab {
     private var pending: [Int: PendingRequest] = [:]
     private var readerContexts: [Int: String] = [:]
     override var nativeView: NSView { hostView }
+    var chromeWindow: NSWindow? { hostView.value(forKey: "browserWindow") as? NSWindow }
     override var url: URL? { pageURL }
     override var title: String? { pageTitle }
     override var engineID: BrowserEngineID { .chromium }
 
-    init(runtime: ChromiumRuntime, page: UnsafeMutableRawPointer) {
-        self.runtime = runtime; self.page = page
+    init(runtime: ChromiumRuntime, page: UnsafeMutableRawPointer, downloads: DownloadCenter, profileID: UUID, privateSessionID: UUID?) {
+        self.runtime = runtime; self.page = page; self.downloads = downloads
+        self.profileID = profileID; self.privateSessionID = privateSessionID
         hostView = Unmanaged<NSView>.fromOpaque(runtime.api!.native_view(page)!).takeUnretainedValue()
         super.init()
+        runtime.register(self)
         runtime.api!.set_callbacks(page, Unmanaged.passUnretained(self).toOpaque(), { context, event, json in
             guard let context, let json else { return }
             MainActor.assumeIsolated {
@@ -36,7 +54,7 @@ final class ChromiumTab: BrowserEngineTab {
             guard let context, let child else { return 0 }
             return MainActor.assumeIsolated {
                 let parent = Unmanaged<ChromiumTab>.fromOpaque(context).takeUnretainedValue()
-                let tab = ChromiumTab(runtime: parent.runtime, page: child)
+                let tab = ChromiumTab(runtime: parent.runtime, page: child, downloads: parent.downloads, profileID: parent.profileID, privateSessionID: parent.privateSessionID)
                 let target = url.flatMap { URL(string: String(cString: $0)) }
                 let accepted = parent.onCreateWindow?(tab, target) == true
                 if !accepted { tab.dispose() }
@@ -53,6 +71,7 @@ final class ChromiumTab: BrowserEngineTab {
         errorMessage = nil; pageURL = url; loading = true
         command(Int(RADIUS_CEF_LOAD), text: url.absoluteString)
     }
+    func showExtensions() { command(Int(RADIUS_CEF_EXTENSIONS)) }
     override func reload() { errorMessage = nil; command(Int(RADIUS_CEF_RELOAD)) }
     override func stop() { command(Int(RADIUS_CEF_STOP)) }
     override func goBack() { errorMessage = nil; command(Int(RADIUS_CEF_BACK)) }
@@ -139,6 +158,7 @@ final class ChromiumTab: BrowserEngineTab {
         guard let data = json.data(using: .utf8), let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
         switch event {
         case Int32(RADIUS_CEF_STATE), Int32(RADIUS_CEF_FINISHED):
+            if let chrome = value["chromeStyle"] as? Bool { chromeStyle = chrome }
             if value["navigationStart"] as? Bool == true { didStartNavigation(); return }
             if let address = value["url"] as? String { pageURL = URL(string: address) }
             if let title = value["title"] as? String { pageTitle = title.isEmpty ? nil : title }
@@ -155,7 +175,33 @@ final class ChromiumTab: BrowserEngineTab {
         case Int32(RADIUS_CEF_NOTICE):
             if let message = value["message"] as? String { onNotice?(message) }
         case Int32(RADIUS_CEF_CLOSED):
-            page = nil; cancelRequests(); onClose?()
+            page = nil; cancelRequests(); runtime.finishedClosing(self); onClose?()
+        case Int32(RADIUS_CEF_ACTIVATE):
+            onActivate?()
+        case Int32(RADIUS_CEF_BROWSER_COMMAND):
+            if let command = value["message"] as? String { onBrowserCommand?(command) }
+        case Int32(RADIUS_CEF_DOWNLOAD_BEGIN):
+            guard let id = value["id"] as? Int, !disposing else { return }
+            let key = downloadPrefix + ":" + String(id)
+            downloadIDs.insert(key)
+            let source = (value["url"] as? String).flatMap(URL.init(string:))
+            downloads.beginChromium(id: key, suggestedName: value["name"] as? String ?? "Download", sourceURL: source, cancel: { [weak self] in
+                self?.command(Int(RADIUS_CEF_DOWNLOAD_CANCEL), value: Double(id))
+            }, completion: { [weak self] destination in
+                self?.command(Int(RADIUS_CEF_DOWNLOAD_PATH), text: destination?.path ?? "", value: Double(id))
+            })
+        case Int32(RADIUS_CEF_DOWNLOAD_UPDATE):
+            guard let id = value["id"] as? Int else { return }
+            let key = downloadPrefix + ":" + String(id)
+            let complete = value["complete"] as? Bool == true
+            let cancelled = value["cancelled"] as? Bool == true
+            let interrupted = value["interrupted"] as? Bool == true
+            downloads.updateChromium(id: key, fraction: value["fraction"] as? Double ?? 0,
+                                     complete: complete, cancelled: cancelled, interrupted: interrupted)
+            if complete || cancelled || interrupted {
+                downloadIDs.remove(key)
+                if disposing && downloadIDs.isEmpty && closeTask == nil { closePage() }
+            }
         case Int32(RADIUS_CEF_READER_CONTEXT):
             if value["clear"] as? Bool == true { readerContexts.removeAll() }
             else if value["destroyed"] as? Bool == true {
@@ -184,7 +230,31 @@ final class ChromiumTab: BrowserEngineTab {
         }
     }
     override func dispose() {
-        if let page { runtime.api?.close_page(page); self.page = nil }
+        guard !disposing else { return }
+        disposing = true
+        let notice = onNotice
         cancelRequests(); super.dispose()
+        // CEF must retain the browser and callback receiver until cancellation
+        // closes each download writer. Removing the native tab can happen now.
+        if downloadIDs.isEmpty { closePage() }
+        else {
+            runtime.retainWhileClosing(self)
+            closeTask = Task { [self] in
+                defer { closeTask = nil }
+                do {
+                    try await downloads.cancelChromiumAndWait(ids: downloadIDs)
+                    closePage()
+                } catch {
+                    // Keep the callback target alive. A late terminal update
+                    // releases this page safely; quit remains available to retry.
+                    runtime.reportCloseFailure(error.localizedDescription)
+                    notice?(error.localizedDescription)
+                }
+            }
+        }
+    }
+    private func closePage() {
+        if let page { runtime.api?.close_page(page); self.page = nil }
+        runtime.finishedClosing(self)
     }
 }

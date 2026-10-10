@@ -4,9 +4,11 @@
 #import <objc/runtime.h>
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <cstdio>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 #include "RadiusEngineABI.h"
@@ -15,12 +17,62 @@
 #include "include/cef_application_mac.h"
 #include "include/cef_client.h"
 #include "include/cef_parser.h"
+#include "include/cef_id_mappers.h"
 #include "include/cef_request_context.h"
 #include "include/cef_request_context_handler.h"
 #include "include/cef_devtools_message_observer.h"
+#include "include/views/cef_browser_view.h"
+#include "include/views/cef_window.h"
+#include "include/views/cef_box_layout.h"
 #include "include/wrapper/cef_library_loader.h"
 
+// A supported Chrome-style Views window owns its NSView hierarchy. Never move
+// Chrome's views into a native parent (which forces Alloy). AppKit attaches the
+// intact window to Radius and aligns it with this layout anchor instead.
+@interface RadiusChromiumHostView : NSView
+@property(nonatomic, assign) NSWindow* browserWindow;
+@property(nonatomic, assign) BOOL contentHidden;
+- (void)synchronizeBrowserWindow;
+@end
+@implementation RadiusChromiumHostView
+- (void)synchronizeBrowserWindow {
+  NSWindow* child = self.browserWindow;
+  if (!child) return;
+  NSWindow* parent = self.window;
+  NSRect visible = self.visibleRect;
+  NSWindow* modal = NSApp.modalWindow;
+  BOOL show = !self.contentHidden && parent && parent.visible && !parent.miniaturized &&
+      !self.hiddenOrHasHiddenAncestor && !NSIsEmptyRect(visible) &&
+      !parent.attachedSheet && (!modal || modal == parent || modal == child);
+  if (!show) {
+    if (child.visible) [child orderOut:nil];
+    if (child.parentWindow) [child.parentWindow removeChildWindow:child];
+    return;
+  }
+  if (child.parentWindow != parent) {
+    if (child.parentWindow) [child.parentWindow removeChildWindow:child];
+    [parent addChildWindow:child ordered:NSWindowAbove];
+  }
+  NSRect bounds = [parent convertRectToScreen:[self convertRect:visible toView:nil]];
+  if (!NSEqualRects(child.frame,bounds)) [child setFrame:bounds display:YES];
+  if (!child.visible) [child orderFront:nil];
+}
+- (void)viewDidMoveToWindow { [super viewDidMoveToWindow]; [self synchronizeBrowserWindow]; }
+- (void)setFrame:(NSRect)frame { [super setFrame:frame]; [self synchronizeBrowserWindow]; }
+- (void)setHidden:(BOOL)hidden { [super setHidden:hidden]; [self synchronizeBrowserWindow]; }
+- (BOOL)acceptsFirstResponder { return YES; }
+- (BOOL)becomeFirstResponder {
+  if (self.browserWindow.visible) [self.browserWindow makeKeyWindow];
+  return YES;
+}
+- (void)dealloc {
+  if (self.browserWindow.parentWindow) [self.browserWindow.parentWindow removeChildWindow:self.browserWindow];
+  [super dealloc];
+}
+@end
+
 namespace {
+void SynchronizeViews();
 bool initialized = false;
 bool stopped = false;
 std::string last_error;
@@ -72,6 +124,7 @@ void SchedulePump(int64_t delay) {
     pumping = true;
     if (++pump_count <= 3) Trace("processing external message-pump work");
     CefDoMessageLoopWork();
+    SynchronizeViews();
     pumping = false;
     if (!pump_timer) SchedulePump(1000 / 30);
   }] retain];
@@ -85,11 +138,18 @@ uint64_t next_context_generation = 0;
 std::map<std::string, Context> contexts;
 struct Page;
 class Client;
+class BrowserViewDelegate;
+class WindowDelegate;
 std::map<Page*, std::unique_ptr<Page>> pages;
+std::map<int,CefRefPtr<CefBrowser>> unowned_browsers;
 struct Page {
-  NSView* view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 800, 600)];
+  RadiusChromiumHostView* view = [[RadiusChromiumHostView alloc] initWithFrame:NSMakeRect(0, 0, 800, 600)];
   CefRefPtr<CefBrowser> browser;
   CefRefPtr<Client> client;
+  CefRefPtr<CefBrowserView> browser_view;
+  CefRefPtr<CefWindow> window;
+  CefRefPtr<BrowserViewDelegate> view_delegate;
+  CefRefPtr<WindowDelegate> window_delegate;
   CefRefPtr<CefRegistration> observer;
   std::string context_key;
   std::string pending_url;
@@ -100,6 +160,8 @@ struct Page {
   bool popups = false;
   bool awaiting_context = true;
   bool pending_popup = false;
+  bool management = false;
+  bool fixture_dialog = false;
   void* callback_context = nullptr;
   radius_cef_event_callback event = nullptr;
   radius_cef_popup_callback popup = nullptr;
@@ -121,6 +183,7 @@ void State(Page* page, bool finished = false) {
   auto value = CefDictionaryValue::Create();
   value->SetString("url", page->browser->GetMainFrame()->GetURL());
   value->SetString("title",page->title);
+  value->SetBool("chromeStyle",page->browser->GetHost()->GetRuntimeStyle()==CEF_RUNTIME_STYLE_CHROME);
   value->SetBool("loading", page->browser->IsLoading());
   value->SetBool("canGoBack", page->browser->CanGoBack());
   value->SetBool("canGoForward", page->browser->CanGoForward());
@@ -130,6 +193,7 @@ bool Allowed(const std::string& url) {
   NSString* value = [NSString stringWithUTF8String:url.c_str()];
   NSURLComponents* parts = [NSURLComponents componentsWithString:value];
   NSString* scheme = [[parts scheme] lowercaseString];
+  if ([scheme isEqualToString:@"chrome-extension"]) return [[parts host] length] == 32;
   if ([scheme isEqualToString:@"https"] || [scheme isEqualToString:@"http"])
     return [[parts host] length] > 0 && [parts user] == nil && [parts password] == nil;
   return [scheme isEqualToString:@"blob"] || [value isEqualToString:@"about:blank"] ||
@@ -141,17 +205,72 @@ Page* Allocate(const std::string& key);
 class Client final : public CefClient, public CefLifeSpanHandler,
                      public CefDisplayHandler, public CefLoadHandler,
                      public CefRequestHandler, public CefDownloadHandler,
-                     public CefDevToolsMessageObserver {
+                     public CefDevToolsMessageObserver, public CefCommandHandler, public CefDialogHandler {
  public:
   explicit Client(Page* page) : page_(page) {}
   void DetachPage() { page_ = nullptr; }
+  Page* page() const { return page_; }
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
   CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
   CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
   CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
   CefRefPtr<CefDownloadHandler> GetDownloadHandler() override { return this; }
+  CefRefPtr<CefCommandHandler> GetCommandHandler() override { return this; }
+  CefRefPtr<CefDialogHandler> GetDialogHandler() override { return this; }
+  bool OnFileDialog(CefRefPtr<CefBrowser> browser,FileDialogMode mode,const CefString&,const CefString&,
+      const std::vector<CefString>&,const std::vector<CefString>&,const std::vector<CefString>&,
+      CefRefPtr<CefFileDialogCallback> callback) override {
+    // Automated API fixture selection only. Consumer installations always use
+    // Chrome's Web Store permission UI; no release file chooser is overridden.
+    if (!diagnostics || !page_ || !page_->fixture_dialog || mode!=FILE_DIALOG_OPEN_FOLDER ||
+        browser->GetMainFrame()->GetURL().ToString().rfind("chrome://extensions/",0)!=0) return false;
+    page_->fixture_dialog=false;
+    const std::string path=data_root+"/ExtensionAcceptance/current";
+    if (![[NSFileManager defaultManager] fileExistsAtPath:[NSString stringWithUTF8String:(path+"/manifest.json").c_str()]]) {
+      callback->Cancel(); return true;
+    }
+    callback->Continue({CefString(path)}); return true;
+  }
+  bool OnChromeCommand(CefRefPtr<CefBrowser> browser,int id,cef_window_open_disposition_t) override {
+    if (!page_) return true;
+    const struct { const char* chromium; const char* native; } commands[] = {
+      {"IDC_NEW_TAB","newTab"}, {"IDC_CLOSE_TAB","closeTab"}, {"IDC_CLOSE_WINDOW","closeWindow"},
+      {"IDC_NEW_WINDOW","newWindow"}, {"IDC_NEW_INCOGNITO_WINDOW","privateWindow"},
+      {"IDC_EXIT","quit"}, {"IDC_FIND","find"},
+      {"IDC_SHOW_DOWNLOADS","downloads"}, {"IDC_SHOW_HISTORY","history"},
+      {"IDC_BOOKMARK_THIS_TAB","bookmark"}
+    };
+    for (const auto& command : commands) {
+      if (id == cef_id_for_command_id_name(command.chromium)) {
+        [page_->view.window makeKeyAndOrderFront:nil];
+        Message(page_,RADIUS_CEF_BROWSER_COMMAND,command.native); return true;
+      }
+    }
+    if (id == cef_id_for_command_id_name("IDC_MANAGE_EXTENSIONS")) {
+      [page_->view.window makeKeyAndOrderFront:nil];
+      Message(page_,RADIUS_CEF_BROWSER_COMMAND,"extensions"); return true;
+    }
+    // Radius owns windows and profiles. Its native File menu provides these.
+    for (const char* command : {"IDC_NEW_WINDOW","IDC_NEW_INCOGNITO_WINDOW","IDC_EXIT",
+                               "IDC_SHOW_SIGNIN","IDC_ADD_NEW_PROFILE","IDC_SHOW_SETTINGS"})
+      if (id == cef_id_for_command_id_name(command)) return true;
+    return false;
+  }
+  bool IsChromeAppMenuItemVisible(CefRefPtr<CefBrowser>,int id) override {
+    for (const char* command : {"IDC_NEW_WINDOW","IDC_NEW_INCOGNITO_WINDOW","IDC_EXIT",
+                               "IDC_SHOW_SIGNIN","IDC_ADD_NEW_PROFILE","IDC_SHOW_SETTINGS"})
+      if (id == cef_id_for_command_id_name(command)) return false;
+    return true;
+  }
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
-    if (!page_) return;
+    if (!page_ || page_->browser) {
+      // Chrome APIs which create complete extra browser windows must not
+      // replace this tab's client state or escape Radius's ownership.
+      unowned_browsers[browser->GetIdentifier()] = browser;
+      browser->GetHost()->CloseBrowser(true);
+      if (page_) Message(page_,RADIUS_CEF_NOTICE,"This extension requested a separate Chromium window. Use a Radius tab instead.");
+      return;
+    }
     if (diagnostics) {
       std::fprintf(stderr,"Radius Chromium: browser created id=%d popup=%d\n",browser->GetIdentifier(),browser->IsPopup());
       std::fflush(stderr);
@@ -159,9 +278,6 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     page_->browser = browser;
     page_->pending_popup = false;
     for (auto& entry : pages) entry.second->client->ForgetPopup(page_);
-    NSView* child = (NSView*)browser->GetHost()->GetWindowHandle();
-    [child setFrame:[page_->view bounds]];
-    [child setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
     page_->observer = browser->GetHost()->AddDevToolsMessageObserver(this);
     if (page_->closing) browser->GetHost()->CloseBrowser(true);
     else if (!page_->pending_url.empty()) browser->GetMainFrame()->LoadURL(page_->pending_url);
@@ -171,22 +287,15 @@ class Client final : public CefClient, public CefLifeSpanHandler,
       if (found->second == child) found = pending_popups_.erase(found); else ++found;
     }
   }
-  void OnBeforeClose(CefRefPtr<CefBrowser>) override {
-    if (!page_) return;
+  void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
+    if (unowned_browsers.erase(browser->GetIdentifier()) != 0) return;
+    if (!page_ || !page_->browser || !page_->browser->IsSame(browser)) return;
     Trace("browser closing");
     Page* page = page_; page_ = nullptr;
     page->observer = nullptr;
     page->browser = nullptr;
     Message(page, RADIUS_CEF_CLOSED, "");
     Destroy(page);
-  }
-  bool DoClose(CefRefPtr<CefBrowser> browser) override {
-    // Default Alloy handling closes the containing NSWindow. Radius owns that
-    // window, so tear down only this child view after the callback unwinds.
-    // CefBrowserHostView's dealloc calls WindowDestroyed -> OnBeforeClose.
-    NSView* child = (NSView*)browser->GetHost()->GetWindowHandle();
-    dispatch_async(dispatch_get_main_queue(), ^{ [child removeFromSuperview]; });
-    return true;
   }
   bool OnBeforePopup(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>, int popup_id,
       const CefString& target_url, const CefString&, WindowOpenDisposition,
@@ -204,8 +313,8 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     Trace(adopted ? "popup adopted by native tab" : "popup rejected by native tab");
     if (!adopted) { Destroy(child); return true; }
     pending_popups_[popup_id] = child;
-    window.SetAsChild(child->view, CefRect(0,0,800,600));
-    window.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
+    // Leave parent_view empty: Views creates the intact Chrome-style popup.
+    window.runtime_style = CEF_RUNTIME_STYLE_CHROME;
     client = child->client;
     return false;
   }
@@ -219,7 +328,7 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     }
   }
   void OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString& title) override {
-    if (!page_ || !page_->navigated) return;
+    if (!page_ || !page_->navigated || !page_->browser || !page_->browser->IsSame(browser)) return;
     if (diagnostics && browser->IsPopup()) {
       std::fprintf(stderr,"Radius Chromium: popup title id=%d length=%zu\n",browser->GetIdentifier(),title.length());
       std::fflush(stderr);
@@ -227,33 +336,37 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     page_->title = title.ToString();
     auto value = CefDictionaryValue::Create(); value->SetString("title", title); Emit(page_,RADIUS_CEF_STATE,value);
   }
-  void OnAddressChange(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame, const CefString&) override {
-    if (page_ && frame->IsMain()) State(page_);
+  void OnAddressChange(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, const CefString&) override {
+    if (page_ && page_->browser && page_->browser->IsSame(browser) && frame->IsMain()) State(page_);
   }
-  void OnLoadingStateChange(CefRefPtr<CefBrowser>, bool, bool, bool) override {
-    if (page_) State(page_);
+  void OnLoadingStateChange(CefRefPtr<CefBrowser> browser, bool, bool, bool) override {
+    if (page_ && page_->browser && page_->browser->IsSame(browser)) State(page_);
   }
-  void OnLoadStart(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame, TransitionType) override {
-    if (page_ && frame->IsMain()) {
+  void OnLoadStart(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, TransitionType) override {
+    if (page_ && page_->browser && page_->browser->IsSame(browser) && frame->IsMain()) {
+      page_->view.contentHidden = NO;
       page_->navigation_failed = false; page_->title.clear();
       auto value = CefDictionaryValue::Create(); value->SetBool("navigationStart",true);
       Emit(page_,RADIUS_CEF_STATE,value);
     }
   }
-  void OnLoadEnd(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame, int) override {
-    if (page_ && frame->IsMain() && !page_->navigation_failed) State(page_,true);
+  void OnLoadEnd(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, int) override {
+    if (page_ && page_->browser && page_->browser->IsSame(browser) && frame->IsMain() && !page_->navigation_failed) State(page_,true);
   }
-  void OnLoadError(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame,
+  void OnLoadError(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
       ErrorCode code,const CefString& error,const CefString&) override {
-    if (page_ && frame->IsMain()) {
+    if (page_ && page_->browser && page_->browser->IsSame(browser) && frame->IsMain()) {
       page_->navigation_failed = true;
-      if (code != ERR_ABORTED) Message(page_,RADIUS_CEF_ERROR,error.ToString());
+      if (code != ERR_ABORTED) {
+        page_->view.contentHidden = YES;
+        Message(page_,RADIUS_CEF_ERROR,error.ToString());
+      }
     }
   }
   bool OnBeforeBrowse(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame,
       CefRefPtr<CefRequest> request,bool,bool) override {
     const std::string url = request->GetURL().ToString();
-    if (Allowed(url) || (!frame->IsMain() &&
+    if (Allowed(url) || (page_ && page_->management && url.rfind("chrome://extensions/",0)==0) || (!frame->IsMain() &&
         (url.rfind("data:",0)==0 || url=="about:srcdoc"))) return false;
     if (page_ && frame->IsMain()) Message(page_,RADIUS_CEF_ERROR,"This Chromium adapter allows HTTP and HTTPS navigation only.");
     return true;
@@ -263,8 +376,65 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     if (page_) Message(page_,RADIUS_CEF_ERROR,"The Chromium renderer stopped. Reload this page to recover.");
   }
   bool CanDownload(CefRefPtr<CefBrowser>,const CefString&,const CefString&) override {
-    if (page_) Message(page_,RADIUS_CEF_NOTICE,"Downloads are not available in the development Chromium adapter. Reopen this page in WebKit to download.");
-    return false;
+    return page_ && !page_->closing && page_->event;
+  }
+  static bool ExtensionDownload(CefRefPtr<CefDownloadItem> item) {
+    std::string name = item->GetSuggestedFileName().ToString();
+    std::transform(name.begin(),name.end(),name.begin(),[](unsigned char c) { return std::tolower(c); });
+    return item->GetMimeType()=="application/x-chrome-extension" ||
+        (name.size()>=4 && name.substr(name.size()-4)==".crx");
+  }
+  bool OnBeforeDownload(CefRefPtr<CefBrowser>,CefRefPtr<CefDownloadItem> item,
+      const CefString& name,CefRefPtr<CefBeforeDownloadCallback> callback) override {
+    // Chrome owns CRX validation, the Web Store approval and installation path.
+    // Retargeting this download to a SavePanel would break that install flow.
+    if (ExtensionDownload(item)) { downloads_.erase(item->GetId()); return false; }
+    if (!page_ || page_->closing || !page_->event) return true;
+    if (page_->management) {
+      Message(page_,RADIUS_CEF_NOTICE,"Open this website in a browsing tab to save files."); return true;
+    }
+    auto& download = downloads_[item->GetId()];
+    download.before = callback; download.announced = true;
+    auto value = CefDictionaryValue::Create();
+    value->SetInt("id",static_cast<int>(item->GetId()));
+    value->SetString("name",name); value->SetString("url",item->GetOriginalUrl());
+    Emit(page_,RADIUS_CEF_DOWNLOAD_BEGIN,value);
+    // The destination callback may re-enter the message loop in a save panel.
+    auto found = downloads_.find(item->GetId());
+    if (page_ && found != downloads_.end() && found->second.latest) {
+      Emit(page_,RADIUS_CEF_DOWNLOAD_UPDATE,found->second.latest);
+    }
+    return true;
+  }
+  void OnDownloadUpdated(CefRefPtr<CefBrowser>,CefRefPtr<CefDownloadItem> item,
+      CefRefPtr<CefDownloadItemCallback> callback) override {
+    if (ExtensionDownload(item)) { downloads_.erase(item->GetId()); return; }
+    if (!page_) { if (item->IsInProgress()) callback->Cancel(); return; }
+    auto& download = downloads_[item->GetId()]; download.control = callback;
+    auto value = CefDictionaryValue::Create();
+    value->SetInt("id",static_cast<int>(item->GetId()));
+    value->SetDouble("fraction",std::max(0,item->GetPercentComplete()) / 100.0);
+    value->SetBool("complete",item->IsComplete()); value->SetBool("cancelled",item->IsCanceled());
+    value->SetBool("interrupted",item->IsInterrupted());
+    const bool announced = download.announced;
+    if (item->IsComplete() || item->IsCanceled() || item->IsInterrupted()) downloads_.erase(item->GetId());
+    else download.latest = value;
+    if (announced) Emit(page_,RADIUS_CEF_DOWNLOAD_UPDATE,value);
+  }
+  void DownloadPath(int id,const char* path) {
+    auto found = downloads_.find(id);
+    if (found == downloads_.end()) return;
+    auto callback = found->second.before; found->second.before = nullptr;
+    if (callback && path && *path) callback->Continue(path,false);
+    else if (found->second.control) found->second.control->Cancel();
+  }
+  void CancelDownload(int id) {
+    auto found = downloads_.find(id);
+    if (found == downloads_.end()) return;
+    auto control = found->second.control;
+    auto before = found->second.before;
+    found->second.before = nullptr;
+    if (control) control->Cancel();
   }
   void OnDevToolsMethodResult(CefRefPtr<CefBrowser>, int id, bool success,
       const void* result,size_t size) override {
@@ -312,12 +482,116 @@ class Client final : public CefClient, public CefLifeSpanHandler,
  private:
   Page* page_;
   std::map<int,Page*> pending_popups_;
+  struct Download {
+    CefRefPtr<CefBeforeDownloadCallback> before;
+    CefRefPtr<CefDownloadItemCallback> control;
+    CefRefPtr<CefDictionaryValue> latest;
+    bool announced = false;
+  };
+  std::map<int,Download> downloads_;
   IMPLEMENT_REFCOUNTING(Client);
+};
+class WindowDelegate final : public CefWindowDelegate {
+ public:
+  explicit WindowDelegate(Page* page) : page_(page) {}
+  void DetachPage() { page_ = nullptr; }
+  void OnWindowCreated(CefRefPtr<CefWindow> window) override {
+    if (!page_) { window->Close(); return; }
+    page_->window = window;
+    CefBoxLayoutSettings layout_settings;
+    layout_settings.horizontal = false;
+    auto layout = window->SetToBoxLayout(layout_settings);
+    window->AddChildView(page_->browser_view);
+    // GetChromeToolbar becomes available after the browser enters a window.
+    if (auto toolbar = page_->browser_view->GetChromeToolbar()) {
+      window->AddChildView(toolbar);
+      window->ReorderChildView(toolbar,0);
+    }
+    layout->SetFlexForView(page_->browser_view,1);
+    NSView* native = (NSView*)window->GetWindowHandle();
+    page_->view.browserWindow = [native window];
+    page_->view.browserWindow.hasShadow = NO;
+    page_->view.browserWindow.excludedFromWindowsMenu = YES;
+    page_->view.browserWindow.collectionBehavior = NSWindowCollectionBehaviorFullScreenAuxiliary;
+    [page_->view synchronizeBrowserWindow];
+  }
+  void OnWindowActivationChanged(CefRefPtr<CefWindow>,bool active) override {
+    if (page_ && active) {
+      [page_->view.window makeMainWindow];
+      Message(page_,RADIUS_CEF_ACTIVATE,"");
+    }
+  }
+  void OnWindowDestroyed(CefRefPtr<CefWindow>) override {
+    if (!page_) return;
+    page_->view.browserWindow = nil;
+    page_->window = nullptr;
+  }
+  bool CanClose(CefRefPtr<CefWindow>) override {
+    return !page_ || !page_->browser || page_->browser->GetHost()->TryCloseBrowser();
+  }
+  CefSize GetPreferredSize(CefRefPtr<CefView>) override { return CefSize(800,600); }
+  cef_show_state_t GetInitialShowState(CefRefPtr<CefWindow>) override { return CEF_SHOW_STATE_HIDDEN; }
+  bool IsFrameless(CefRefPtr<CefWindow>) override { return true; }
+  bool CanResize(CefRefPtr<CefWindow>) override { return false; }
+  bool CanMaximize(CefRefPtr<CefWindow>) override { return false; }
+  bool CanMinimize(CefRefPtr<CefWindow>) override { return false; }
+  cef_runtime_style_t GetWindowRuntimeStyle() override { return CEF_RUNTIME_STYLE_CHROME; }
+ private:
+  Page* page_;
+  IMPLEMENT_REFCOUNTING(WindowDelegate);
+};
+void HostBrowserView(Page* page,CefRefPtr<CefBrowserView> browser_view) {
+  page->browser_view = browser_view;
+  page->window_delegate = new WindowDelegate(page);
+  CefWindow::CreateTopLevelWindow(page->window_delegate);
+}
+class BrowserViewDelegate final : public CefBrowserViewDelegate {
+ public:
+  explicit BrowserViewDelegate(Page* page) : page_(page) {}
+  void DetachPage() { page_ = nullptr; }
+  CefRefPtr<CefBrowserViewDelegate> GetDelegateForPopupBrowserView(
+      CefRefPtr<CefBrowserView>,const CefBrowserSettings&,CefRefPtr<CefClient> client,bool) override {
+    for (auto& entry : pages) {
+      if (entry.second->client.get() == client.get()) {
+        entry.second->view_delegate = new BrowserViewDelegate(entry.first);
+        return entry.second->view_delegate;
+      }
+    }
+    return nullptr;
+  }
+  bool OnPopupBrowserViewCreated(CefRefPtr<CefBrowserView>,CefRefPtr<CefBrowserView> popup,bool) override {
+    auto browser = popup->GetBrowser();
+    auto client = browser->GetHost()->GetClient();
+    for (auto& entry : pages) {
+      // Chrome's Attach path can deliver this before OnAfterCreated. The
+      // original client is already assigned by OnBeforePopup and is stable.
+      if (entry.second->client.get() == client.get() && (entry.second->pending_popup ||
+          (entry.second->browser && entry.second->browser->IsSame(browser)))) {
+        HostBrowserView(entry.first,popup); return true;
+      }
+    }
+    // No Radius owner must never become an untracked browser window.
+    browser->GetHost()->CloseBrowser(true);
+    return true;
+  }
+  ChromeToolbarType GetChromeToolbarType(CefRefPtr<CefBrowserView>) override { return CEF_CTT_NORMAL; }
+  cef_runtime_style_t GetBrowserRuntimeStyle() override { return CEF_RUNTIME_STYLE_CHROME; }
+ private:
+  Page* page_;
+  IMPLEMENT_REFCOUNTING(BrowserViewDelegate);
 };
 Page::Page() { [view setWantsLayer:YES]; }
 Page::~Page() { [view release]; }
+void SynchronizeViews() {
+  for (auto& entry : pages) [entry.second->view synchronizeBrowserWindow];
+}
 void Destroy(Page* page) {
   page->client->DetachPage();
+  if (page->view_delegate) page->view_delegate->DetachPage();
+  if (page->window_delegate) page->window_delegate->DetachPage();
+  NSWindow* child = page->view.browserWindow;
+  if (child.parentWindow) [child.parentWindow removeChildWindow:child];
+  page->view.browserWindow = nil;
   auto context = contexts.find(page->context_key);
   if (context != contexts.end() && --context->second.pages == 0) contexts.erase(context);
   pages.erase(page);
@@ -331,16 +605,16 @@ Page* Allocate(const std::string& key) {
 
 void CreateReadyPage(Page* page) {
   page->awaiting_context = false;
-  CefWindowInfo window; window.SetAsChild(page->view,CefRect(0,0,800,600));
-  window.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
   CefBrowserSettings settings;
-  // A synchronous result is essential: CreateBrowser queues an internal task
-  // whose later failure has no client callback and cannot be cancelled.
-  if (!CefBrowserHost::CreateBrowserSync(window,page->client,"about:blank",settings,nullptr,
-                                       contexts.at(page->context_key).value)) {
+  page->view_delegate = new BrowserViewDelegate(page);
+  auto view = CefBrowserView::CreateBrowserView(page->client,"about:blank",settings,nullptr,
+      contexts.at(page->context_key).value,page->view_delegate);
+  if (!view) {
     last_error = "Chromium could not create a browser view. Reopen this tab to retry.";
     Message(page,RADIUS_CEF_ERROR,last_error);
+    return;
   }
+  HostBrowserView(page,view);
 }
 class ContextHandler final : public CefRequestContextHandler {
  public:
@@ -434,7 +708,7 @@ void* Create(const char* profile,const char* private_window) {
   Page* page = Allocate(key);
   if (contexts.at(key).ready) {
     CreateReadyPage(page);
-    if (!page->browser) { Destroy(page); return nullptr; }
+    if (!page->browser_view) { Destroy(page); return nullptr; }
   }
   return page;
 }
@@ -444,6 +718,16 @@ void Callbacks(void* opaque,void* context,radius_cef_event_callback event,radius
 }
 void Command(void* opaque,int command,const char* text,double value) {
   auto page=static_cast<Page*>(opaque); if (!pages.count(page) || page->closing) return;
+  if (command==RADIUS_CEF_DOWNLOAD_PATH) { page->client->DownloadPath(static_cast<int>(value),text); return; }
+  if (command==RADIUS_CEF_DOWNLOAD_CANCEL) { page->client->CancelDownload(static_cast<int>(value)); return; }
+  if (command==RADIUS_CEF_EXTENSIONS) {
+    if (page->context_key.rfind("private:",0)==0) {
+      Message(page,RADIUS_CEF_NOTICE,"Install and manage extensions in a regular profile window."); return;
+    }
+    page->management=true; page->navigated=true; page->pending_url="chrome://extensions/";
+    if (page->browser) page->browser->GetMainFrame()->LoadURL(page->pending_url);
+    return;
+  }
   if (command==RADIUS_CEF_POPUPS) { page->popups=value!=0; return; }
   if (command==RADIUS_CEF_LOAD) {
     if (!Allowed(text ? text : "")) { Message(page,RADIUS_CEF_ERROR,"Only HTTP and HTTPS addresses are supported."); return; }
@@ -455,6 +739,12 @@ void Command(void* opaque,int command,const char* text,double value) {
   if (!page->browser) return;
   auto browser=page->browser; auto host=browser->GetHost();
   switch (command) {
+    case RADIUS_CEF_FOCUS_LOCATION: {
+      if (page->window) page->window->Activate();
+      const int command = cef_id_for_command_id_name("IDC_FOCUS_LOCATION");
+      if (command >= 0) host->ExecuteChromeCommand(command,CEF_WOD_CURRENT_TAB);
+      break;
+    }
     case RADIUS_CEF_RELOAD: browser->Reload(); break;
     case RADIUS_CEF_STOP: browser->StopLoad(); break;
     case RADIUS_CEF_BACK: browser->GoBack(); break;
@@ -467,8 +757,64 @@ void Command(void* opaque,int command,const char* text,double value) {
       break;
   }
 }
+// Inspect only this process's own accessibility objects, and only in the
+// isolated acceptance launch. No system AX trust or TCC permission is changed.
+bool AcceptFixtureExtension(Page* page) {
+  if (!diagnostics || !page->view.browserWindow) return false;
+  NSWindow* chrome = page->view.browserWindow;
+  for (NSWindow* window in [NSApp windows]) {
+    bool owned = false;
+    for (NSWindow* owner=window; owner; owner=owner.parentWindow)
+      if (owner==chrome) { owned=true; break; }
+    if (!owned) continue;
+    std::vector<id> pending = {window};
+    std::set<const void*> visited;
+    id accept = nil;
+    bool fixture = false;
+    bool cancel = false;
+    while (!pending.empty() && visited.size()<10000) {
+      id element = pending.back(); pending.pop_back();
+      if (!element || !visited.insert((const void*)element).second) continue;
+      NSMutableSet* labels = [NSMutableSet set];
+      NSMutableString* text = [NSMutableString string];
+      if ([element respondsToSelector:@selector(accessibilityLabel)]) {
+        id label=[element accessibilityLabel]; if ([label isKindOfClass:[NSString class]]) { [labels addObject:label]; [text appendString:label]; }
+      }
+      if ([element respondsToSelector:@selector(accessibilityTitle)]) {
+        id title=[element accessibilityTitle]; if ([title isKindOfClass:[NSString class]]) { [labels addObject:title]; [text appendString:title]; }
+      }
+      if ([element respondsToSelector:@selector(accessibilityValue)]) {
+        id value=[element accessibilityValue]; if ([value isKindOfClass:[NSString class]]) { [labels addObject:value]; [text appendString:value]; }
+      }
+      if ([text rangeOfString:@"uBlock Origin Lite" options:NSCaseInsensitiveSearch].location!=NSNotFound) fixture=true;
+      NSString* role=[element respondsToSelector:@selector(accessibilityRole)] ? [element accessibilityRole] : nil;
+      if ([role isEqualToString:NSAccessibilityButtonRole]) {
+        if ([labels containsObject:@"Cancel"]) cancel=true;
+        if ([labels containsObject:@"Add extension"] && [element respondsToSelector:@selector(isAccessibilityEnabled)] &&
+            [element isAccessibilityEnabled] && [element respondsToSelector:@selector(accessibilityPerformPress)]) accept=element;
+      }
+      if ([element respondsToSelector:@selector(accessibilityChildren)]) {
+        NSArray* children=[element accessibilityChildren];
+        for (id child in children) pending.push_back(child);
+      }
+    }
+    if (fixture && cancel && accept) return [accept accessibilityPerformPress];
+  }
+  return false;
+}
 void DevTools(void* opaque,int id,const char* method,const char* parameters) {
   auto page=static_cast<Page*>(opaque);
+  if (diagnostics && std::string(method)=="Radius.chooseFixtureDirectory") {
+    page->fixture_dialog=true;
+    auto result=CefDictionaryValue::Create(); result->SetBool("armed",true);
+    auto response=CefDictionaryValue::Create(); response->SetInt("id",id); response->SetBool("success",true);
+    response->SetDictionary("result",result); Emit(page,RADIUS_CEF_RESULT,response); return;
+  }
+  if (diagnostics && std::string(method)=="Radius.acceptFixtureExtension") {
+    auto result=CefDictionaryValue::Create(); result->SetBool("pressed",AcceptFixtureExtension(page));
+    auto response=CefDictionaryValue::Create(); response->SetInt("id",id); response->SetBool("success",true);
+    response->SetDictionary("result",result); Emit(page,RADIUS_CEF_RESULT,response); return;
+  }
   auto value=CefParseJSON(parameters,JSON_PARSER_RFC);
   if (page->browser && !page->closing &&
       page->browser->GetHost()->ExecuteDevToolsMethod(id,method,value ? value->GetDictionary() : nullptr) != 0) return;
@@ -481,16 +827,16 @@ void Close(void* opaque) {
   if (page->browser) page->browser->GetHost()->CloseBrowser(true);
   else if (!page->pending_popup) Destroy(page);
 }
-int Live() { return static_cast<int>(pages.size()); }
+int Live() { return static_cast<int>(pages.size() + unowned_browsers.size()); }
 int Shutdown() {
   if (!initialized) return 1;
-  if (!pages.empty()) { last_error="Chromium pages are still closing."; return 0; }
+  if (!pages.empty() || !unowned_browsers.empty()) { last_error="Chromium pages are still closing."; return 0; }
   stopped=true; CancelPump();
   contexts.clear(); CefShutdown(); engine_app=nullptr; initialized=false;
   // Never dlclose Chromium: runtime code may remain referenced by ObjC classes.
   return 1;
 }
 const char* Error() { return last_error.c_str(); }
-const radius_cef_api api={1,Initialize,Error,Create,NativeView,Callbacks,Command,DevTools,Close,Live,Shutdown};
+const radius_cef_api api={2,Initialize,Error,Create,NativeView,Callbacks,Command,DevTools,Close,Live,Shutdown};
 }
 extern "C" __attribute__((visibility("default"))) const radius_cef_api* radius_cef_get_api() { return &api; }

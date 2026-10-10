@@ -39,10 +39,13 @@ jobs:
           RADIUS_CHROMIUM_PACKAGE: ${{ runner.temp }}/radius-cef-runtime/Chromium-${{ matrix.arch }}.radiusengine
         run: ./scripts/build-app.sh
       - name: Verify installed Chromium renders inside Radius and quits normally
-        timeout-minutes: 6
+        timeout-minutes: 10
         env:
+          RADIUS_CHROMIUM_WEBSTORE_TEST: "1"
           RADIUS_CHROMIUM_PACKAGE: ${{ runner.temp }}/radius-cef-runtime/Chromium-${{ matrix.arch }}.radiusengine
         run: ./scripts/smoke-app.sh
+      - name: Package graphical development installer
+        run: python3 scripts/package-release.py --development
       - name: Archive development runtime
         run: |
           ditto -c -k --sequesterRsrc --keepParent "$RUNNER_TEMP/radius-cef-runtime/Chromium-${{ matrix.arch }}.radiusengine" "dist/Chromium-${{ matrix.arch }}.radiusengine.zip"
@@ -63,6 +66,7 @@ jobs:
         with:
           name: Radius-Chromium-${{ matrix.arch }}-development-runtime
           path: |
+            dist/*.dmg
             dist/Chromium-*.radiusengine.zip
             dist/Radius-Chromium-*.zip
           if-no-files-found: error

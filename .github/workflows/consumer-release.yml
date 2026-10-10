@@ -1,0 +1,141 @@
+name: Build signed consumer installers
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (for example 1.0.0)'
+        required: true
+        default: '1.0.0'
+      security_epoch:
+        description: 'Monotonic engine security epoch (at least the pinned Chromium major)'
+        required: true
+        default: '154'
+      publish:
+        description: 'Publish the three notarized installers and catalog as a GitHub release'
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            variant: WebKit-universal
+            chromium: ''
+          - runner: macos-15
+            variant: Chromium-arm64
+            chromium: arm64
+          - runner: macos-15-intel
+            variant: Chromium-x86_64
+            chromium: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      RADIUS_SIGNING_IDENTITY: ${{ secrets.RADIUS_SIGNING_IDENTITY }}
+      RADIUS_VERSION: ${{ inputs.version }}
+      RADIUS_BUILD_NUMBER: ${{ github.run_id }}
+      RADIUS_SECURITY_EPOCH: ${{ inputs.security_epoch }}
+      RADIUS_RELEASE_TAG: v${{ inputs.version }}
+      RADIUS_NOTARY_KEY_ID: ${{ secrets.RADIUS_NOTARY_KEY_ID }}
+      RADIUS_NOTARY_ISSUER: ${{ secrets.RADIUS_NOTARY_ISSUER }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure ephemeral signing keychain and notary key
+        env:
+          CERTIFICATE: ${{ secrets.RADIUS_SIGNING_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.RADIUS_SIGNING_CERTIFICATE_PASSWORD }}
+          NOTARY_KEY: ${{ secrets.RADIUS_NOTARY_KEY_BASE64 }}
+        run: |
+          python3 - <<'PY'
+          import base64, os
+          from pathlib import Path
+          required = ['CERTIFICATE', 'CERTIFICATE_PASSWORD', 'NOTARY_KEY', 'RADIUS_SIGNING_IDENTITY', 'RADIUS_NOTARY_KEY_ID', 'RADIUS_NOTARY_ISSUER']
+          if not all(os.environ.get(key) for key in required):
+              raise SystemExit('Developer ID and App Store Connect notarization secrets are required; unsigned consumer packaging is not supported.')
+          directory = Path(os.environ['RUNNER_TEMP'])
+          (directory / 'radius-signing.p12').write_bytes(base64.b64decode(os.environ['CERTIFICATE'], validate=True))
+          key = directory / 'radius-notary.p8'
+          key.write_bytes(base64.b64decode(os.environ['NOTARY_KEY'], validate=True))
+          key.chmod(0o600)
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write('RADIUS_NOTARY_KEY=' + str(key) + '\n')
+          PY
+          signing_keychain_password="$(openssl rand -hex 24)"
+          security create-keychain -p "$signing_keychain_password" "$RUNNER_TEMP/radius-signing.keychain-db"
+          security set-keychain-settings -lut 21600 "$RUNNER_TEMP/radius-signing.keychain-db"
+          security unlock-keychain -p "$signing_keychain_password" "$RUNNER_TEMP/radius-signing.keychain-db"
+          security import "$RUNNER_TEMP/radius-signing.p12" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$RUNNER_TEMP/radius-signing.keychain-db"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$signing_keychain_password" "$RUNNER_TEMP/radius-signing.keychain-db"
+          security list-keychains -d user -s "$RUNNER_TEMP/radius-signing.keychain-db" /Library/Keychains/System.keychain
+      - name: Test native application
+        run: ./scripts/test.sh
+      - name: Build Chromium engine
+        if: matrix.chromium != ''
+        run: python3 scripts/chromium-runtime.py --arch '${{ matrix.chromium }}' --work-dir "$RUNNER_TEMP/radius-runtime"
+      - name: Sign complete Radius application
+        env:
+          CHROMIUM_ARCH: ${{ matrix.chromium }}
+        run: |
+          if [[ -n "$CHROMIUM_ARCH" ]]; then
+            export RADIUS_CHROMIUM_PACKAGE="$RUNNER_TEMP/radius-runtime/Chromium-$CHROMIUM_ARCH.radiusengine"
+          fi
+          ./scripts/build-app.sh
+      - name: Native packaged application acceptance
+        env:
+          CHROMIUM_ARCH: ${{ matrix.chromium }}
+        run: |
+          if [[ -n "$CHROMIUM_ARCH" ]]; then
+            export RADIUS_CHROMIUM_PACKAGE="$RUNNER_TEMP/radius-runtime/Chromium-$CHROMIUM_ARCH.radiusengine"
+          fi
+          ./scripts/smoke-app.sh
+      - name: Notarize application and graphical offline installer
+        run: python3 scripts/package-release.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Radius-consumer-${{ matrix.variant }}
+          path: |
+            dist/*.dmg
+            dist/*-package.json
+            dist/*-catalog-entry.json
+          if-no-files-found: error
+      - name: Remove ephemeral credentials
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/radius-signing.keychain-db" || true
+          rm -f "$RUNNER_TEMP/radius-signing.p12" "$RUNNER_TEMP/radius-notary.p8"
+  publish:
+    if: inputs.publish
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Radius-consumer-*
+          path: release
+          merge-multiple: true
+      - name: Assemble compatible release catalog
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          if not re.fullmatch(r'\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?', os.environ['RELEASE_VERSION']):
+              raise SystemExit('Invalid version')
+          root = Path('release')
+          entries = [json.loads(path.read_text()) for path in root.glob('*-catalog-entry.json')]
+          if len(entries) != 3:
+              raise SystemExit('All three notarized installer variants are required')
+          (root / 'catalog.json').write_text(json.dumps({'format': 1, 'releases': entries}, indent=2) + '\n')
+          PY
+      - name: Publish verified installers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "v$RELEASE_VERSION" release/*.dmg release/*-package.json release/catalog.json --title "Radius $RELEASE_VERSION" --notes 'Signed and notarized Radius installers. WebKit is available in every installer; the offline Chromium installers include the same native application and default modules.'

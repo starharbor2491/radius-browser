@@ -7,7 +7,7 @@ smoke_server_pid=""
 smoke_app_pid=""
 smoke_watchdog_pid=""
 smoke_deadline=90
-if [[ -n "${RADIUS_CHROMIUM_PACKAGE:-}" ]]; then smoke_deadline=240; fi
+if [[ -n "${RADIUS_CHROMIUM_PACKAGE:-}" ]]; then smoke_deadline=420; fi
 cleanup() {
   smoke_status=$?
   trap - EXIT HUP INT TERM

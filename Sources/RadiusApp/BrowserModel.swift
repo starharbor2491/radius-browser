@@ -43,7 +43,7 @@ final class BrowserModel: ObservableObject {
         }
         let tab: BrowserEngineTab
         if engine == .chromium {
-            do { tab = try ChromiumRuntime.shared.makeTab(profileID: session.profileID, privateSessionID: isPrivate ? session.id : nil, dataDirectory: app.dataDirectory) }
+            do { tab = try ChromiumRuntime.shared.makeTab(profileID: session.profileID, privateSessionID: isPrivate ? session.id : nil, dataDirectory: app.dataDirectory, downloads: downloads) }
             catch { tab = UnavailableEngineTab(engine: engine, reason: error.localizedDescription) }
         } else {
             let dataStore = privateDataStore ?? WKWebsiteDataStore(forIdentifier: session.profileID)
@@ -56,7 +56,8 @@ final class BrowserModel: ObservableObject {
     private func attach(_ tab: BrowserEngineTab, id: UUID) {
         tab.onChange = { [weak self, weak tab] finished in
             guard let self, !self.isClosed, let tab, let index = self.session.tabs.firstIndex(where: { $0.id == id }) else { return }
-            if let url = tab.url, AddressResolver.isWebURL(url) || url.scheme == "blob" || url.absoluteString == "about:blank" {
+            if let url = tab.url, AddressResolver.isWebURL(url) || url.scheme == "blob" || url.absoluteString == "about:blank" ||
+                (tab.engineID == .chromium && ["chrome", "chrome-extension"].contains(url.scheme ?? "")) {
                 self.session.tabs[index].url = url
                 self.session.tabs[index].title = String((tab.title ?? url.host ?? "Website").prefix(512))
                 if self.session.selectedTabID == id && !self.addressEditing { self.address = url.absoluteString }
@@ -75,6 +76,30 @@ final class BrowserModel: ObservableObject {
         }
         tab.onClose = { [weak self] in self?.closeTab(id) }
         tab.onNotice = { [weak self] message in self?.app.notice = message }
+        tab.onActivate = { [weak self] in
+            guard let self, !self.isClosed, self.session.selectedTabID != id else { return }
+            self.selectTab(id)
+        }
+        tab.onBrowserCommand = { [weak self, weak tab] command in
+            guard let self, !self.isClosed, let tab else { return }
+            if self.session.selectedTabID != id { self.selectTab(id) }
+            switch command {
+            case "newTab": self.newTab()
+            case "closeTab": self.closeTab(id)
+            case "closeWindow": tab.nativeView.window?.performClose(nil)
+            case "newWindow": NotificationCenter.default.post(name: .radiusOpenBrowserWindow, object: self.session.id, userInfo: ["private": false])
+            case "privateWindow": NotificationCenter.default.post(name: .radiusOpenBrowserWindow, object: self.session.id, userInfo: ["private": true])
+            case "quit": NSApp.terminate(nil)
+            case "focusAddress":
+                if !tab.focusAddressBar() { NotificationCenter.default.post(name: .radiusFocusAddress, object: self.session.id) }
+            case "find": NotificationCenter.default.post(name: .radiusFind, object: self.session.id)
+            case "downloads": self.togglePanel(.downloads)
+            case "history": if !self.isPrivate { self.togglePanel(.history) }
+            case "bookmark": self.toggleBookmark()
+            case "extensions": self.sheet = .extensions
+            default: break
+            }
+        }
         tab.allowPopups = { [weak self] in self?.app.library.preferences.blockPopups == false }
         webTabs[id] = tab
     }
@@ -124,7 +149,11 @@ final class BrowserModel: ObservableObject {
     }
     func reopenClosedTab() {
         guard session.tabs.count < 200, var tab = closedTabs.popLast() else { return }
-        tab.id = UUID(); tab.parentID = nil; tab.collapsed = nil; session.tabs.append(tab); selectTab(tab.id)
+        tab.id = UUID(); tab.parentID = nil; tab.collapsed = nil
+        if tab.pinned {
+            session.tabs.insert(tab, at: session.tabs.firstIndex(where: { !$0.pinned }) ?? session.tabs.endIndex)
+        } else { session.tabs.append(tab) }
+        selectTab(tab.id)
     }
     func selectRelativeTab(_ offset: Int) {
         guard let index = session.tabs.firstIndex(where: { $0.id == session.selectedTabID }) else { return }
@@ -206,6 +235,14 @@ final class BrowserModel: ObservableObject {
         address = selectedTab.url?.absoluteString ?? ""
         if isPrivate { privateDataStore = .nonPersistent() }
     }
+    func resetAfterProfileDeletion(replacementID: UUID) {
+        guard !isClosed, let replacement = app.library.profiles.first(where: { $0.id == replacementID }) else { return }
+        disposeEngineTabs(); closedTabs.removeAll(); panel = nil
+        session = app.library.sessions.first(where: { $0.id == session.id }) ??
+            WindowSession(id: session.id, profileID: replacementID, tabs: [BrowserTab(engineID: replacement.engineID ?? .webkit)])
+        address = ""; addressEditing = false
+        if isPrivate { privateDataStore = .nonPersistent() }
+    }
     func reopenTab(_ id: UUID, with engine: BrowserEngineID) {
         guard let descriptor = session.tabs.first(where: { $0.id == id }), descriptor.engineID != engine else { return }
         if let url = descriptor.url, !AddressResolver.isWebURL(url) {
@@ -260,4 +297,4 @@ enum BrowserPanel: String, CaseIterable, Identifiable {
         switch self { case .bookmarks: "bookmark"; case .history: "clock"; case .downloads: "arrow.down.circle"; case .notes: "note.text"; case .resources: "gauge.with.dots.needle.33percent" }
     }
 }
-enum BrowserSheet: String, Identifiable { case modules, customize, settings, recovery; var id: Self { self } }
+enum BrowserSheet: String, Identifiable { case modules, customize, settings, recovery, extensions; var id: Self { self } }

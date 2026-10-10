@@ -13,11 +13,32 @@ final class ChromiumRuntime: ObservableObject {
     static let shared = ChromiumRuntime()
     nonisolated static let cefVersion = "154.0.34+g14c5a08+chromium-154.0.8037.98"
     @Published private(set) var isLoaded = false
-    @Published private(set) var status = "Chromium Alloy development runtime · No Chrome extensions"
+    @Published private(set) var status = "Chromium Chrome runtime"
     private var library: UnsafeMutableRawPointer?
     private(set) var api: radius_cef_api?
     private var loadedDataDirectory: URL?
     private var stopped = false
+    // Own every live callback receiver, including management pages and pages
+    // awaiting download cancellation after their native tab has disappeared.
+    private var tabs: [ObjectIdentifier: ChromiumTab] = [:]
+    private var blockedProfileIDs = Set<UUID>()
+    private var didShutDown = false
+    func register(_ tab: ChromiumTab) { tabs[ObjectIdentifier(tab)] = tab }
+    func retainWhileClosing(_ tab: ChromiumTab) { register(tab) }
+    func finishedClosing(_ tab: ChromiumTab) { tabs.removeValue(forKey: ObjectIdentifier(tab)) }
+    func reportCloseFailure(_ message: String) { status = message }
+    var downloadCenters: [DownloadCenter] {
+        var seen = Set<ObjectIdentifier>()
+        return tabs.values.map(\.downloadCenter).filter { seen.insert(ObjectIdentifier($0)).inserted }
+    }
+    func blockProfilesPendingDeletion(_ ids: Set<UUID>) { blockedProfileIDs = ids }
+    func prepareToDeleteProfile(_ id: UUID) async throws {
+        blockedProfileIDs.insert(id)
+        let affected = tabs.values.filter { $0.profileID == id }
+        for tab in affected { try await tab.cancelDownloads() }
+        for tab in affected { tab.dispose() }
+        NotificationCenter.default.post(name: .radiusChromiumProfileClosed, object: id)
+    }
 
     static var packageURL: URL {
         Bundle.main.bundleURL.appendingPathComponent("Contents/Frameworks/Chromium.radiusengine", isDirectory: true)
@@ -25,14 +46,17 @@ final class ChromiumRuntime: ObservableObject {
     func isInstalled(in directory: URL) -> Bool {
         (try? ChromiumPackage.readManifest(Self.packageURL)) != nil
     }
-    func makeTab(profileID: UUID, privateSessionID: UUID?, dataDirectory: URL) throws -> ChromiumTab {
+    func makeTab(profileID: UUID, privateSessionID: UUID?, dataDirectory: URL, downloads: DownloadCenter? = nil) throws -> ChromiumTab {
+        guard !blockedProfileIDs.contains(profileID) else {
+            throw ValidationError("This profile is being deleted. Choose another profile.")
+        }
         try load(dataDirectory: dataDirectory)
         guard let api else { throw ValidationError("The Chromium runtime is not loaded.") }
         let page = profileID.uuidString.withCString { profile in
             (privateSessionID?.uuidString ?? "").withCString { privateID in api.create_page(profile, privateID) }
         }
         guard let page else { throw failure() }
-        return ChromiumTab(runtime: self, page: page)
+        return ChromiumTab(runtime: self, page: page, downloads: downloads ?? DownloadCenter(), profileID: profileID, privateSessionID: privateSessionID)
     }
     private func load(dataDirectory: URL) throws {
         guard !stopped else { throw ValidationError("Restart Radius before using Chromium again.") }
@@ -53,7 +77,7 @@ final class ChromiumRuntime: ObservableObject {
         library = handle
         guard let symbol = dlsym(handle, "radius_cef_get_api") else { throw ValidationError("This runtime has no Radius engine API.") }
         let getter = unsafeBitCast(symbol, to: radius_cef_get_api_function.self)
-        guard let pointer = getter(), pointer.pointee.version == 1 else { throw ValidationError("This runtime uses an incompatible Radius engine API.") }
+        guard let pointer = getter(), pointer.pointee.version == 2 else { throw ValidationError("This runtime uses an incompatible Radius engine API.") }
         let loadedAPI = pointer.pointee
         let success = package.path.withCString { packagePath in
             dataDirectory.path.withCString { dataPath in
@@ -64,23 +88,31 @@ final class ChromiumRuntime: ObservableObject {
         guard success != 0 else { stopped = true; throw failure() }
         loadedDataDirectory = dataDirectory.standardizedFileURL
         isLoaded = true
-        status = "Chromium Alloy loaded · \(Self.cefVersion) · No Chrome extensions"
+        status = "Chromium Chrome runtime loaded · \(Self.cefVersion)"
     }
     func failure() -> ValidationError {
         ValidationError(api?.last_error().map { String(cString: $0) } ?? "The Chromium runtime failed.")
     }
     func clearWebsiteData(profileID: UUID, dataDirectory: URL) async throws {
-        guard library == nil else { throw ValidationError("Restart Radius with WebKit selected before clearing Chromium website data.") }
-        let path = dataDirectory.appendingPathComponent("Chromium/Profiles/\(profileID.uuidString)", isDirectory: true)
-        if FileManager.default.fileExists(atPath: path.path) { try FileManager.default.removeItem(at: path) }
+        guard library == nil || didShutDown else {
+            throw ValidationError("Restart Radius before erasing Chromium website data. Its engine still owns profile files.")
+        }
+        if let loadedDataDirectory, didShutDown,
+           loadedDataDirectory.resolvingSymlinksInPath() != dataDirectory.standardizedFileURL.resolvingSymlinksInPath() {
+            throw ValidationError("The requested Chromium data directory differs from the one this engine used.")
+        }
+        try ChromiumProfileData.erase(profileID: profileID, dataDirectory: dataDirectory)
     }
     /// Call after all tab owners have disposed their pages, before AppKit replies to quit.
     func shutdown() async -> Bool {
         guard isLoaded, let api else { return true }
+        // Settings and extension management also own engine pages, outside the
+        // browser-window model registry. Close every runtime-owned page.
+        for tab in Array(tabs.values) { tab.dispose() }
         for _ in 0..<200 {
             if api.live_pages() == 0 {
                 let success = api.shutdown() != 0
-                if success { isLoaded = false; stopped = true }
+                if success { isLoaded = false; stopped = true; didShutDown = true }
                 return success
             }
             try? await Task.sleep(for: .milliseconds(50))
@@ -95,6 +127,7 @@ private struct ChromiumManifest: Decodable {
     let abi: Int
     let architecture: String
     let cefVersion: String
+    let runtimeStyle: String
 }
 
 /// Ad-hoc signatures establish code integrity, not publisher identity.
@@ -110,7 +143,7 @@ private enum ChromiumPackage {
         #else
         let architecture = "x86_64"
         #endif
-        guard manifest.format == 2, manifest.abi == 1,
+        guard manifest.format == 2, manifest.abi == 2, manifest.runtimeStyle == "chrome",
               manifest.architecture == architecture, manifest.cefVersion == ChromiumRuntime.cefVersion else {
             throw ValidationError("This Chromium package is incompatible with this Radius build or Mac architecture.")
         }
@@ -139,4 +172,8 @@ private enum ChromiumPackage {
             throw ValidationError("The embedded Chromium runtime failed its code-signature integrity check.")
         }
     }
+}
+
+extension Notification.Name {
+    static let radiusChromiumProfileClosed = Notification.Name("radius.chromiumProfileClosed")
 }

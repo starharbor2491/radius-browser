@@ -22,7 +22,11 @@ jobs:
       - name: Build native app
         run: ./scripts/build-app.sh
       - name: Verify native integration in release configuration
-        run: swift test -c release --filter 'BrowserIntegrationTests|ResourceModuleTests|ReaderModuleTests'
+        env:
+          RADIUS_DISTRIBUTION_TEST_APP: ${{ github.workspace }}/dist/Radius.app
+        run: swift test -c release --filter 'BrowserIntegrationTests|ResourceModuleTests|ReaderModuleTests|BehaviorModuleTests|DistributionNativeTests|DownloadsTests'
+      - name: Package graphical development installer
+        run: python3 scripts/package-release.py --development
       - name: Launch packaged app and capture native screens
         timeout-minutes: 3
         run: ./scripts/smoke-app.sh
@@ -31,7 +35,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: Radius-macOS-local-build
-          path: dist/Radius-macOS.zip
+          path: |
+            dist/Radius-macOS.zip
+            dist/*.dmg
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()

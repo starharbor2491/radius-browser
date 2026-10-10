@@ -1,0 +1,12 @@
+{
+  "id": "org.radius.layout-sidebar",
+  "name": "Sidebar Workspace",
+  "version": 1,
+  "summary": "Sidebar Workspace supplied as a removable declarative package.",
+  "publisher": "Radius",
+  "source": "https://github.com/starharbor2491/radius-browser",
+  "capability": "layout",
+  "dependencies": [],
+  "defaultInstalled": false,
+  "runtime": "declarative"
+}

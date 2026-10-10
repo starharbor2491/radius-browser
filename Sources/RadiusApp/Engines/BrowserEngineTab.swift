@@ -17,7 +17,11 @@ class BrowserEngineTab: NSObject, ObservableObject {
     var onCreateWindow: ((BrowserEngineTab, URL?) -> Bool)?
     var onClose: (() -> Void)?
     var onNotice: ((String) -> Void)?
+    var onActivate: (() -> Void)?
+    var onBrowserCommand: ((String) -> Void)?
     var allowPopups: (() -> Bool)? { didSet { updatePopupPolicy() } }
+    var hasNativeNavigationChrome: Bool { false }
+    func focusAddressBar() -> Bool { false }
     var nativeView: NSView { preconditionFailure("An engine must provide its native view") }
     var url: URL? { nil }
     var title: String? { nil }
@@ -34,5 +38,5 @@ class BrowserEngineTab: NSObject, ObservableObject {
     func find(_ text: String, backwards: Bool = false) { preconditionFailure("An engine must implement find") }
     func pageHTML() async throws -> String { throw ValidationError("This engine cannot capture page HTML.") }
     func saveScreenshot(app: AppState) { app.notice = "This engine cannot capture the page." }
-    func dispose() { onChange = nil; onCreateWindow = nil; onClose = nil; onNotice = nil; allowPopups = nil }
+    func dispose() { onChange = nil; onCreateWindow = nil; onClose = nil; onNotice = nil; onActivate = nil; onBrowserCommand = nil; allowPopups = nil }
 }

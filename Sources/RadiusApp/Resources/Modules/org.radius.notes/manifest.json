@@ -1,11 +1,20 @@
 {
   "id": "org.radius.notes",
   "name": "Notes",
-  "version": 1,
+  "version": 2,
   "summary": "A quiet place for notes, stored locally within your profile.",
   "publisher": "Radius",
   "source": "https://github.com/starharbor2491/radius-browser",
   "capability": "notes",
   "dependencies": [],
-  "defaultInstalled": true
+  "defaultInstalled": true,
+  "runtime": "behaviorProgram",
+  "settings": [
+    {
+      "id": "defaultTitle",
+      "title": "New note title",
+      "kind": "text",
+      "defaultValue": "Untitled note"
+    }
+  ]
 }

@@ -97,6 +97,7 @@ public struct WindowSession: Identifiable, Codable, Equatable, Sendable {
             tabs[i].title = String(tabs[i].title.prefix(512))
         }
         if tabs.isEmpty { tabs = [BrowserTab()] }
+        tabs = tabs.filter(\.pinned) + tabs.filter { !$0.pinned }
         if !tabs.contains(where: { $0.id == selectedTabID }) { selectedTabID = tabs[0].id }
         let ids = Set(tabs.map(\.id))
         for i in tabs.indices {
@@ -212,6 +213,54 @@ public enum TabPlacement: String, Codable, CaseIterable, Sendable { case top, bo
 public enum BarPlacement: String, Codable, CaseIterable, Sendable { case top, bottom }
 public enum SidebarPlacement: String, Codable, CaseIterable, Sendable { case leading, trailing, hidden }
 public enum SplitAxis: String, Codable, CaseIterable, Sendable { case sideBySide, stacked }
+public enum InterfaceTypeface: String, Codable, CaseIterable, Sendable { case system, rounded, serif, monospaced }
+public enum InterfaceIconStyle: String, Codable, CaseIterable, Sendable { case outline, filled }
+public struct ComponentAppearance: Codable, Equatable, Sendable {
+    public var density: Density?
+    public var fontScale: Double?
+    public var cornerRadius: Double?
+    public init() {}
+    public mutating func normalize() {
+        if let value = fontScale { fontScale = value.isFinite ? min(1.4, max(0.85, value)) : 1 }
+        if let value = cornerRadius { cornerRadius = value.isFinite ? min(24, max(0, value)) : 10 }
+    }
+}
+public struct InterfaceColor: Equatable, Sendable {
+    public let red: Double, green: Double, blue: Double
+    public init?(hex: String) {
+        let value = hex.hasPrefix("#") ? String(hex.dropFirst()) : hex
+        guard value.count == 6, value.allSatisfy({ $0.isASCII && $0.isHexDigit }), let rgb = UInt32(value, radix: 16) else { return nil }
+        red = Double((rgb >> 16) & 255) / 255; green = Double((rgb >> 8) & 255) / 255; blue = Double(rgb & 255) / 255
+    }
+    public func contrastRatio(against other: InterfaceColor) -> Double {
+        func luminance(_ color: InterfaceColor) -> Double {
+            func linear(_ value: Double) -> Double { value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4) }
+            return 0.2126 * linear(color.red) + 0.7152 * linear(color.green) + 0.0722 * linear(color.blue)
+        }
+        let a = luminance(self), b = luminance(other)
+        return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+    }
+}
+public enum ToolbarRegion: String, Codable, CaseIterable, Sendable {
+    case beforeAddress, afterAddress, top, bottom, overflow
+    public var label: String {
+        switch self { case .beforeAddress: "Before address"; case .afterAddress: "After address"; case .top: "Top toolbar"; case .bottom: "Bottom toolbar"; case .overflow: "Browser menu" }
+    }
+}
+public enum ToolbarCommand: String, Codable, CaseIterable, Sendable {
+    case back, forward, reload, newTab, home, bookmark, sidebar, reader, screenshot, focus, downloads, modules, customize, settings, separator
+    public var label: String {
+        switch self {
+        case .back: "Back"; case .forward: "Forward"; case .reload: "Reload or stop"; case .newTab: "New tab"; case .home: "Start page"; case .bookmark: "Bookmark page"; case .sidebar: "Sidebar panels"; case .reader: "Reader"; case .screenshot: "Capture page"; case .focus: "Focus mode"; case .downloads: "Downloads"; case .modules: "Modules"; case .customize: "Customize"; case .settings: "Settings"; case .separator: "Separator"
+        }
+    }
+}
+public struct ToolbarComponent: Identifiable, Codable, Equatable, Sendable {
+    public var id: UUID
+    public var command: ToolbarCommand
+    public var region: ToolbarRegion
+    public init(id: UUID = UUID(), command: ToolbarCommand, region: ToolbarRegion) { self.id = id; self.command = command; self.region = region }
+}
 public struct Theme: Codable, Equatable, Sendable {
     public var design: DesignSystem = .native
     public var colorMode: ColorMode = .system
@@ -220,9 +269,30 @@ public struct Theme: Codable, Equatable, Sendable {
     public var cornerRadius: Double = 10
     public var transparency: Bool = true
     public var reducedMotion: Bool = false
+    // Optional fields preserve decoding of existing user configurations and setup packs.
+    public var typography: InterfaceTypeface?
+    public var fontScale: Double?
+    public var spacingScale: Double?
+    public var accentHex: String?
+    public var surfaceHex: String?
+    public var textHex: String?
+    public var borderWidth: Double?
+    public var shadowStrength: Double?
+    public var iconStyle: InterfaceIconStyle?
+    public var tabsAppearance: ComponentAppearance?
+    public var navigationAppearance: ComponentAppearance?
+    public var sidebarAppearance: ComponentAppearance?
     public init() {}
     public mutating func normalize() {
         cornerRadius = cornerRadius.isFinite ? min(24, max(0, cornerRadius)) : 10
+        if let value = fontScale { fontScale = value.isFinite ? min(1.4, max(0.85, value)) : 1 }
+        if let value = spacingScale { spacingScale = value.isFinite ? min(1.5, max(0.75, value)) : 1 }
+        if let value = borderWidth { borderWidth = value.isFinite ? min(2, max(0, value)) : 1 }
+        if let value = shadowStrength { shadowStrength = value.isFinite ? min(1, max(0, value)) : 0 }
+        if let value = accentHex, InterfaceColor(hex: value) == nil { accentHex = nil }
+        if let value = surfaceHex, InterfaceColor(hex: value) == nil { surfaceHex = nil }
+        if let value = textHex, InterfaceColor(hex: value) == nil { textHex = nil }
+        tabsAppearance?.normalize(); navigationAppearance?.normalize(); sidebarAppearance?.normalize()
     }
 }
 public struct BrowserLayout: Codable, Equatable, Sendable {
@@ -234,10 +304,23 @@ public struct BrowserLayout: Codable, Equatable, Sendable {
     public var statusBar: Bool = true
     public var treeTabs: Bool?
     public var split: SplitAxis?
+    public var toolbarComponents: [ToolbarComponent]?
+    public var addressWidth: Double?
+    public var tabsWidth: Double?
+    public var hideTabStrip: Bool?
+    public var sidebarAutoHide: Bool?
+    public var secondaryPanel: String?
     public init() {}
     public mutating func normalize() {
         sidebarWidth = sidebarWidth.isFinite ? min(360, max(180, sidebarWidth)) : 240
         if treeTabs == true && (tabs == .top || tabs == .bottom) { tabs = .leading }
+        if let value = addressWidth { addressWidth = value.isFinite ? min(1, max(0.4, value)) : 1 }
+        if let value = tabsWidth { tabsWidth = value.isFinite ? min(320, max(140, value)) : 190 }
+        if let components = toolbarComponents {
+            var ids = Set<UUID>(), commands = Set<ToolbarCommand>()
+            toolbarComponents = Array(components.filter { ids.insert($0.id).inserted && ($0.command == .separator || commands.insert($0.command).inserted) }.prefix(32))
+        }
+        if let secondaryPanel, !["bookmarks", "history", "downloads", "notes", "resources"].contains(secondaryPanel) { self.secondaryPanel = nil }
     }
 }
 public struct Configuration: Codable, Equatable, Sendable {
@@ -250,6 +333,7 @@ public struct NamedConfiguration: Identifiable, Codable, Equatable, Sendable {
     public var id: UUID
     public var name: String
     public var configuration: Configuration
+    public var requiredModuleIDs: [String]?
     public init(id: UUID = UUID(), name: String, configuration: Configuration) {
         self.id = id; self.name = name; self.configuration = configuration
     }
@@ -269,6 +353,7 @@ public struct LibraryState: Codable, Equatable, Sendable {
     public var history: [HistoryEntry] = []
     public var notes: [Note] = []
     public var sessions: [WindowSession] = []
+    public var pendingProfileDeletions: [UUID]?
     public var preferences = Preferences()
     public init() {}
     public mutating func normalize() {
@@ -276,6 +361,10 @@ public struct LibraryState: Codable, Equatable, Sendable {
         profiles = Array(profiles.filter { profilesSeen.insert($0.id).inserted }.prefix(20))
         if profiles.isEmpty { profiles = [Profile(name: "Personal")] }
         let profileIDs = Set(profiles.map(\.id))
+        if let pendingProfileDeletions {
+            var seen = Set<UUID>()
+            self.pendingProfileDeletions = Array(pendingProfileDeletions.filter { !profileIDs.contains($0) && seen.insert($0).inserted }.prefix(100))
+        }
         bookmarks = bookmarks.filter { profileIDs.contains($0.profileID) && AddressResolver.isWebURL($0.url) }
         history = Array(history.filter { profileIDs.contains($0.profileID) && AddressResolver.isWebURL($0.url) }.suffix(10_000))
         notes = notes.filter { profileIDs.contains($0.profileID) }
@@ -292,8 +381,9 @@ public struct SetupPack: Codable, Equatable, Sendable {
     public let formatVersion: Int
     public var name: String
     public var configuration: Configuration
-    public init(name: String, configuration: Configuration) {
-        formatVersion = 1; self.name = name; self.configuration = configuration
+    public var requiredModuleIDs: [String]?
+    public init(name: String, configuration: Configuration, requiredModuleIDs: [String]? = nil) {
+        formatVersion = 1; self.name = name; self.configuration = configuration; self.requiredModuleIDs = requiredModuleIDs
     }
     public static func decode(_ data: Data) throws -> SetupPack {
         guard data.count <= 64 * 1024 else { throw ValidationError("Setup pack is too large.") }
@@ -301,6 +391,9 @@ public struct SetupPack: Codable, Equatable, Sendable {
         guard pack.formatVersion == 1 else { throw ValidationError("This setup pack needs a newer Radius version.") }
         guard !pack.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               pack.name.count <= 100 else { throw ValidationError("Use a setup name of 1–100 characters.") }
+        if let requirements = pack.requiredModuleIDs {
+            guard requirements.count <= 32, Set(requirements).count == requirements.count, requirements.allSatisfy(ModuleManifest.validID) else { throw ValidationError("Setup module requirements are invalid.") }
+        }
         pack.configuration.normalize()
         return pack
     }

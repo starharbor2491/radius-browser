@@ -40,7 +40,7 @@ struct ResourceModuleTests {
         #expect(!app.enabled(.resourceMonitor))
         #expect(app.library.notes == [note])
         let disabled = try #require(app.installedModules.first { $0.id == original.id })
-        app.toggleModule(disabled)
+        try app.setModuleEnabledApproved(disabled.id, enabled: true)
         let resumed = try app.resourceWorkerPackage()
         try worker.start(executable: resumed.url, moduleID: resumed.id)
         let thirdProcess = try #require(worker.process)
@@ -96,7 +96,9 @@ struct ResourceModuleTests {
             #expect(reopened.ready)
             #expect(reopened.startupError == nil)
             #expect(reopened.installedModules.contains { $0.id == package.id && $0.enabled })
-            #expect(throws: (any Error).self) { try reopened.resourceWorkerPackage() }
+            // A signed application update/startup repairs existing official worker
+            // payloads from its sealed factory copy without restoring removals.
+            #expect(try reopened.resourceWorkerPackage().id == package.id)
             try reopened.reinstallApprovedWorker(package.id)
             let repaired = try reopened.resourceWorkerPackage()
             try worker.start(executable: repaired.url, moduleID: repaired.id)

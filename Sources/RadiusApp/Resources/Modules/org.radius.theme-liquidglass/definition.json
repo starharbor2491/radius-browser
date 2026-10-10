@@ -1,0 +1,12 @@
+{
+  "formatVersion": 1,
+  "theme": {
+    "design": "liquidGlass",
+    "colorMode": "system",
+    "accent": "blue",
+    "density": "comfortable",
+    "cornerRadius": 10,
+    "transparency": true,
+    "reducedMotion": false
+  }
+}

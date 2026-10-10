@@ -1,0 +1,12 @@
+{
+  "id": "org.radius.tree-tabs",
+  "name": "Tree Tabs",
+  "version": 1,
+  "summary": "Tree Tabs supplied as a removable declarative package.",
+  "publisher": "Radius",
+  "source": "https://github.com/starharbor2491/radius-browser",
+  "capability": "tabSystem",
+  "dependencies": [],
+  "defaultInstalled": false,
+  "runtime": "declarative"
+}

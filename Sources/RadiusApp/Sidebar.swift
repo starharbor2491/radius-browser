@@ -102,7 +102,7 @@ struct NotesPanel: View {
                     } label: { Text(selectedNote?.title ?? "Select a note").lineLimit(1) }
                     Spacer()
                     IconButton(title: "New note", icon: "plus") {
-                        let note = Note(profileID: profileID); app.library.notes.append(note); selection = note.id
+                        app.perform { selection = try app.createModuleNote(profileID: profileID) }
                     }
                 }
                 if let id = selection, selectedNote != nil {
@@ -115,7 +115,7 @@ struct NotesPanel: View {
                         Button("Delete", role: .destructive) {
                             let alert = NSAlert(); alert.messageText = "Delete this note?"; alert.informativeText = "This cannot be undone."
                             alert.addButton(withTitle: "Delete"); alert.addButton(withTitle: "Cancel")
-                            if alert.runModal() == .alertFirstButtonReturn { app.library.notes.removeAll { $0.id == id }; selection = nil }
+                            if alert.runModal() == .alertFirstButtonReturn { app.perform { try app.deleteModuleNote(id: id, profileID: profileID); selection = nil } }
                         }
                     }
                 } else { EmptyPanel(title: "A place to think", icon: "note.text", detail: "Add a note with +. Your notes stay on this Mac, in this profile.") }
@@ -125,9 +125,7 @@ struct NotesPanel: View {
     private var selectedNote: Note? { app.library.notes.first { $0.id == selection && $0.profileID == profileID } }
     private func noteBinding(_ id: UUID, field: WritableKeyPath<Note, String>) -> Binding<String> {
         Binding(get: { app.library.notes.first { $0.id == id }?[keyPath: field] ?? "" }, set: { value in
-            guard let index = app.library.notes.firstIndex(where: { $0.id == id }) else { return }
-            app.library.notes[index][keyPath: field] = String(value.prefix(field == \.title ? 100 : 200_000))
-            app.library.notes[index].modifiedAt = Date()
+            app.perform { try app.updateModuleNote(id: id, profileID: profileID, field: field == \.title ? "title" : "text", value: value) }
         })
     }
 }

@@ -16,12 +16,15 @@ var targets: [Target] = [
 products.append(.executable(name: "Radius", targets: ["RadiusApp"]))
 products.append(.executable(name: "RadiusResourceMonitor", targets: ["RadiusResourceMonitor"]))
 products.append(.executable(name: "RadiusMemoryMonitor", targets: ["RadiusMemoryMonitor"]))
+products.append(.executable(name: "RadiusUpdater", targets: ["RadiusUpdater"]))
+targets.append(.target(name: "RadiusDistribution", dependencies: ["RadiusCore"]))
+targets.append(.executableTarget(name: "RadiusUpdater", dependencies: ["RadiusCore", "RadiusDistribution"]))
 targets.append(.target(name: "RadiusResourcePlatform", dependencies: ["RadiusCore"]))
 targets.append(.executableTarget(name: "RadiusResourceMonitor", dependencies: ["RadiusCore", "RadiusResourcePlatform"]))
 targets.append(.executableTarget(name: "RadiusMemoryMonitor", dependencies: ["RadiusCore", "RadiusResourcePlatform"]))
 targets.append(.target(name: "RadiusEngineABI", publicHeadersPath: "include",
     linkerSettings: [.linkedFramework("AppKit")]))
-targets.append(.executableTarget(name: "RadiusApp", dependencies: ["RadiusCore", "RadiusEngineABI"],
+targets.append(.executableTarget(name: "RadiusApp", dependencies: ["RadiusCore", "RadiusEngineABI", "RadiusDistribution"],
     resources: [.copy("Resources")]))
 targets.append(.testTarget(name: "RadiusAppTests", dependencies: ["RadiusApp"]))
 #endif

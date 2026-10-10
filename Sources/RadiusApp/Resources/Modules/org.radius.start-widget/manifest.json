@@ -1,0 +1,12 @@
+{
+  "id": "org.radius.start-widget",
+  "name": "Start Page Prompt",
+  "version": 1,
+  "summary": "Start Page Prompt supplied as a removable declarative package.",
+  "publisher": "Radius",
+  "source": "https://github.com/starharbor2491/radius-browser",
+  "capability": "startWidget",
+  "dependencies": [],
+  "defaultInstalled": true,
+  "runtime": "declarative"
+}

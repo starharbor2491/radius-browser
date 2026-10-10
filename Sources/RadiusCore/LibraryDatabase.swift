@@ -27,7 +27,7 @@ public actor LibraryDatabase {
         connection = try SQLiteConnection(path: url.path)
         let version = try Self.scalar(connection.handle, "PRAGMA user_version")
         guard version <= 1 else { throw ValidationError("Your Radius data was created by a newer version. It has not been changed.") }
-        try Self.execute(connection.handle, "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
+        try Self.execute(connection.handle, "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;")
         try Self.execute(connection.handle, "CREATE TABLE IF NOT EXISTS library (id INTEGER PRIMARY KEY CHECK(id = 1), data BLOB NOT NULL); PRAGMA user_version=1;")
     }
     public func load() throws -> LibraryState {

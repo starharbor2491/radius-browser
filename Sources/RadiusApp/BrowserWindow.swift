@@ -101,6 +101,7 @@ struct BrowserWindow: View {
                 case .customize: CustomizeView()
                 case .settings: SettingsView(model: model)
                 case .recovery: RecoveryView()
+                case .extensions: ChromiumExtensionsView()
                 }
             }
             .background(Color(nsColor: .windowBackgroundColor))
@@ -114,7 +115,13 @@ struct BrowserWindow: View {
     }
     private var windowCommands: some View {
         presentation
-        .onReceive(NotificationCenter.default.publisher(for: .radiusFocusAddress)) { notification in if notification.object as? UUID == model.session.id { addressFocused = true } }
+        .onReceive(NotificationCenter.default.publisher(for: .radiusFocusAddress)) { notification in
+            if notification.object as? UUID == model.session.id { addressFocused = !model.activeWebTab.focusAddressBar() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .radiusOpenBrowserWindow)) { notification in
+            guard notification.object as? UUID == model.session.id else { return }
+            openWindow(id: notification.userInfo?["private"] as? Bool == true ? "private" : "browser")
+        }
         .onReceive(NotificationCenter.default.publisher(for: .radiusFind)) { notification in if notification.object as? UUID == model.session.id { findVisible = true; findFocused = true } }
         .onExitCommand { model.focusMode = false; findVisible = false; addressFocused = false; readerTask?.cancel(); reader = nil }
         .onChange(of: app.installedModules) { _, _ in
@@ -440,6 +447,8 @@ struct WindowCloseObserver: NSViewRepresentable {
 extension Notification.Name {
     static let radiusFocusAddress = Notification.Name("radius.focusAddress")
     static let radiusFind = Notification.Name("radius.find")
+    static let radiusOpenBrowserWindow = Notification.Name("radius.openBrowserWindow")
+    static let radiusProfileDeleted = Notification.Name("radius.profileDeleted")
 }
 
 struct NavigationButtons: View {

@@ -16,11 +16,13 @@ swift build -c "$configuration" --product Radius --triple arm64-apple-macosx14.0
 swift build -c "$configuration" --product RadiusResourceMonitor --triple arm64-apple-macosx14.0
 swift build -c "$configuration" --product RadiusMemoryMonitor --triple arm64-apple-macosx14.0
 swift build -c "$configuration" --product RadiusReaderWorker --triple arm64-apple-macosx14.0
+swift build -c "$configuration" --product RadiusUpdater --triple arm64-apple-macosx14.0
 arm_binary_directory="$(swift build -c "$configuration" --triple arm64-apple-macosx14.0 --show-bin-path)"
 swift build -c "$configuration" --product Radius --triple x86_64-apple-macosx14.0
 swift build -c "$configuration" --product RadiusResourceMonitor --triple x86_64-apple-macosx14.0
 swift build -c "$configuration" --product RadiusMemoryMonitor --triple x86_64-apple-macosx14.0
 swift build -c "$configuration" --product RadiusReaderWorker --triple x86_64-apple-macosx14.0
+swift build -c "$configuration" --product RadiusUpdater --triple x86_64-apple-macosx14.0
 intel_binary_directory="$(swift build -c "$configuration" --triple x86_64-apple-macosx14.0 --show-bin-path)"
 app_directory="$PWD/dist/Radius.app"
 mkdir -p "$app_directory/Contents/MacOS" "$app_directory/Contents/Resources/Legal"
@@ -43,6 +45,10 @@ for worker in RadiusResourceMonitor RadiusMemoryMonitor RadiusReaderWorker; do
   codesign --verify --strict "$payload"
 done
 cp Resources/Info.plist "$app_directory/Contents/Info.plist"
+mkdir -p "$app_directory/Contents/Resources/Updater"
+lipo -create "$arm_binary_directory/RadiusUpdater" "$intel_binary_directory/RadiusUpdater" -output "$app_directory/Contents/Resources/Updater/RadiusUpdater"
+lipo "$app_directory/Contents/Resources/Updater/RadiusUpdater" -verify_arch arm64 x86_64
+codesign --force --sign - --identifier org.radius.updater "$app_directory/Contents/Resources/Updater/RadiusUpdater"
 cp LICENSE COPYING.MPL docs/LICENSING.md "$app_directory/Contents/Resources/Legal/"
 swift scripts/build-icon.swift dist/AppIcon.iconset
 iconutil -c icns dist/AppIcon.iconset -o "$app_directory/Contents/Resources/AppIcon.icns"
@@ -53,8 +59,14 @@ rm -rf "$app_directory/Contents/Frameworks/Chromium.radiusengine"
 if [[ -n "${RADIUS_CHROMIUM_PACKAGE:-}" ]]; then
   python3 scripts/chromium-runtime.py --embed-package "$RADIUS_CHROMIUM_PACKAGE" --app "$app_directory"
 fi
-# Ad-hoc signing is for a local build only. It is not Developer ID signing or notarization.
-codesign --force --sign - "$app_directory"
+python3 scripts/distribution-metadata.py "$app_directory"
+# Consumer signing is explicit and fails closed if an identity is unavailable.
+# Local/CI builds retain ad-hoc signatures and cannot install consumer updates.
+if [[ -n "${RADIUS_SIGNING_IDENTITY:-}" ]]; then
+  python3 scripts/sign-release.py "$app_directory"
+else
+  codesign --force --sign - "$app_directory"
+fi
 codesign --verify --strict "$app_directory"
 if otool -L "$app_directory/Contents/MacOS/Radius" | grep -E '/workspace|/tmp/radius' >/dev/null; then
   echo 'The executable has an unexpected development dependency.' >&2

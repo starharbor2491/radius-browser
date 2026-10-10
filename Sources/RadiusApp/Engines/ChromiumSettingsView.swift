@@ -13,11 +13,11 @@ struct ChromiumSettingsView: View {
     var body: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 10) {
-                HStack { Text("Chromium Alloy").font(.headline); Spacer(); Text(installed ? "Development runtime installed" : "Optional development runtime").font(.caption).foregroundStyle(.secondary) }
-                Text("An embedded Chromium engine for Radius's native controls. Chrome extensions, downloads, and camera/microphone capture are not supported by this development adapter.").font(.callout).foregroundStyle(.secondary)
+                HStack { Text("Chromium").font(.headline); Spacer(); Text(installed ? "Engine included" : "Optional engine").font(.caption).foregroundStyle(.secondary) }
+                Text("Chromium uses Chrome browser services with Radius's native controls. Extensions remain within Chromium contexts; WebKit tabs use separate website data.").font(.callout).foregroundStyle(.secondary)
                 Text(installed
-                    ? "This development app includes Chromium. To remove its runtime, use the standard Radius app build; your website data is kept."
-                    : "This is the standard WebKit build. Chromium requires the optional development app built with its runtime inside the signed app bundle.")
+                    ? "Chromium is part of this sealed application. Use Installation and updates to stage a verified WebKit-only installer and remove the engine after restarting; your website data is kept."
+                    : "WebKit is available immediately. Use Installation and updates to add Chromium from an official release or a verified offline installer.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 if referencesChromium {
                     Button("Use WebKit for all tabs…") { prepareForRemoval() }.disabled(busy)
@@ -36,7 +36,7 @@ struct ChromiumSettingsView: View {
     }
     private func prepareForRemoval() {
         let alert = NSAlert(); alert.messageText = "Switch all Chromium tabs to WebKit?"
-        alert.informativeText = "All profile defaults and Chromium tabs will switch to WebKit. Website addresses reload in separate sign-in contexts; forms and unsaved work do not transfer. Generated pages become New tab. Tab organization and saved browser data are kept. You can then use the standard Radius app build without reopening unavailable Chromium tabs."
+        alert.informativeText = "All profile defaults and Chromium tabs will switch to WebKit. Website addresses reload in separate sign-in contexts; forms and unsaved work do not transfer. Generated pages become New tab. Tab organization and saved browser data are kept. You can then install the WebKit-only Radius package without reopening unavailable Chromium tabs."
         alert.addButton(withTitle: "Switch to WebKit"); alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         busy = true
@@ -66,7 +66,7 @@ struct ChromiumSettingsView: View {
                 model.address = model.selectedTab.url?.absoluteString ?? ""
             }
             guard await app.flush() else { message = app.notice ?? "Could not save the engine change. Retry before restarting."; return }
-            message = "All tabs now use WebKit. Quit this app before opening the standard Radius build."
+            message = "All tabs now use WebKit. Use Installation and updates to stage a WebKit-only Radius installer."
         }
     }
 }

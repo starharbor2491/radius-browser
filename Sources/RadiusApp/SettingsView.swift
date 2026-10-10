@@ -11,6 +11,7 @@ struct SettingsView: View {
     @State private var section = SettingsSection.general
     @State private var profileName = ""
     @State private var clearing = false
+    @State private var deletingProfile: Profile?
     @ObservedObject private var chromiumRuntime = ChromiumRuntime.shared
     enum SettingsSection: String, CaseIterable, Identifiable {
         case general = "General", profiles = "Profiles", privacy = "Privacy", engines = "Browsing engines"
@@ -31,6 +32,7 @@ struct SettingsView: View {
             Divider()
             HStack { if let notice = app.notice { Text(notice).font(.caption).foregroundStyle(.secondary).lineLimit(3) }; Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.defaultAction) }.padding(16)
         }.frame(width: 780, height: 590)
+        .sheet(item: $deletingProfile) { DeleteProfileView(profile: $0) }
     }
     private var general: some View {
         Form {
@@ -53,6 +55,8 @@ struct SettingsView: View {
                     TextField("Profile name", text: profileBinding(profile.id)).textFieldStyle(.plain)
                     if profile.id == model.session.profileID { Text("Current").font(.caption).foregroundStyle(.secondary) }
                     else { Button("Switch") { model.switchProfile(profile.id) } }
+                    Button("Delete…", role: .destructive) { deletingProfile = profile }
+                        .disabled(app.library.profiles.count < 2 || !app.deletingProfileIDs.isEmpty || app.terminating)
                 }.padding(.vertical, 5)
             }.listStyle(.inset)
             HStack {
@@ -64,6 +68,9 @@ struct SettingsView: View {
                 }.disabled(profileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || app.library.profiles.count >= 20)
             }
             Text("Switching profiles reloads open pages and keeps sign-ins separate.").font(.caption).foregroundStyle(.secondary)
+            if !(app.library.pendingProfileDeletions ?? []).isEmpty {
+                HStack { Text("Deleted profile storage is waiting for a restart.").font(.caption); Spacer(); Button("Quit Radius") { NSApp.terminate(nil) } }
+            }
         }
     }
     private var privacy: some View {
