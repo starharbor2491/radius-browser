@@ -73,11 +73,13 @@ extension NativeIntegrationTests.BrowserIntegrationTests {
         // the new actual key window instead of retaining the previous model.
         file.update()
         try await focusCommandWindow(secondWindow)
+        requests.withLock { $0.removeAll() }
         performLocation()
-        #expect(requests.withLock { $0 } == [first.session.id, second.session.id])
+        #expect(requests.withLock { $0 } == [second.session.id])
         try perform("new")
         #expect(second.session.tabs.count == 2 && first.session.tabs.count == 2)
         let firstSnapshot = first.session, secondSnapshot = second.session
+        let acceptedRequests = requests.withLock { $0 }
         app.freezeQuitData()
         file.update(); browse.update()
         for entry in (file.items + browse.items) where entry.target === commands {
@@ -85,7 +87,7 @@ extension NativeIntegrationTests.BrowserIntegrationTests {
             #expect(NSApp.sendAction(try #require(entry.action), to: entry.target, from: entry))
         }
         #expect(first.session == firstSnapshot && second.session == secondSnapshot)
-        #expect(requests.withLock { $0 } == [first.session.id, second.session.id])
+        #expect(requests.withLock { $0 } == acceptedRequests)
         app.unfreezeQuitData()
         file.update()
         #expect(new.isEnabled)
@@ -94,7 +96,7 @@ extension NativeIntegrationTests.BrowserIntegrationTests {
         file.update(); browse.update()
         #expect(!new.isEnabled && !location.isEnabled)
         #expect(NSApp.sendAction(try #require(location.action), to: location.target, from: location))
-        #expect(requests.withLock { $0 } == [first.session.id, second.session.id])
+        #expect(requests.withLock { $0 } == acceptedRequests)
         #expect(NSApp.sendAction(try #require(new.action), to: new.target, from: new))
         #expect(first.session == firstSnapshot && second.session == secondSnapshot)
         try await focusCommandWindow(secondWindow)
@@ -102,7 +104,7 @@ extension NativeIntegrationTests.BrowserIntegrationTests {
         file.update(); browse.update()
         #expect(!new.isEnabled && !location.isEnabled)
         #expect(NSApp.sendAction(try #require(location.action), to: location.target, from: location))
-        #expect(requests.withLock { $0 } == [first.session.id, second.session.id])
+        #expect(requests.withLock { $0 } == acceptedRequests)
         #expect(NSApp.sendAction(try #require(new.action), to: new.target, from: new))
         #expect(second.session == secondSnapshot)
     }

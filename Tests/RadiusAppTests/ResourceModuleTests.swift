@@ -42,19 +42,14 @@ struct ResourceModuleTests {
             var edited = app.library.preferences.configuration
             edited.layout.navigation = rollback ? .top : .bottom
             let probe = WorkerReentryProbe(app: app, id: widget.id, approval: approval, configuration: edited)
-            // Run at the nested wait's entry instead of depending on a timer
-            // firing before the real worker's bounded shutdown deadline.
-            let observer = try #require(CFRunLoopObserverCreateWithHandler(
-                kCFAllocatorDefault, CFRunLoopActivity.entry.rawValue, true, 0
-            ) { observer, _ in
+            // Observers alone do not keep a run-loop mode active. Queue real
+            // work for the nested process wait, without depending on a timer.
+            CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue) {
                 MainActor.assumeIsolated {
                     guard probe.app.stoppingModuleWorkers else { return }
-                    CFRunLoopObserverInvalidate(observer)
                     probe.attemptUpdate()
                 }
-            })
-            CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .defaultMode)
-            defer { CFRunLoopObserverInvalidate(observer) }
+            }
 
             if rollback {
                 #expect(throws: (any Error).self) {
@@ -64,7 +59,6 @@ struct ResourceModuleTests {
                     }
                 }
             } else { try app.reinstallApprovedWorker(package.id) }
-            CFRunLoopObserverInvalidate(observer)
             #expect(probe.fired && probe.duringWorkerStop)
             #expect(probe.rejection != nil)
             #expect(probe.launchRejection != nil && !probe.launchPackageReturned && probe.newWorker.process == nil)

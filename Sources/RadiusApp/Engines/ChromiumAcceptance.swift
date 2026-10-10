@@ -291,13 +291,17 @@ enum ChromiumAcceptance {
         print("Radius Chromium acceptance: default Chromium start page accepted native address input and mounted Chrome navigation")
         for id in created { browser.closeTab(id) }
         browser.selectTab(probeID)
-        chrome.makeKeyAndOrderFront(nil); tab.focus()
-        try await Task.sleep(for: .milliseconds(100))
+        try await focusPage(tab)
         try key("w", code: 13, modifiers: .command, window: chrome)
-        try await Task.sleep(for: .milliseconds(300))
-        guard !browser.session.tabs.contains(where: { $0.id == probeID }),
-              Set(browser.session.tabs.map(\.id)) == originalIDs, ownerWindow.isVisible else {
-            throw ValidationError("Native Cmd-W from Chrome did not close only its Radius tab.")
+        let closeDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while browser.session.tabs.contains(where: { $0.id == probeID }) {
+            guard ContinuousClock.now < closeDeadline else {
+                throw ValidationError("Native Cmd-W did not finish closing its Radius pane (childKey=\(chrome.isKeyWindow), childVisible=\(chrome.isVisible), actualKey=\(NSApp.keyWindow?.windowNumber ?? -1), selectedProbe=\(browser.session.selectedTabID == probeID)).")
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        guard Set(browser.session.tabs.map(\.id)) == originalIDs, ownerWindow.isVisible else {
+            throw ValidationError("Native Cmd-W from Chrome changed another Radius tab or closed its owner window.")
         }
         browser.session.split = split
         browser.session.splitSuppressed = splitSuppressed
