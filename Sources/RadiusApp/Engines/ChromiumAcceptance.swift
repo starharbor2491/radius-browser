@@ -289,11 +289,20 @@ enum ChromiumAcceptance {
         guard let blankTarget = components.url else { throw ValidationError("The blank tab probe address is invalid.") }
         for character in blankTarget.absoluteString { try key(String(character), code: 0, window: ownerWindow) }
         try key("\r", code: 36, window: ownerWindow)
-        let blankDeadline = ContinuousClock.now.advanced(by: .seconds(15))
+        // A fresh Chrome renderer gets the same startup budget as waitForLoad.
+        let blankDeadline = ContinuousClock.now.advanced(by: .seconds(25))
         while blank.url != blankTarget || blank.loading || !blank.hasNativeNavigationChrome {
-            guard ContinuousClock.now < blankDeadline else { throw ValidationError("A blank default-Chromium tab could not navigate from Radius's native address field.") }
+            guard ContinuousClock.now < blankDeadline else {
+                let host = blank.nativeView, child = blank.chromeWindow
+                throw ValidationError("A blank default-Chromium tab did not finish navigation and mount its native toolbar (URL=\(blank.url?.absoluteString ?? "nil"), expected=\(blankTarget.absoluteString), loading=\(blank.loading), chromeStyle=\(blank.chromeStyle), navigationChrome=\(blank.navigationChrome), navigationChromeVisible=\(blank.navigationChromeVisible), nativeChrome=\(blank.hasNativeNavigationChrome), hostWindow=\(host.window?.windowNumber ?? -1), ownerWindow=\(ownerWindow.windowNumber), hostBounds=\(host.bounds), hostVisible=\(host.visibleRect), hostHidden=\(host.isHiddenOrHasHiddenAncestor), child=\(child?.windowNumber ?? -1), childVisible=\(child?.isVisible == true), childParent=\(child?.parent?.windowNumber ?? -1), childFrame=\(String(describing: child?.frame)), selectedBlank=\(browser.activeWebTab === blank), selectedURL=\(browser.selectedTab.url?.absoluteString ?? "nil"), hasPage=\(browser.hasPage), error=\(blank.errorMessage ?? "nil")).")
+            }
             try await Task.sleep(for: .milliseconds(100))
         }
+        guard browser.activeWebTab === blank, blank.nativeView.window === ownerWindow,
+              try await evaluate(blank, "location.href") == blankTarget.absoluteString else {
+            throw ValidationError("The native address input did not load its exact document in the selected Radius pane.")
+        }
+        try await verifyChromeGeometry(blank, ownerWindow: ownerWindow)
         print("Radius Chromium acceptance: default Chromium start page accepted native address input and mounted Chrome navigation")
         for id in created { browser.closeTab(id) }
         browser.selectTab(probeID)
