@@ -8,10 +8,12 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 
 output = Path("dist")
 output.mkdir(exist_ok=True)
 log_path = output / "native-tests.log"
+started = time.monotonic()
 process = subprocess.Popen(["swift", "test", *sys.argv[1:]], stdout=subprocess.PIPE,
                            stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1, start_new_session=True)
 
@@ -59,6 +61,11 @@ try:
         print("Native tests remain active after three minutes; sampling owned processes.", flush=True)
         sample_owned_processes()
         status = process.wait(timeout=180)
+    # SwiftPM can exit while buffered output is still being forwarded. Give the
+    # reader the remaining six-minute budget before inspecting its receipt.
+    reader.join(timeout=max(0, 360 - (time.monotonic() - started)))
+    if reader.is_alive():
+        raise subprocess.TimeoutExpired(process.args, 360)
 except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
     if isinstance(error, subprocess.TimeoutExpired):
         print("Native tests exceeded the six-minute deadline.", file=sys.stderr, flush=True)
@@ -77,7 +84,7 @@ except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
         process.wait(timeout=5)
     status = 1 if isinstance(error, subprocess.TimeoutExpired) else 130
 reader.join(timeout=5)
-if status == 0 and not re.search(r"Test run with [1-9][0-9]* tests passed", log_path.read_text()):
+if status == 0 and not re.search(r"Test run with [1-9][0-9]* tests(?: in [0-9]+ suites)? passed", log_path.read_text()):
     print("Native test process exited without a completed Swift Testing suite.", file=sys.stderr, flush=True)
     status = 1
 sys.exit(status)

@@ -6,7 +6,6 @@ import Testing
 extension NativeIntegrationTests.BrowserIntegrationTests {
     @Test func nativeTabMenuTargetsTheCurrentOwnedWindowAndRejectsFrozenOrClosedModels() async throws {
         _ = NSApplication.shared
-        NSApp.delegate = NativeMenuTestApplicationDelegate.shared
         let previousPolicy = NSApp.activationPolicy()
         NSApp.setActivationPolicy(.regular)
         NSApp.finishLaunching()
@@ -93,7 +92,6 @@ extension NativeIntegrationTests.BrowserIntegrationTests {
 
     @Test func nativeTabMenuSurvivesMenuReplacementWithoutDuplicatingCommandsOrCocoaEditingItems() throws {
         _ = NSApplication.shared
-        NSApp.delegate = NativeMenuTestApplicationDelegate.shared
         let commands = NativeTabCommands(), menu = commandMenu()
         let file = try #require(menu.items[0].submenu)
         let standardClose = NSMenuItem(title: "System close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
@@ -179,13 +177,4 @@ extension NativeIntegrationTests.BrowserIntegrationTests {
         }
         return menu
     }
-}
-
-// A command-line test host must finish its Swift Testing suite rather than
-// exit through AppKit while test windows and menus are being replaced.
-@MainActor
-private final class NativeMenuTestApplicationDelegate: NSObject, NSApplicationDelegate {
-    static let shared = NativeMenuTestApplicationDelegate()
-    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply { .terminateCancel }
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }
