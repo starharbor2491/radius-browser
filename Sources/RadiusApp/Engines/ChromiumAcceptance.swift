@@ -110,7 +110,9 @@ enum ChromiumAcceptance {
         try await waitForLoad(tab, host: "127.0.0.1")
         let showDeadline = ContinuousClock.now.advanced(by: .seconds(10))
         while tab.chromeWindow?.isVisible != true {
-            guard ContinuousClock.now < showDeadline else { throw ValidationError("The shortcut probe's Chrome child did not become visible.") }
+            guard ContinuousClock.now < showDeadline else {
+                throw ValidationError("The shortcut probe's Chrome child did not become visible (selectedProbe=\(browser.session.selectedTabID == probeID), splitContainsProbe=\(browser.session.split?.contains(probeID) == true), hostWindow=\(tab.nativeView.window?.windowNumber ?? -1), ownerWindow=\(ownerWindow.windowNumber), ownerVisible=\(ownerWindow.isVisible), hostHidden=\(tab.nativeView.isHiddenOrHasHiddenAncestor), hostBounds=\(tab.nativeView.bounds), hostVisible=\(tab.nativeView.visibleRect), child=\(tab.chromeWindow?.windowNumber ?? -1), parent=\(tab.chromeWindow?.parent?.windowNumber ?? -1), modal=\(NSApp.modalWindow?.windowNumber ?? -1), sheet=\(ownerWindow.attachedSheet?.windowNumber ?? -1)).")
+            }
             try await Task.sleep(for: .milliseconds(100))
         }
         guard let chrome = tab.chromeWindow else { throw ValidationError("The shortcut probe has no native Chrome window.") }
@@ -356,7 +358,27 @@ enum ChromiumAcceptance {
             }
             return false
         }
-        guard let menu = NSApp.mainMenu, perform("New tab", in: menu) else {
+        func performWhenReady(_ title: String) async throws -> Bool {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+            repeat {
+                if let menu = NSApp.mainMenu, perform(title, in: menu) { return true }
+                try await Task.sleep(for: .milliseconds(50))
+            } while ContinuousClock.now < deadline
+            return false
+        }
+        guard try await performWhenReady("New tab") else {
+            var items: [[String: Any]] = []
+            func describe(_ menu: NSMenu) {
+                for item in menu.items where items.count < 128 {
+                    items.append(["title":item.title, "enabled":item.isEnabled,
+                                  "action":item.action.map(NSStringFromSelector) ?? "nil",
+                                  "target":item.target.map { String(describing: type(of: $0)) } ?? "nil"])
+                    if let submenu = item.submenu { describe(submenu) }
+                }
+            }
+            if let menu = NSApp.mainMenu { describe(menu) }
+            let inventory = (try? JSONSerialization.data(withJSONObject: items)).map { String(decoding: $0, as: UTF8.self) } ?? "unavailable"
+            print("Radius Chromium native menu unavailable: key=\(NSApp.keyWindow?.windowNumber ?? -1), main=\(NSApp.mainWindow?.windowNumber ?? -1), auxiliary=\(tab.isAuxiliary), focusedOwner=\(ChromiumRuntime.shared.focusedNativeTab === tab), menu=\(inventory)")
             throw ValidationError("The actual Radius New tab menu was unavailable with a native Chrome window focused.")
         }
         let addDeadline = ContinuousClock.now.advanced(by: .seconds(10))
@@ -364,7 +386,7 @@ enum ChromiumAcceptance {
             guard ContinuousClock.now < addDeadline else { throw ValidationError("The native New tab menu did not target the focused Chrome pane.") }
             try await Task.sleep(for: .milliseconds(100))
         }
-        guard perform("Close tab", in: menu) else { throw ValidationError("The actual Radius Close tab menu was unavailable for Chrome.") }
+        guard try await performWhenReady("Close tab") else { throw ValidationError("The actual Radius Close tab menu was unavailable for Chrome.") }
         let closeDeadline = ContinuousClock.now.advanced(by: .seconds(10))
         while Set(try await nativeBrowsers(tab).compactMap { $0["id"] as? Int }) != ids {
             guard ContinuousClock.now < closeDeadline else { throw ValidationError("The native Close tab menu closed the wrong Chrome pane or inner tab.") }
@@ -784,7 +806,19 @@ enum ChromiumAcceptance {
         _ = try await waitForFixture(page, key: "radiusFixtureTheme", value: "dark")
         let createdWindowID = try await evaluate(options, "String((await chrome.windows.create({url:chrome.runtime.getURL('options.html?api=window'),type:'normal'})).id)")
         let createdWindow = try await waitForAuxiliary(profileID: manager.profileID, query: "api=window")
-        try await verifyNativeTabMenus(createdWindow)
+        var menuFailure: String?
+        let beforeMenu = try await nativeBrowsers(createdWindow)
+        do { try await verifyNativeTabMenus(createdWindow) }
+        catch {
+            let afterMenu = try await nativeBrowsers(createdWindow)
+            // Continue independent extension checks only when a failed menu
+            // check left the actual window's tabs and selection unchanged.
+            guard let active = beforeMenu.first(where: { $0["active"] as? Bool == true })?["id"] as? Int,
+                  afterMenu.first(where: { $0["active"] as? Bool == true })?["id"] as? Int == active,
+                  Set(beforeMenu.compactMap { $0["id"] as? Int }) == Set(afterMenu.compactMap { $0["id"] as? Int }) else { throw error }
+            menuFailure = error.localizedDescription
+            print("Radius Chromium auxiliary menu: \(error.localizedDescription)")
+        }
         let originTabID = try await evaluate(createdWindow, "String((await chrome.tabs.getCurrent()).id)")
         guard try await evaluate(createdWindow, "String((await chrome.windows.getCurrent()).id)") == createdWindowID else {
             throw ValidationError("The extension-created window lost its Chromium window identity.")
@@ -894,6 +928,7 @@ enum ChromiumAcceptance {
             throw ValidationError("The removed extension still injected into a new document.")
         }
         print("Radius Chromium acceptance: native options window, grants, settings, storage, private isolation, local update and removal passed")
+        if let menuFailure { throw ValidationError(menuFailure) }
     }
     private static func verifyPristineInactiveTab(options: ChromiumTab, app: AppState, fixtureURL: URL) async throws {
         func extensionTabs() async throws -> [[String: Any]] {

@@ -264,6 +264,39 @@ struct BrowserIntegrationTests {
         #expect(browser.session.tabs == tabsBeforeAppearance)
         browser.closeWindow(); #expect(await app.flush())
     }
+    @Test func lateActivationOfReplacedPanePreservesSelectionWhileVisiblePaneCanStillActivate() async throws {
+        let (app, directory) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = BrowserModel(app: app, isPrivate: false)
+        defer { browser.closeWindow() }
+        let originalID = browser.session.selectedTabID
+        let activateOriginal = try #require(browser.activeWebTab.onActivate)
+        browser.beginSplit(.sideBySide)
+        let siblingID = try #require(browser.session.split?.second)
+        let activateSibling = try #require(browser.webTab(siblingID).onActivate)
+        browser.newTab(engine: .webkit)
+        let replacementID = browser.session.selectedTabID
+        let replacementSession = browser.session
+
+        // A delayed native focus event from the outgoing pane must not
+        // replace the new pane or change the workspace's saved selection.
+        activateOriginal()
+        #expect(browser.session == replacementSession)
+        #expect(app.library.sessions.first(where: { $0.id == browser.session.id }) == replacementSession)
+
+        activateSibling()
+        #expect(browser.session.selectedTabID == siblingID)
+        #expect(browser.session.split == replacementSession.split)
+        browser.endSplit()
+        activateOriginal()
+        #expect(browser.session.selectedTabID == siblingID && browser.session.split == nil)
+
+        // Sidebar selection remains an explicit request to show a cached pane.
+        browser.selectTab(originalID)
+        #expect(browser.session.selectedTabID == originalID)
+        #expect(browser.session.tabs.contains { $0.id == replacementID })
+        browser.closeWindow(); #expect(await app.flush())
+    }
     @Test func profileReplacementResetsGeneratedPagesAndAddress() async throws {
         let (app, directory) = try await fixture()
         defer { try? FileManager.default.removeItem(at: directory) }

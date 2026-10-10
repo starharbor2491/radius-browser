@@ -17,7 +17,7 @@ final class ChromiumTab: BrowserEngineTab {
     private var downloadIDs = Set<String>()
     private var disposing = false
     private var closeTask: Task<Void, Never>?
-    private var chromeFocusObserver: NSObjectProtocol?
+    private var chromeFocusObservers: [NSObjectProtocol] = []
     private var chromeKeyMonitor: Any?
     @Published private(set) var chromeStyle = false
     @Published private(set) var navigationChrome = false
@@ -121,16 +121,21 @@ final class ChromiumTab: BrowserEngineTab {
         // AppKit can change an attached child's key status without a distinct
         // Views activation transition. Use the actual owned NSWindow event to
         // keep Radius's selected split pane and native commands synchronized.
-        chromeFocusObserver = NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main) { [weak self] notification in
-            guard let window = notification.object as? NSWindow else { return }
-            let windowID = ObjectIdentifier(window)
-            MainActor.assumeIsolated {
-                guard let self, let chrome = self.chromeWindow,
-                      windowID == ObjectIdentifier(chrome) else { return }
-                if let owner = self.hostView.window, owner.isVisible, owner.canBecomeMain {
-                    owner.makeMain()
+        chromeFocusObservers = [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification].map { name in
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
+                guard let window = notification.object as? NSWindow else { return }
+                let windowID = ObjectIdentifier(window)
+                let becameKey = notification.name == NSWindow.didBecomeKeyNotification
+                MainActor.assumeIsolated {
+                    guard let self, let chrome = self.chromeWindow,
+                          windowID == ObjectIdentifier(chrome) else { return }
+                    self.runtime.objectWillChange.send()
+                    guard becameKey else { return }
+                    if let owner = self.hostView.window, owner.isVisible, owner.canBecomeMain {
+                        owner.makeMain()
+                    }
+                    self.onActivate?()
                 }
-                self.onActivate?()
             }
         }
         // An intact Chrome child is a separate key window, outside SwiftUI's
@@ -463,8 +468,8 @@ final class ChromiumTab: BrowserEngineTab {
         }
     }
     private func removeFocusObserver() {
-        if let chromeFocusObserver { NotificationCenter.default.removeObserver(chromeFocusObserver) }
-        chromeFocusObserver = nil
+        for observer in chromeFocusObservers { NotificationCenter.default.removeObserver(observer) }
+        chromeFocusObservers.removeAll()
         if let chromeKeyMonitor { NSEvent.removeMonitor(chromeKeyMonitor) }
         chromeKeyMonitor = nil
     }

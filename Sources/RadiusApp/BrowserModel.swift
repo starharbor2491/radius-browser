@@ -137,7 +137,8 @@ final class BrowserModel: ObservableObject {
         tab.onClose = { [weak self] in self?.closeTab(id) }
         tab.onNotice = { [weak self] message in self?.app.notice = message }
         tab.onActivate = { [weak self] in
-            guard let self, !self.isClosed, self.session.selectedTabID != id else { return }
+            guard let self, !self.isClosed, self.session.selectedTabID != id,
+                  self.session.split?.contains(id) == true else { return }
             self.selectTab(id)
         }
         tab.onBrowserCommand = { [weak self, weak tab] command in

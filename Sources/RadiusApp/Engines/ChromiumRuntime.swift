@@ -53,10 +53,18 @@ final class ChromiumRuntime: ObservableObject {
     private var blockedProfileIDs = Set<UUID>()
     private var privateSessions = Set<UUID>()
     private var didShutDown = false
-    func register(_ tab: ChromiumTab) { tabs[ObjectIdentifier(tab)] = tab }
+    func register(_ tab: ChromiumTab) {
+        let id = ObjectIdentifier(tab)
+        guard tabs[id] == nil else { return }
+        objectWillChange.send()
+        tabs[id] = tab
+    }
     func retainWhileClosing(_ tab: ChromiumTab) { register(tab) }
     func finishedClosing(_ tab: ChromiumTab) {
-        tabs.removeValue(forKey: ObjectIdentifier(tab))
+        let id = ObjectIdentifier(tab)
+        guard tabs[id] != nil else { return }
+        objectWillChange.send()
+        tabs.removeValue(forKey: id)
     }
     func beginPrivateSession(_ id: UUID) { privateSessions.insert(id) }
     func canAdoptPage(profileID: UUID, privateSessionID: UUID?) -> Bool {

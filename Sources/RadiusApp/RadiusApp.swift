@@ -15,9 +15,10 @@ struct RadiusApp: App {
 }
 struct BrowserCommands: Commands {
     @ObservedObject var app: AppState
+    @ObservedObject private var chromium = ChromiumRuntime.shared
     @FocusedObject private var focusedBrowser: BrowserModel?
     @Environment(\.openWindow) private var openWindow
-    private var nativeTab: ChromiumTab? { ChromiumRuntime.shared.focusedNativeTab }
+    private var nativeTab: ChromiumTab? { chromium.focusedNativeTab }
     private var browser: BrowserModel? {
         if nativeTab?.isAuxiliary == true { return nil }
         var window = NSApp.keyWindow
