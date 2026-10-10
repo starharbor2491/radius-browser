@@ -139,6 +139,11 @@ fi
         echo 'Radius did not quit within 45 seconds after completing acceptance.' >&2
         break
       fi
+      if [[ "$quit_remaining" -eq 40 ]] && kill -0 "$smoke_app_pid" 2>/dev/null; then
+        echo "Radius is still running after its quit request; sampling process $smoke_app_pid."
+        /usr/bin/sample "$smoke_app_pid" 3 -file dist/smoke-sample.txt >dist/smoke-sample.log 2>&1 &
+        sample_pid=$!
+      fi
       quit_remaining=$((quit_remaining - 1))
     fi
     sleep 1 &
@@ -150,7 +155,7 @@ fi
   if kill -0 "$smoke_app_pid" 2>/dev/null; then
     # TERM can produce exit status zero; record the timeout before signalling.
     : >"$smoke_timeout_marker"
-    echo "Radius exceeded the $smoke_deadline-second smoke-test deadline; sending TERM." >&2
+    echo "Radius failed to exit before its smoke-test deadline; sending TERM." >&2
     kill -TERM "$smoke_app_pid" 2>/dev/null || true
     sleep 5 &
     timer_pid=$!
