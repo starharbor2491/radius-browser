@@ -449,10 +449,7 @@ enum ChromiumAcceptance {
               !(try await restored.capturePNG()).isEmpty else {
             throw ValidationError("Reader or Capture targeted the closed initial browser.")
         }
-        guard transfer.acknowledgementUnavailable, !transfer.transferEnded,
-              FileManager.default.fileExists(atPath: staging.path), downloads.hasShutdownPendingDownloads else {
-            throw ValidationError("Closing a downloading native inner tab fabricated completion or deleted an unconfirmed writer's file.")
-        }
+        try verifyClosedDownload(transfer, staging: staging, downloads: downloads)
         var closed = false
         restored.onClose = { closed = true }
         _ = try? await restored.request("Page.close", parameters: [:], timeout: .seconds(5))
@@ -461,13 +458,24 @@ enum ChromiumAcceptance {
             guard ContinuousClock.now < lastCloseDeadline else { throw ValidationError("A closed inner tab's download prevented the empty native pane from closing.") }
             try await Task.sleep(for: .milliseconds(50))
         }
-        guard !transfer.transferEnded, FileManager.default.fileExists(atPath: staging.path) else {
-            throw ValidationError("A native pane close cleaned an unknown writer before engine shutdown.")
-        }
+        try verifyClosedDownload(transfer, staging: staging, downloads: downloads)
         // The external smoke runner verifies this file is gone after normal
         // Quit, which executes the actual CefShutdown and registry cleanup.
         try staging.path.write(to: directory.appendingPathComponent("expected-staging.txt"), atomically: true, encoding: .utf8)
-        print("Radius Chromium acceptance: grouped recovery, active Reader/Capture and native-tab download ownership loss passed; cleanup awaits real engine shutdown")
+        print("Radius Chromium acceptance: grouped recovery, active Reader/Capture and native-tab download close passed; terminalConfirmed=\(transfer.transferEnded), pendingShutdown=\(downloads.hasShutdownPendingDownloads)")
+    }
+    private static func verifyClosedDownload(_ transfer: DownloadItem, staging: URL, downloads: DownloadCenter) throws {
+        let exists = FileManager.default.fileExists(atPath: staging.path)
+        // Chrome can acknowledge cancellation before OnBeforeClose, or lose
+        // its callback owner first. Cleanup requires a real terminal update
+        // or successful engine shutdown; pane destruction alone is insufficient.
+        if transfer.transferEnded {
+            guard !exists else { throw ValidationError("A terminally acknowledged native download retained its staging file.") }
+        } else {
+            guard transfer.acknowledgementUnavailable, exists, downloads.hasShutdownPendingDownloads else {
+                throw ValidationError("The unconfirmed native writer was not retained (ownerClosed=\(transfer.acknowledgementUnavailable), status=\(transfer.status), stagingExists=\(exists), pendingShutdown=\(downloads.hasShutdownPendingDownloads)).")
+            }
+        }
     }
     private static func key(_ characters: String, code: UInt16, modifiers: NSEvent.ModifierFlags = [], window: NSWindow) throws {
         for type in [NSEvent.EventType.keyDown, .keyUp] {
@@ -729,11 +737,17 @@ enum ChromiumAcceptance {
         })()
         """)
         var approved = false
+        var lastPromptState = ""
         let deadline = ContinuousClock.now.advanced(by: .seconds(20))
         while ContinuousClock.now < deadline {
             if !approved {
                 let response = try await manager.request("Radius.removeFixtureExtension", parameters: ["id": id])
                 approved = (try JSONSerialization.jsonObject(with: response) as? [String: Any])?["pressed"] as? Bool == true
+                let promptState = String(decoding: response, as: UTF8.self)
+                if promptState != lastPromptState {
+                    print("Radius Chromium native removal prompt: \(promptState)")
+                    lastPromptState = promptState
+                }
             }
             if approved {
                 let state = try await evaluate(manager, "String(window.radiusFixtureRemoval)")

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 import Foundation
+import CoreFoundation
 import AppKit
 import Darwin
 import Testing
@@ -41,12 +42,19 @@ struct ResourceModuleTests {
             var edited = app.library.preferences.configuration
             edited.layout.navigation = rollback ? .top : .bottom
             let probe = WorkerReentryProbe(app: app, id: widget.id, approval: approval, configuration: edited)
-            let timer = Timer(timeInterval: 0.02, repeats: false) { _ in
-                MainActor.assumeIsolated { probe.attemptUpdate() }
-            }
-            // Keep the probe available across AppKit common run-loop modes.
-            RunLoop.main.add(timer, forMode: .common)
-            defer { timer.invalidate() }
+            // Run at the nested wait's entry instead of depending on a timer
+            // firing before the real worker's bounded shutdown deadline.
+            let observer = try #require(CFRunLoopObserverCreateWithHandler(
+                kCFAllocatorDefault, CFRunLoopActivity.entry.rawValue, true, 0
+            ) { observer, _ in
+                MainActor.assumeIsolated {
+                    guard probe.app.stoppingModuleWorkers else { return }
+                    CFRunLoopObserverInvalidate(observer)
+                    probe.attemptUpdate()
+                }
+            })
+            CFRunLoopAddObserver(CFRunLoopGetMain(), observer, kCFRunLoopDefaultMode)
+            defer { CFRunLoopObserverInvalidate(observer) }
 
             if rollback {
                 #expect(throws: (any Error).self) {
@@ -56,7 +64,7 @@ struct ResourceModuleTests {
                     }
                 }
             } else { try app.reinstallApprovedWorker(package.id) }
-            timer.invalidate()
+            CFRunLoopObserverInvalidate(observer)
             #expect(probe.fired && probe.duringWorkerStop)
             #expect(probe.rejection != nil)
             #expect(probe.launchRejection != nil && !probe.launchPackageReturned && probe.newWorker.process == nil)

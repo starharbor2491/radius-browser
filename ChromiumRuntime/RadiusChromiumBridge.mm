@@ -206,6 +206,7 @@ struct Page {
   double restore_deadline = 0;
   std::vector<std::string> restore_urls;
   CefRefPtr<CefBrowser> restore_selection;
+  CefRefPtr<CefBrowser> restore_created;
   std::string failure_message;
   std::string failed_url;
   std::string context_key;
@@ -470,6 +471,7 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     if (owner->restoring && owner->awaiting_restore_browser && !owner->restore_urls.empty()) {
       page_->pending_url=owner->restore_urls.front();
       owner->restore_urls.erase(owner->restore_urls.begin());
+      owner->restore_created=browser;
       owner->awaiting_restore_browser=false; page_->navigated=true;
     }
     if (owner->closing) browser->GetHost()->CloseBrowser(true);
@@ -852,6 +854,12 @@ void RestoreInnerPages(Page* owner) {
     owner->restore_urls.erase(owner->restore_urls.begin());
   }
   if (owner->awaiting_restore_browser) return;
+  // OnAfterCreated precedes Chrome's native tab-strip activation. Confirm the
+  // new tab became active before selecting another tab or finishing recovery.
+  if (owner->restore_created) {
+    if (!member->browser->IsSame(owner->restore_created)) return;
+    owner->restore_created=nullptr;
+  }
   if (!owner->restore_urls.empty()) {
     const int command=cef_id_for_command_id_name("IDC_NEW_TAB");
     if (!member->browser->GetHost()->CanExecuteChromeCommand(command)) return;
@@ -1269,6 +1277,17 @@ bool PressFixtureExtensionDialog(Page* page,CefRefPtr<CefDictionaryValue> detail
     NSString* fixture_name,NSString* button_name) {
   if (!diagnostics || !page->view.browserWindow) return false;
   NSWindow* chrome = page->view.browserWindow;
+  std::set<NSWindow*> dialog_owners={chrome};
+  if ([button_name isEqualToString:@"Remove"]) {
+    // Chrome's management service resolves UI through the profile's current
+    // WindowController, or the sender's top-level owner. Keep approval bounded
+    // to registered native windows in this exact request context.
+    for (const auto& entry : pages) if (Group(entry.first)==entry.first &&
+        entry.first->context_key==page->context_key) {
+      NSWindow* window=entry.first->view.browserWindow;
+      if (window) { dialog_owners.insert(window); if (window.parentWindow) dialog_owners.insert(window.parentWindow); }
+    }
+  }
   auto windows=CefListValue::Create();
   auto buttons=CefListValue::Create();
   int elements=0; bool pressed=false;
@@ -1276,7 +1295,7 @@ bool PressFixtureExtensionDialog(Page* page,CefRefPtr<CefDictionaryValue> detail
     if (!window.visible) continue;
     bool owned = false;
     for (NSWindow* owner=window; owner; owner=owner.parentWindow ?: owner.sheetParent)
-      if (owner==chrome) { owned=true; break; }
+      if (dialog_owners.count(owner)) { owned=true; break; }
     if (windows->GetSize()<32) {
       auto item=CefDictionaryValue::Create();
       item->SetInt("number",static_cast<int>(window.windowNumber));
@@ -1389,7 +1408,7 @@ void Close(void* opaque) {
   auto owner=static_cast<Page*>(opaque); if (!pages.count(owner)) return;
   owner->event=nullptr; owner->popup=nullptr; owner->callback_context=nullptr; owner->closing=true;
   owner->awaiting_context=false;
-  owner->restore_urls.clear(); owner->restore_selection=nullptr; owner->restoring=false;
+  owner->restore_urls.clear(); owner->restore_selection=nullptr; owner->restore_created=nullptr; owner->restoring=false;
   std::vector<CefRefPtr<Client>> clients; for (const auto& entry : pages) clients.push_back(entry.first->client);
   for (const auto& client : clients) client->CancelNativeDownloads(owner);
   if (!pages.count(owner)) return;
