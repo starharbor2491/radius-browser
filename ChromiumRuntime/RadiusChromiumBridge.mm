@@ -10,6 +10,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 #include "RadiusEngineABI.h"
 #include "include/cef_app.h"
@@ -32,12 +33,15 @@
 @interface RadiusChromiumHostView : NSView
 @property(nonatomic, assign) NSWindow* browserWindow;
 @property(nonatomic, assign) BOOL contentHidden;
+@property(nonatomic, assign) BOOL auxiliary;
 - (void)synchronizeBrowserWindow;
 @end
 @implementation RadiusChromiumHostView
 @synthesize browserWindow;
 @synthesize contentHidden;
+@synthesize auxiliary;
 - (void)synchronizeBrowserWindow {
+  if (self.auxiliary) return;
   NSWindow* child = self.browserWindow;
   if (!child) return;
   NSWindow* parent = self.window;
@@ -92,6 +96,7 @@ void CancelPump() {
 }
 
 void SchedulePump(int64_t delay);
+CefRefPtr<CefClient> DefaultClient();
 class EngineApp final : public CefApp, public CefBrowserProcessHandler {
  public:
   void OnBeforeCommandLineProcessing(const CefString& process_type,
@@ -102,6 +107,7 @@ class EngineApp final : public CefApp, public CefBrowserProcessHandler {
     if (process_type.empty()) command_line->AppendSwitch("disable-popup-blocking");
   }
   CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override { return this; }
+  CefRefPtr<CefClient> GetDefaultClient() override { return DefaultClient(); }
   void OnScheduleMessagePumpWork(int64_t delay) override {
     dispatch_async(dispatch_get_main_queue(), ^{ SchedulePump(delay); });
   }
@@ -143,6 +149,7 @@ class Client;
 class BrowserViewDelegate;
 class WindowDelegate;
 std::map<Page*, std::unique_ptr<Page>> pages;
+std::map<int,Page*> browser_pages;
 std::map<int,CefRefPtr<CefBrowser>> unowned_browsers;
 struct Page {
   RadiusChromiumHostView* view = [[RadiusChromiumHostView alloc] initWithFrame:NSMakeRect(0, 0, 800, 600)];
@@ -153,6 +160,7 @@ struct Page {
   CefRefPtr<BrowserViewDelegate> view_delegate;
   CefRefPtr<WindowDelegate> window_delegate;
   CefRefPtr<CefRegistration> observer;
+  int browser_id = 0;
   std::string context_key;
   std::string pending_url;
   std::string title;
@@ -203,6 +211,7 @@ bool Allowed(const std::string& url) {
 }
 void Destroy(Page* page);
 Page* Allocate(const std::string& key);
+Page* AdoptAuxiliaryBrowser(CefRefPtr<CefBrowser> browser,Page* preferred_owner);
 
 class Client final : public CefClient, public CefLifeSpanHandler,
                      public CefDisplayHandler, public CefLoadHandler,
@@ -212,6 +221,11 @@ class Client final : public CefClient, public CefLifeSpanHandler,
   explicit Client(Page* page) : page_(page) {}
   void DetachPage() { page_ = nullptr; }
   Page* page() const { return page_; }
+  Client* ForBrowser(CefRefPtr<CefBrowser> browser) const {
+    auto found = browser ? browser_pages.find(browser->GetIdentifier()) : browser_pages.end();
+    return found == browser_pages.end() ? nullptr : found->second->client.get();
+  }
+  bool HasPendingDownloads() const { return !downloads_.empty(); }
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
   CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
   CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
@@ -219,9 +233,11 @@ class Client final : public CefClient, public CefLifeSpanHandler,
   CefRefPtr<CefDownloadHandler> GetDownloadHandler() override { return this; }
   CefRefPtr<CefCommandHandler> GetCommandHandler() override { return this; }
   CefRefPtr<CefDialogHandler> GetDialogHandler() override { return this; }
-  bool OnFileDialog(CefRefPtr<CefBrowser> browser,FileDialogMode mode,const CefString&,const CefString&,
-      const std::vector<CefString>&,const std::vector<CefString>&,const std::vector<CefString>&,
+  bool OnFileDialog(CefRefPtr<CefBrowser> browser,FileDialogMode mode,const CefString& title,const CefString& path,
+      const std::vector<CefString>& filters,const std::vector<CefString>& extensions,const std::vector<CefString>& descriptions,
       CefRefPtr<CefFileDialogCallback> callback) override {
+    if (auto client = ForBrowser(browser); client && client != this)
+      return client->OnFileDialog(browser,mode,title,path,filters,extensions,descriptions,callback);
     // Automated API fixture selection only. Consumer installations always use
     // Chrome's Web Store permission UI; no release file chooser is overridden.
     if (!diagnostics || !page_ || !page_->fixture_dialog || mode!=FILE_DIALOG_OPEN_FOLDER ||
@@ -233,8 +249,21 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     }
     callback->Continue({CefString(path)}); return true;
   }
-  bool OnChromeCommand(CefRefPtr<CefBrowser> browser,int id,cef_window_open_disposition_t) override {
+  bool OnChromeCommand(CefRefPtr<CefBrowser> browser,int id,cef_window_open_disposition_t disposition) override {
+    if (auto client = ForBrowser(browser); client && client != this) return client->OnChromeCommand(browser,id,disposition);
     if (!page_) return true;
+    if (page_->view.auxiliary) {
+      // Chrome owns these complete auxiliary windows and their tab strip.
+      // Preserve their actual WebContents/tab IDs for extension browser APIs.
+      for (const auto& command : {std::pair{"IDC_EXIT","quit"},
+                                  std::pair{"IDC_NEW_INCOGNITO_WINDOW","privateWindow"},
+                                  std::pair{"IDC_SHOW_DOWNLOADS","downloads"}}) {
+        if (id == cef_id_for_command_id_name(command.first)) {
+          Message(page_,RADIUS_CEF_BROWSER_COMMAND,command.second); return true;
+        }
+      }
+      return false;
+    }
     const struct { const char* chromium; const char* native; } commands[] = {
       {"IDC_NEW_TAB","newTab"}, {"IDC_CLOSE_TAB","closeTab"}, {"IDC_CLOSE_WINDOW","closeWindow"},
       {"IDC_NEW_WINDOW","newWindow"}, {"IDC_NEW_INCOGNITO_WINDOW","privateWindow"},
@@ -258,7 +287,8 @@ class Client final : public CefClient, public CefLifeSpanHandler,
       if (id == cef_id_for_command_id_name(command)) return true;
     return false;
   }
-  bool IsChromeAppMenuItemVisible(CefRefPtr<CefBrowser>,int id) override {
+  bool IsChromeAppMenuItemVisible(CefRefPtr<CefBrowser> browser,int id) override {
+    if (auto client = ForBrowser(browser); client && client != this) return client->IsChromeAppMenuItemVisible(browser,id);
     for (const char* command : {"IDC_NEW_WINDOW","IDC_NEW_INCOGNITO_WINDOW","IDC_EXIT",
                                "IDC_SHOW_SIGNIN","IDC_ADD_NEW_PROFILE","IDC_SHOW_SETTINGS"})
       if (id == cef_id_for_command_id_name(command)) return false;
@@ -266,11 +296,13 @@ class Client final : public CefClient, public CefLifeSpanHandler,
   }
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
     if (!page_ || page_->browser) {
-      // Chrome APIs which create complete extra browser windows must not
-      // replace this tab's client state or escape Radius's ownership.
+      if (auto child = AdoptAuxiliaryBrowser(browser,page_)) {
+        child->client->OnAfterCreated(browser); return;
+      }
+      // Unknown contexts must never inherit another Radius profile's identity.
       unowned_browsers[browser->GetIdentifier()] = browser;
       browser->GetHost()->CloseBrowser(true);
-      if (page_) Message(page_,RADIUS_CEF_NOTICE,"This extension requested a separate Chromium window. Use a Radius tab instead.");
+      if (page_) Message(page_,RADIUS_CEF_NOTICE,"The Chromium window could not be associated with a Radius profile.");
       return;
     }
     if (diagnostics) {
@@ -278,6 +310,8 @@ class Client final : public CefClient, public CefLifeSpanHandler,
       std::fflush(stderr);
     }
     page_->browser = browser;
+    page_->browser_id = browser->GetIdentifier();
+    browser_pages[page_->browser_id] = page_;
     page_->pending_popup = false;
     for (auto& entry : pages) entry.second->client->ForgetPopup(page_);
     page_->observer = browser->GetHost()->AddDevToolsMessageObserver(this);
@@ -290,6 +324,7 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     }
   }
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
+    if (auto client = ForBrowser(browser); client && client != this) return client->OnBeforeClose(browser);
     if (unowned_browsers.erase(browser->GetIdentifier()) != 0) return;
     if (!page_ || !page_->browser || !page_->browser->IsSame(browser)) return;
     Trace("browser closing");
@@ -299,11 +334,14 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     Message(page, RADIUS_CEF_CLOSED, "");
     Destroy(page);
   }
-  bool OnBeforePopup(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>, int popup_id,
-      const CefString& target_url, const CefString&, WindowOpenDisposition,
-      bool user_gesture, const CefPopupFeatures&, CefWindowInfo& window,
-      CefRefPtr<CefClient>& client, CefBrowserSettings&,
-      CefRefPtr<CefDictionaryValue>&, bool*) override {
+  bool OnBeforePopup(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, int popup_id,
+      const CefString& target_url, const CefString& name, WindowOpenDisposition disposition,
+      bool user_gesture, const CefPopupFeatures& features, CefWindowInfo& window,
+      CefRefPtr<CefClient>& client, CefBrowserSettings& settings,
+      CefRefPtr<CefDictionaryValue>& extra, bool* no_javascript_access) override {
+    if (auto owner = ForBrowser(browser); owner && owner != this)
+      return owner->OnBeforePopup(browser,frame,popup_id,target_url,name,disposition,user_gesture,
+                                  features,window,client,settings,extra,no_javascript_access);
     if (!page_ || page_->closing || !page_->popup || (!user_gesture && !page_->popups)) return true;
     const std::string url = target_url.ToString();
     if (!url.empty() && !Allowed(url)) return true;
@@ -311,6 +349,7 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     child->awaiting_context = false;
     child->pending_popup = true;
     child->navigated = true;
+    child->view.auxiliary = page_->view.auxiliary;
     const bool adopted = page_->popup(page_->callback_context, child, url.c_str()) != 0;
     Trace(adopted ? "popup adopted by native tab" : "popup rejected by native tab");
     if (!adopted) { Destroy(child); return true; }
@@ -320,7 +359,8 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     client = child->client;
     return false;
   }
-  void OnBeforePopupAborted(CefRefPtr<CefBrowser>, int popup_id) override {
+  void OnBeforePopupAborted(CefRefPtr<CefBrowser> browser, int popup_id) override {
+    if (auto client = ForBrowser(browser); client && client != this) return client->OnBeforePopupAborted(browser,popup_id);
     Trace("popup creation aborted");
     auto found = pending_popups_.find(popup_id);
     if (found == pending_popups_.end()) return;
@@ -330,6 +370,7 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     }
   }
   void OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString& title) override {
+    if (auto client = ForBrowser(browser); client && client != this) return client->OnTitleChange(browser,title);
     if (!page_ || !page_->navigated || !page_->browser || !page_->browser->IsSame(browser)) return;
     if (diagnostics && browser->IsPopup()) {
       std::fprintf(stderr,"Radius Chromium: popup title id=%d length=%zu\n",browser->GetIdentifier(),title.length());
@@ -338,13 +379,16 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     page_->title = title.ToString();
     auto value = CefDictionaryValue::Create(); value->SetString("title", title); Emit(page_,RADIUS_CEF_STATE,value);
   }
-  void OnAddressChange(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, const CefString&) override {
+  void OnAddressChange(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, const CefString& url) override {
+    if (auto client = ForBrowser(browser); client && client != this) return client->OnAddressChange(browser,frame,url);
     if (page_ && page_->browser && page_->browser->IsSame(browser) && frame->IsMain()) State(page_);
   }
-  void OnLoadingStateChange(CefRefPtr<CefBrowser> browser, bool, bool, bool) override {
+  void OnLoadingStateChange(CefRefPtr<CefBrowser> browser, bool loading, bool back, bool forward) override {
+    if (auto client = ForBrowser(browser); client && client != this) return client->OnLoadingStateChange(browser,loading,back,forward);
     if (page_ && page_->browser && page_->browser->IsSame(browser)) State(page_);
   }
-  void OnLoadStart(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, TransitionType) override {
+  void OnLoadStart(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, TransitionType transition) override {
+    if (auto client = ForBrowser(browser); client && client != this) return client->OnLoadStart(browser,frame,transition);
     if (page_ && page_->browser && page_->browser->IsSame(browser) && frame->IsMain()) {
       page_->view.contentHidden = NO;
       page_->navigation_failed = false; page_->title.clear();
@@ -352,11 +396,13 @@ class Client final : public CefClient, public CefLifeSpanHandler,
       Emit(page_,RADIUS_CEF_STATE,value);
     }
   }
-  void OnLoadEnd(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, int) override {
+  void OnLoadEnd(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, int status) override {
+    if (auto client = ForBrowser(browser); client && client != this) return client->OnLoadEnd(browser,frame,status);
     if (page_ && page_->browser && page_->browser->IsSame(browser) && frame->IsMain() && !page_->navigation_failed) State(page_,true);
   }
   void OnLoadError(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
-      ErrorCode code,const CefString& error,const CefString&) override {
+      ErrorCode code,const CefString& error,const CefString& url) override {
+    if (auto client = ForBrowser(browser); client && client != this) return client->OnLoadError(browser,frame,code,error,url);
     if (page_ && page_->browser && page_->browser->IsSame(browser) && frame->IsMain()) {
       page_->navigation_failed = true;
       if (code != ERR_ABORTED) {
@@ -365,19 +411,23 @@ class Client final : public CefClient, public CefLifeSpanHandler,
       }
     }
   }
-  bool OnBeforeBrowse(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame,
-      CefRefPtr<CefRequest> request,bool,bool) override {
+  bool OnBeforeBrowse(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+      CefRefPtr<CefRequest> request,bool gesture,bool redirect) override {
+    if (auto client = ForBrowser(browser); client && client != this) return client->OnBeforeBrowse(browser,frame,request,gesture,redirect);
     const std::string url = request->GetURL().ToString();
+    if (page_ && page_->view.auxiliary && url.rfind("chrome://",0)==0) return false;
     if (Allowed(url) || (page_ && page_->management && url.rfind("chrome://extensions/",0)==0) || (!frame->IsMain() &&
         (url.rfind("data:",0)==0 || url=="about:srcdoc"))) return false;
     if (page_ && frame->IsMain()) Message(page_,RADIUS_CEF_ERROR,"This Chromium adapter allows HTTP and HTTPS navigation only.");
     return true;
   }
-  void OnRenderProcessTerminated(CefRefPtr<CefBrowser>, TerminationStatus,
-      int,const CefString&) override {
+  void OnRenderProcessTerminated(CefRefPtr<CefBrowser> browser, TerminationStatus status,
+      int code,const CefString& message) override {
+    if (auto client = ForBrowser(browser); client && client != this) return client->OnRenderProcessTerminated(browser,status,code,message);
     if (page_) Message(page_,RADIUS_CEF_ERROR,"The Chromium renderer stopped. Reload this page to recover.");
   }
-  bool CanDownload(CefRefPtr<CefBrowser>,const CefString&,const CefString&) override {
+  bool CanDownload(CefRefPtr<CefBrowser> browser,const CefString& url,const CefString& method) override {
+    if (auto client = ForBrowser(browser); client && client != this) return client->CanDownload(browser,url,method);
     return page_ && !page_->closing && page_->event;
   }
   static bool ExtensionDownload(CefRefPtr<CefDownloadItem> item) {
@@ -386,8 +436,9 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     return item->GetMimeType()=="application/x-chrome-extension" ||
         (name.size()>=4 && name.substr(name.size()-4)==".crx");
   }
-  bool OnBeforeDownload(CefRefPtr<CefBrowser>,CefRefPtr<CefDownloadItem> item,
+  bool OnBeforeDownload(CefRefPtr<CefBrowser> browser,CefRefPtr<CefDownloadItem> item,
       const CefString& name,CefRefPtr<CefBeforeDownloadCallback> callback) override {
+    if (auto client = ForBrowser(browser); client && client != this) return client->OnBeforeDownload(browser,item,name,callback);
     // Chrome owns CRX validation, the Web Store approval and installation path.
     // Retargeting this download to a SavePanel would break that install flow.
     if (ExtensionDownload(item)) { downloads_.erase(item->GetId()); return false; }
@@ -408,8 +459,9 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     }
     return true;
   }
-  void OnDownloadUpdated(CefRefPtr<CefBrowser>,CefRefPtr<CefDownloadItem> item,
+  void OnDownloadUpdated(CefRefPtr<CefBrowser> browser,CefRefPtr<CefDownloadItem> item,
       CefRefPtr<CefDownloadItemCallback> callback) override {
+    if (auto client = ForBrowser(browser); client && client != this) return client->OnDownloadUpdated(browser,item,callback);
     if (ExtensionDownload(item)) { downloads_.erase(item->GetId()); return; }
     if (!page_) { if (item->IsInProgress()) callback->Cancel(); return; }
     auto& download = downloads_[item->GetId()]; download.control = callback;
@@ -529,7 +581,14 @@ class WindowDelegate final : public CefWindowDelegate {
     page_->window = nullptr;
   }
   bool CanClose(CefRefPtr<CefWindow>) override {
-    return !page_ || !page_->browser || page_->browser->GetHost()->TryCloseBrowser();
+    if (!page_ || !page_->browser) return true;
+    auto host = page_->browser->GetHost();
+    // Do not start mandatory Chromium close while Radius still needs download
+    // acknowledgements. An already-mandatory JS close cannot safely be vetoed.
+    if (!page_->closing && !host->IsReadyToBeClosed() && page_->client->HasPendingDownloads()) {
+      Message(page_,RADIUS_CEF_BROWSER_COMMAND,"closeTab"); return false;
+    }
+    return host->TryCloseBrowser();
   }
   CefSize GetPreferredSize(CefRefPtr<CefView>) override { return CefSize(800,600); }
   cef_show_state_t GetInitialShowState(CefRefPtr<CefWindow>) override { return CEF_SHOW_STATE_HIDDEN; }
@@ -585,7 +644,13 @@ class BrowserViewDelegate final : public CefBrowserViewDelegate {
 Page::Page() { [view setWantsLayer:YES]; }
 Page::~Page() { [view release]; }
 void SynchronizeViews() {
-  for (auto& entry : pages) [entry.second->view synchronizeBrowserWindow];
+  for (auto& entry : pages) {
+    auto page = entry.first;
+    if (page->view.auxiliary && page->browser) {
+      NSView* handle = (NSView*)page->browser->GetHost()->GetWindowHandle();
+      page->view.browserWindow = [handle window];
+    } else [page->view synchronizeBrowserWindow];
+  }
 }
 void Destroy(Page* page) {
   page->client->DetachPage();
@@ -594,6 +659,7 @@ void Destroy(Page* page) {
   NSWindow* child = page->view.browserWindow;
   if (child.parentWindow) [child.parentWindow removeChildWindow:child];
   page->view.browserWindow = nil;
+  browser_pages.erase(page->browser_id);
   auto context = contexts.find(page->context_key);
   if (context != contexts.end() && --context->second.pages == 0) contexts.erase(context);
   pages.erase(page);
@@ -603,6 +669,29 @@ Page* Allocate(const std::string& key) {
   page->context_key = key; page->client = new Client(page);
   contexts.at(key).pages++;
   pages.emplace(page,std::move(value)); return page;
+}
+CefRefPtr<CefClient> DefaultClient() { return new Client(nullptr); }
+Page* AdoptAuxiliaryBrowser(CefRefPtr<CefBrowser> browser,Page* preferred_owner) {
+  auto context = browser->GetHost()->GetRequestContext();
+  auto matches = [&](Page* page) {
+    if (!page || page->closing || !page->popup || !page->callback_context) return false;
+    auto found = contexts.find(page->context_key);
+    return found != contexts.end() && found->second.value->IsSharingWith(context);
+  };
+  Page* owner = matches(preferred_owner) ? preferred_owner : nullptr;
+  if (!owner) {
+    for (const auto& entry : pages) if (matches(entry.first)) { owner=entry.first; break; }
+  }
+  if (!owner) return nullptr;
+  Page* child = Allocate(owner->context_key);
+  child->awaiting_context=false; child->navigated=true;
+  child->view.auxiliary=YES;
+  NSView* handle = (NSView*)browser->GetHost()->GetWindowHandle();
+  child->view.browserWindow=[handle window];
+  const std::string url = browser->GetMainFrame()->GetURL().ToString();
+  if (!owner->popup(owner->callback_context,child,url.c_str())) { Destroy(child); return nullptr; }
+  Trace("native auxiliary Chrome browser adopted with original WebContents");
+  return child;
 }
 
 void CreateReadyPage(Page* page) {

@@ -26,6 +26,30 @@ public struct DistributionRelease: Codable, Equatable, Sendable {
     }
 }
 
+/// Complete applications carry their own host/engine ABI pair. The updater
+/// verifies the package; the replacement host's loader enforces its compiled ABI.
+public struct DistributionEngineManifest: Codable, Sendable {
+    public let format: Int
+    public let abi: Int
+    public let runtimeStyle: String
+    public let architecture: String
+    public let cefVersion: String
+    public init(abi: Int, architecture: String, cefVersion: String) {
+        self.format = 2; self.abi = abi; self.runtimeStyle = "chrome"
+        self.architecture = architecture; self.cefVersion = cefVersion
+    }
+    public func validate(release: DistributionRelease, architecture expected: String?) throws {
+        guard format == 2, abi > 0, abi <= 1024, runtimeStyle == "chrome",
+              ["arm64", "x86_64"].contains(architecture), architecture == release.architecture,
+              expected == nil || architecture == expected, release.chromium,
+              !cefVersion.isEmpty, cefVersion.count <= 256,
+              let major = cefVersion.split(separator: ".").first.flatMap({ Int($0) }),
+              major > 0, release.securityEpoch >= major else {
+            throw ValidationError("The Chromium package has an incompatible architecture or security version.")
+        }
+    }
+}
+
 public struct DistributionAsset: Codable, Equatable, Sendable {
     public let release: DistributionRelease
     public let url: URL

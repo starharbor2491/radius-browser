@@ -164,7 +164,7 @@ extension AppState {
         if suspendingModuleContributions { return try operation() }
         let previous = installedModules, configuration = library.preferences.configuration
         suspendingModuleContributions = true
-        defer { suspendingModuleContributions = false; resourceWorkerGeneration = UUID() }
+        defer { suspendingModuleContributions = false; invalidateModuleExecution() }
         do {
             let result = try repository.withAtomicChanges(for: ids, operation)
             installedModules = try repository.installed()

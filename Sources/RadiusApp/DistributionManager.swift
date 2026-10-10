@@ -168,8 +168,11 @@ final class DistributionManager: ObservableObject {
                 try await Task.sleep(for: .milliseconds(50))
             }
             let values = try ready.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+            let readyHandle = try FileHandle(forReadingFrom: ready)
+            defer { try? readyHandle.close() }
+            let response = try readyHandle.read(upToCount: 6) ?? Data()
             guard values.isRegularFile == true, values.isSymbolicLink != true, values.fileSize == 5,
-                  try Data(contentsOf: ready) == Data("READY".utf8), process.isRunning else {
+                  response == Data("READY".utf8), process.isRunning else {
                 throw ValidationError("The updater's readiness response was invalid. Radius has stayed open.")
             }
             try FileManager.default.removeItem(at: ready)

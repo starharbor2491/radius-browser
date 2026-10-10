@@ -39,10 +39,9 @@ extension AppState {
             }
             guard definition.treeTabs == (configuration.layout.treeTabs == true) else { throw ValidationError("This setup's tab layout does not match its required tab-system package. Choose a compatible tab system before applying it.") }
         }
-        let plan = try moduleInstallationPlan(for: required)
         // Preview publisher, all dependencies, and permission differences before
         // any installation, role replacement, or configuration mutation.
-        guard approveModules(plan) else { return false }
+        guard approveModules(requirements, activateRequirements: true) else { return false }
         try withAtomicModuleChanges(for: requirements.map(\.id)) {
             for id in required { try installApprovedModule(id) }
             guard let repository else { throw ValidationError("Repair module storage first.") }

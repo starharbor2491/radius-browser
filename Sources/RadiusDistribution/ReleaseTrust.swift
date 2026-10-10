@@ -38,7 +38,8 @@ public enum ReleaseTrust {
     }
     public static func metadata(of app: URL, requireCompatibleArchitecture: Bool = true) throws -> DistributionRelease {
         guard let bundle = Bundle(url: app), bundle.bundleIdentifier == "org.radius.browser",
-              bundle.executableURL?.lastPathComponent == "Radius" else {
+              bundle.executableURL?.lastPathComponent == "Radius",
+              bundle.infoDictionary?["CFBundlePackageType"] as? String == "APPL" else {
             throw ValidationError("Choose a complete Radius application or Radius installer.")
         }
         let path = app.appendingPathComponent("Contents/Resources/Distribution.json")
@@ -47,7 +48,7 @@ public enum ReleaseTrust {
               let size = values.fileSize, size > 0, size <= 4096 else {
             throw ValidationError("This Radius release has no valid distribution metadata.")
         }
-        let release = try JSONDecoder().decode(DistributionRelease.self, from: Data(contentsOf: path))
+        let release = try JSONDecoder().decode(DistributionRelease.self, from: boundedData(at: path, maximum: 4096))
         guard bundle.infoDictionary?["CFBundleVersion"] as? String == String(release.build),
               bundle.infoDictionary?["CFBundleShortVersionString"] as? String == release.version else {
             throw ValidationError("The release version does not match the signed application.")
@@ -66,19 +67,18 @@ public enum ReleaseTrust {
         if hasChromium {
             let manifest = runtime.appendingPathComponent("Contents/Resources/manifest.json")
             let size = try manifest.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-            guard size > 0, size <= 4096,
-                  let dictionary = try JSONSerialization.jsonObject(with: Data(contentsOf: manifest)) as? [String: Any],
-                  dictionary["architecture"] as? String == release.architecture,
-                  !requireCompatibleArchitecture || dictionary["architecture"] as? String == architecture,
-                  dictionary["format"] as? Int == 2,
-                  !requireCompatibleArchitecture || (dictionary["abi"] as? Int == 2 && dictionary["runtimeStyle"] as? String == "chrome"),
-                  let cef = dictionary["cefVersion"] as? String,
-                  let major = cef.split(separator: ".").first.flatMap({ Int($0) }),
-                  release.securityEpoch >= major else {
-                throw ValidationError("The Chromium package has an incompatible architecture or security version.")
-            }
+            guard size > 0, size <= 4096 else { throw ValidationError("The Chromium manifest is too large or empty.") }
+            let engine = try JSONDecoder().decode(DistributionEngineManifest.self, from: boundedData(at: manifest, maximum: 4096))
+            try engine.validate(release: release, architecture: requireCompatibleArchitecture ? architecture : nil)
         }
         return release
+    }
+    private static func boundedData(at file: URL, maximum: Int) throws -> Data {
+        let handle = try FileHandle(forReadingFrom: file)
+        defer { try? handle.close() }
+        let data = try handle.read(upToCount: maximum + 1) ?? Data()
+        guard !data.isEmpty, data.count <= maximum else { throw ValidationError("The signed release metadata is too large or empty.") }
+        return data
     }
     public static func verifyBundleTree(_ app: URL) throws {
         let fm = FileManager.default

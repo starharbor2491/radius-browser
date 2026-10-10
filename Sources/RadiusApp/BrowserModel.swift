@@ -313,4 +313,4 @@ enum BrowserPanel: String, CaseIterable, Identifiable {
         switch self { case .bookmarks: "bookmark"; case .history: "clock"; case .downloads: "arrow.down.circle"; case .notes: "note.text"; case .resources: "gauge.with.dots.needle.33percent" }
     }
 }
-enum BrowserSheet: String, Identifiable { case modules, customize, settings, recovery, extensions; var id: Self { self } }
+enum BrowserSheet: String, Identifiable { case modules, customize, settings, engines, recovery, extensions; var id: Self { self } }

@@ -88,6 +88,87 @@ import Testing
     #expect(throws: (any Error).self) { try repo.installationPlan(for: dependent.id, catalog: [older, dependent]) }
 }
 
+@Test func equalVersionCatalogDriftKeepsInstalledDependencyMetadataAndCode() throws {
+    let directory = temporaryModuleDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
+    let repo = try ModuleRepository(root: directory.appendingPathComponent("Modules"))
+    let a = ModuleManifest(id: "org.test.a", name: "A", summary: "Old dependency", capability: .startWidget, runtime: .declarative)
+    var b = behaviorManifest("org.test.b"); b.dependencies = [a.id]
+    try repo.install(a, payload: Data(#"{"formatVersion":1,"widgetTitle":"A","widgetBody":"Old dependency"}"#.utf8))
+    try repo.install(b, payload: JSONEncoder().encode(officialProgram("org.radius.notes")))
+    var c = a; c.id = "org.test.c"; c.name = "C"
+    var drifted = b; drifted.dependencies = [c.id]
+    let plan = try repo.installationPlan(for: b.id, catalog: [a, c, drifted], includeInstalled: true)
+    #expect(plan.map(\.id) == [a.id, b.id])
+    #expect(plan.last?.dependencies == [a.id])
+    #expect(try repo.installed().first(where: { $0.id == b.id })?.manifest == b)
+}
+
+@Test func packageAndProviderTransactionsRollbackFailuresAndRecoverInterruptedOperations() throws {
+    let directory = temporaryModuleDirectory(), interrupted = temporaryModuleDirectory()
+    defer { try? FileManager.default.removeItem(at: directory); try? FileManager.default.removeItem(at: interrupted) }
+    let repo = try ModuleRepository(root: directory.appendingPathComponent("Modules"))
+    let standard = ModuleManifest(id: "org.test.standard", name: "Standard", summary: "Tabs", capability: .tabSystem, runtime: .declarative)
+    var tree = standard; tree.id = "org.test.tree"; tree.name = "Tree"
+    let normalBytes = Data(#"{"formatVersion":1,"treeTabs":false}"#.utf8), treeBytes = Data(#"{"formatVersion":1,"treeTabs":true}"#.utf8)
+    try repo.install(standard, payload: normalBytes)
+    #expect(throws: (any Error).self) {
+        try repo.withAtomicChanges(for: [standard.id, tree.id]) {
+            try repo.install(tree, payload: treeBytes)
+            try repo.replaceProvider(role: .tabSystem, with: tree.id)
+            try repo.uninstall(standard.id)
+            // This snapshot is the durable on-disk state of an interrupted app.
+            try FileManager.default.copyItem(at: repo.root, to: interrupted)
+            throw ValidationError("Simulated late operation failure")
+        }
+    }
+    #expect(try repo.installed().map(\.id) == [standard.id])
+    #expect(try repo.definition(for: standard.id).treeTabs == false)
+    let recovered = try ModuleRepository(root: interrupted)
+    #expect(try recovered.installed().map(\.id) == [standard.id])
+    #expect(try recovered.definition(for: standard.id).treeTabs == false)
+    #expect(!FileManager.default.fileExists(atPath: interrupted.appendingPathComponent(".batch-transaction.json").path))
+    try repo.withAtomicChanges(for: [standard.id, tree.id]) {
+        try repo.install(tree, payload: treeBytes); try repo.replaceProvider(role: .tabSystem, with: tree.id); try repo.uninstall(standard.id)
+    }
+    #expect(try repo.installed().map(\.id) == [tree.id])
+    #expect(try repo.definition(for: tree.id).treeTabs == true)
+}
+
+@Test func behaviorProviderReplacementIsExplicitAndCannotBreakItsOwnDependencies() throws {
+    let directory = temporaryModuleDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
+    let repo = try ModuleRepository(root: directory.appendingPathComponent("Modules"))
+    let original = behaviorManifest("org.test.notes"), bytes = try JSONEncoder().encode(officialProgram("org.radius.notes"))
+    var alternate = original; alternate.id = "org.test.alternative"; alternate.name = "Alternative"
+    try repo.install(original, payload: bytes); try repo.install(alternate, payload: bytes)
+    #expect(try repo.installed().filter(\.enabled).map(\.id) == [original.id])
+    #expect(throws: (any Error).self) { try repo.setEnabled(alternate.id, true) }
+    try repo.replaceProvider(role: .notes, with: alternate.id)
+    #expect(try repo.installed().filter(\.enabled).map(\.id) == [alternate.id])
+    var invalid = original; invalid.id = "org.test.invalid"; invalid.dependencies = [alternate.id]
+    try repo.install(invalid, payload: bytes)
+    #expect(throws: (any Error).self) { try repo.replaceProvider(role: .notes, with: invalid.id) }
+    #expect(try repo.installed().filter(\.enabled).map(\.id) == [alternate.id])
+}
+
+@Test func everyOfficialDataPackageHasACompleteCompatibleRemovablePayload() throws {
+    let root = officialModuleDirectory("org.radius.notes").deletingLastPathComponent()
+    let directories = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+    #expect(directories.count == 18)
+    for directory in directories {
+        let manifest = try ModuleManifest.decode(Data(contentsOf: directory.appendingPathComponent("manifest.json")))
+        if manifest.runtime == .behaviorProgram {
+            try ModuleProgram.decode(Data(contentsOf: directory.appendingPathComponent("program.json"))).validate(capability: manifest.capability)
+        } else if manifest.runtime == .declarative {
+            _ = try ModuleDefinition.decode(Data(contentsOf: directory.appendingPathComponent("definition.json")), capability: manifest.capability)
+        } else { #expect(manifest.runtime?.isNative == true) }
+    }
+    let badTheme = Data(#"{"formatVersion":1,"theme":{"design":"native","colorMode":"light","accent":"blue","density":"comfortable","cornerRadius":10,"transparency":false,"reducedMotion":false,"fontScale":100}}"#.utf8)
+    #expect(throws: (any Error).self) { try ModuleDefinition.decode(badTheme, capability: .theme) }
+    let lowContrast = Data(##"{"formatVersion":1,"theme":{"design":"native","colorMode":"light","accent":"blue","density":"comfortable","cornerRadius":10,"transparency":false,"reducedMotion":false,"surfaceHex":"#ffffff","textHex":"#eeeeee"}}"##.utf8)
+    #expect(throws: (any Error).self) { try ModuleDefinition.decode(lowContrast, capability: .theme) }
+    #expect(throws: (any Error).self) { try ModuleDefinition.decode(Data(#"{"formatVersion":1,"icons":{"arbitraryComponent":"bookmark"}}"#.utf8), capability: .icons) }
+}
+
 @Test func communityCatalogsNeverInstallCodeOrSpoofReservedWorkers() throws {
     let directory = temporaryModuleDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
     let repo = try ModuleRepository(root: directory.appendingPathComponent("Modules"))

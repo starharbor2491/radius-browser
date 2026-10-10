@@ -176,6 +176,7 @@ final class AppState: ObservableObject {
         ReaderWorker.stopAll(moduleID: moduleID)
     }
     func resumeResourceWorkerAfterCancelledQuit() { resourceWorkerGeneration = UUID() }
+    func invalidateModuleExecution() { resourceWorkerGeneration = UUID() }
     func install(_ id: String) {
         perform {
             guard let repository else { throw ValidationError("Open Recovery to repair module storage first.") }
@@ -252,30 +253,44 @@ final class AppState: ObservableObject {
             if approveModules(plan) { try installApprovedModule(package.manifest.id) }
         }
     }
-    func approveModules(_ manifests: [ModuleManifest], local: Bool = false, activateDependencies: Bool = true) -> Bool {
+    func approveModules(_ manifests: [ModuleManifest], local: Bool = false, activateDependencies: Bool = true, activateRequirements: Bool = false) -> Bool {
         guard !manifests.isEmpty else { return true }
         let alert = NSAlert()
-        alert.messageText = "Install or update \(manifests.map(\.name).joined(separator: ", "))?"
+        alert.messageText = activateRequirements ? "Apply this setup's modules?" : manifests.count == 1 ? "Install or update \(manifests[0].name)?" : "Install or update \(manifests.count) packages?"
         let permissions = Set(manifests.compactMap { $0.capability.permission }).sorted()
         let unverified = local || manifests.contains { !bundledModuleIDs.contains($0.id) }
         let requiredIDs = Set(manifests.flatMap(\.dependencies))
         alert.informativeText = (unverified ? "Community publisher information is self-reported. Data programs cannot access the network, filesystem, or arbitrary native code.\n\n" : "Official packages are sealed into this Radius application.\n\n") +
             (permissions.isEmpty ? "No website or system permissions are requested." : permissions.joined(separator: "\n\n"))
+        var packageDetails = ""
         for manifest in manifests {
-            alert.informativeText += "\n\n\(manifest.name) v\(manifest.version) · \(manifest.publisher)"
-            if !manifest.dependencies.isEmpty { alert.informativeText += "\nRequires: " + manifest.dependencies.joined(separator: ", ") }
+            packageDetails += "\(manifest.name) v\(manifest.version) · \(manifest.publisher)\n"
+            if !manifest.dependencies.isEmpty { packageDetails += "Requires: " + manifest.dependencies.joined(separator: ", ") + "\n" }
             if let current = installedModules.first(where: { $0.id == manifest.id }), !current.enabled {
-                alert.informativeText += requiredIDs.contains(manifest.id) && activateDependencies ? "\nThis required dependency is currently disabled; approving enables it." : "\nYour disabled choice will be kept."
+                packageDetails += activateRequirements ? "Applying enables this required module.\n" : requiredIDs.contains(manifest.id) && activateDependencies ? "This required dependency is currently disabled; approving enables it.\n" : "Your disabled choice will be kept.\n"
             }
             if manifest.capability.isExclusive, let active = installedModules.first(where: { $0.enabled && $0.manifest.capability == manifest.capability && $0.id != manifest.id }) {
-                alert.informativeText += requiredIDs.contains(manifest.id) && activateDependencies ? "\nRequired dependency replaces \(active.manifest.name). Browser data is kept." : "\nInstalls alongside \(active.manifest.name). Choose Replace before it becomes active."
+                packageDetails += activateRequirements ? "Applying replaces \(active.manifest.name) immediately. Browser data is kept.\n" : requiredIDs.contains(manifest.id) && activateDependencies ? "Required dependency replaces \(active.manifest.name). Browser data is kept.\n" : "Installs alongside \(active.manifest.name). Choose Replace before it becomes active.\n"
             }
+            packageDetails += "\n"
         }
         if manifests.contains(where: { $0.runtime?.isNative == true }) {
             alert.informativeText += "\n\nFirst-party native workers run with the same macOS user access as Radius. Reader runs for one extraction; resources run while their panel is open. Native code is not sandboxed by these permission descriptions."
         }
         alert.informativeText += "\n\nSaved browser data is kept. Installs and updates do not restore modules you removed."
-        alert.addButton(withTitle: "Approve and install"); alert.addButton(withTitle: "Cancel")
+        let scrollHeight = CGFloat(min(220, max(90, manifests.count * 55)))
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 520, height: scrollHeight))
+        scroll.hasVerticalScroller = true; scroll.borderType = .bezelBorder
+        let details = NSTextView(frame: NSRect(x: 0, y: 0, width: 500, height: 220))
+        details.isEditable = false; details.isSelectable = true; details.font = .systemFont(ofSize: 12); details.textColor = .labelColor
+        details.textContainer?.widthTracksTextView = true; details.isHorizontallyResizable = false; details.isVerticallyResizable = true
+        details.autoresizingMask = [.width]; details.string = packageDetails
+        details.textContainerInset = NSSize(width: 8, height: 8)
+        if let container = details.textContainer, let manager = details.layoutManager {
+            manager.ensureLayout(for: container); details.setFrameSize(NSSize(width: 500, height: max(scrollHeight, manager.usedRect(for: container).height + 16)))
+        }
+        scroll.documentView = details; alert.accessoryView = scroll
+        alert.addButton(withTitle: activateRequirements ? "Approve and apply" : "Approve and install"); alert.addButton(withTitle: "Cancel")
         return alert.runModal() == .alertFirstButtonReturn
     }
     func toggleModule(_ module: InstalledModule) {
@@ -382,6 +397,7 @@ final class AppState: ObservableObject {
         if library.history.count > 10_000 { library.history.removeFirst(library.history.count - 10_000) }
     }
     func toggleBookmark(url: URL, title: String, profileID: UUID) {
+        guard !deletingProfileIDs.contains(profileID), library.profiles.contains(where: { $0.id == profileID }) else { notice = "This profile is unavailable."; return }
         guard AddressResolver.isWebURL(url) else { notice = "Only HTTP and HTTPS pages can be saved as bookmarks."; return }
         if library.bookmarks.contains(where: { $0.url == url && $0.profileID == profileID }) {
             library.bookmarks.removeAll { $0.url == url && $0.profileID == profileID }
@@ -391,6 +407,7 @@ final class AppState: ObservableObject {
     func importBookmarks(profileID: UUID) -> Bool {
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.html]; panel.message = "Choose bookmarks exported from Safari, Chrome, or Firefox."
         guard panel.runModal() == .OK, let url = panel.url else { return false }
+        guard !deletingProfileIDs.contains(profileID), library.profiles.contains(where: { $0.id == profileID }) else { notice = "This profile is unavailable."; return false }
         do {
             guard (try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) <= 10 * 1024 * 1024 else { throw ValidationError("Bookmark files must be smaller than 10 MB.") }
             let imported = try BookmarkExchange.parse(Data(contentsOf: url), profileID: profileID)
@@ -443,8 +460,13 @@ final class AppState: ObservableObject {
         guard let database else { return false }
         revision += 1
         var snapshot = library; snapshot.normalize()
-        do { try await database.save(snapshot, revision: revision); try await database.checkpoint(); return true }
+        do { try await database.save(snapshot, revision: revision) }
         catch { notice = "Could not save Radius data: \(error.localizedDescription)"; return false }
+        // COMMIT is durable with SQLite synchronous=FULL. A maintenance failure
+        // must not report an uncommitted deletion and roll back only memory.
+        do { try await database.checkpoint() }
+        catch { notice = "Your changes were saved. Database maintenance will retry: \(error.localizedDescription)" }
+        return true
     }
     private func scheduleSave() {
         revision += 1; let currentRevision = revision; var snapshot = library; snapshot.normalize()

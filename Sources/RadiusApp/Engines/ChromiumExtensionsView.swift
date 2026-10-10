@@ -7,6 +7,7 @@ import RadiusCore
 /// permission prompts, updates and extension configuration inside that profile.
 struct ChromiumExtensionsView: View {
     var initialProfileID: UUID? = nil
+    var onOpenSettings: (() -> Void)? = nil
     @EnvironmentObject private var app: AppState
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var runtime = ChromiumRuntime.shared
@@ -42,6 +43,7 @@ struct ChromiumExtensionsView: View {
             } else {
                 ContentUnavailableView("Chromium is not installed", systemImage: "puzzlepiece.extension",
                                        description: Text("Install Chromium in Browsing engines, then return here to manage extensions."))
+                if let onOpenSettings { Button("Open browsing engine settings", action: onOpenSettings) }
             }
             if let message { Text(message).font(.callout).foregroundStyle(.secondary) }
             Text("Compatibility target: Manifest V3 content scripts, background workers, storage, permissions, actions and popups. Chromium exposes each Radius tab as a separate window; extensions that reorganize tabs or windows may behave differently.")

@@ -8,6 +8,7 @@ struct SettingsView: View {
     @EnvironmentObject private var app: AppState
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var model: BrowserModel
+    var initialSection: SettingsSection = .general
     @State private var section = SettingsSection.general
     @State private var profileName = ""
     @State private var clearing = false
@@ -32,6 +33,7 @@ struct SettingsView: View {
             Divider()
             HStack { if let notice = app.notice { Text(notice).font(.caption).foregroundStyle(.secondary).lineLimit(3) }; Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.defaultAction) }.padding(16)
         }.frame(width: 780, height: 590)
+        .onAppear { section = initialSection }
         .sheet(item: $deletingProfile) { DeleteProfileView(profile: $0) }
     }
     private var general: some View {

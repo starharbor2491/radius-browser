@@ -11,6 +11,7 @@ extension Theme {
     var scheme: ColorScheme? { switch colorMode { case .system: nil; case .light: .light; case .dark: .dark } }
     var spacing: CGFloat { (density == .compact ? 6 : 10) * (spacingScale ?? 1) }
     var controlSize: ControlSize { density == .compact ? .small : .regular }
+    var foreground: Color { textHex.flatMap(InterfaceColor.init(hex:))?.color ?? .primary }
     var tint: Color { accentHex.flatMap(InterfaceColor.init(hex:))?.color ?? accent.color }
     func interfaceFont(_ size: CGFloat = 13, weight: Font.Weight = .regular) -> Font {
         let design: Font.Design = switch typography ?? .system { case .system: .default; case .rounded: .rounded; case .serif: .serif; case .monospaced: .monospaced }
@@ -72,10 +73,11 @@ struct IconButton: View {
     var active = false
     let action: () -> Void
     @Environment(\.browserTheme) private var theme
+    @Environment(\.colorSchemeContrast) private var contrast
     var body: some View {
         Button(action: action) {
             BrowserSymbol(name: icon).frame(width: theme.density == .compact ? 28 : 32, height: theme.density == .compact ? 28 : 32)
-                .foregroundStyle(active ? Color.accentColor : Color.primary)
+                .foregroundStyle(contrast == .increased ? Color.primary : (active ? Color.accentColor : theme.foreground))
                 .background(active ? Color.accentColor.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: theme.cornerRadius))
         }.buttonStyle(.plain).help(title).accessibilityLabel(title)
     }

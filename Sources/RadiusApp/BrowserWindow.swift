@@ -52,8 +52,13 @@ struct BrowserWindow: View {
     @State private var windowWidth: CGFloat = 1000
     @Environment(\.openWindow) private var openWindow
     @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    @Environment(\.colorSchemeContrast) private var systemContrast
     private var layout: BrowserLayout { app.configuration.layout }
-    private var theme: Theme { app.configuration.theme }
+    private var theme: Theme {
+        var value = app.configuration.theme
+        if systemContrast == .increased { value.textHex = nil; value.surfaceHex = nil; value.accentHex = nil }
+        return value
+    }
     private var tabsTheme: Theme { theme.component(theme.tabsAppearance) }
     private var navigationTheme: Theme { theme.component(theme.navigationAppearance) }
     private var sidebarTheme: Theme { theme.component(theme.sidebarAppearance) }
@@ -123,8 +128,9 @@ struct BrowserWindow: View {
                 case .modules: ModulesView()
                 case .customize: CustomizeView()
                 case .settings: SettingsView(model: model)
+                case .engines: SettingsView(model: model, initialSection: .engines)
                 case .recovery: RecoveryView()
-                case .extensions: ChromiumExtensionsView(initialProfileID: model.session.profileID)
+                case .extensions: ChromiumExtensionsView(initialProfileID: model.session.profileID, onOpenSettings: { model.sheet = .engines })
                 }
             }
             .background(Color(nsColor: .windowBackgroundColor))
@@ -268,11 +274,11 @@ struct BrowserWindow: View {
             }
             Button { model.selectTab(tab.id) } label: {
                 HStack(spacing: 7) {
-                    Image(systemName: tab.pinned ? "pin.fill" : "globe").font(.caption).foregroundStyle(.secondary)
+                    BrowserSymbol(name: tab.pinned ? "pin.fill" : "globe").font(.caption).foregroundStyle(tab.id == model.session.selectedTabID ? Color(nsColor: .secondaryLabelColor) : theme.foreground.opacity(0.75))
                     Text(tab.title).font(tabsTheme.interfaceFont()).foregroundStyle(tab.id == model.session.selectedTabID ? Color(nsColor: .textColor) : (theme.textHex.flatMap(InterfaceColor.init(hex:))?.color ?? Color.primary)).lineLimit(1)
                 }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
             }.buttonStyle(.plain).help(tab.title)
-            Button { model.closeTab(tab.id) } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .semibold)).frame(width: 22, height: 24) }
+            Button { model.closeTab(tab.id) } label: { BrowserSymbol(name: "xmark").font(.system(size: 10, weight: .semibold)).foregroundStyle(tab.id == model.session.selectedTabID ? Color(nsColor: .textColor) : theme.foreground).frame(width: 22, height: 24) }
                 .buttonStyle(.plain).help("Close \(tab.title)").accessibilityLabel("Close \(tab.title)")
         }
         .padding(.leading, 10).padding(.trailing, 4).padding(.vertical, tabsTheme.density == .compact ? 2 : 5)
@@ -374,7 +380,8 @@ struct BrowserWindow: View {
                     Text("Export an HTML bookmarks file from your current browser, then import it here.").foregroundStyle(.secondary)
                     HStack {
                         Button("Import bookmarks…") { if app.importBookmarks(profileID: model.session.profileID) { app.library.preferences.completedOnboarding = true } }
-                        Button("Start browsing") { app.library.preferences.completedOnboarding = true; addressFocused = true }.buttonStyle(.borderedProminent)
+                        Button("Start browsing") { app.library.preferences.completedOnboarding = true; focusAddress() }.buttonStyle(.borderedProminent)
+                        Button("Set up Chrome extensions") { model.sheet = ChromiumRuntime.shared.isInstalled(in: app.dataDirectory) ? .extensions : .engines }
                     }
                 }.padding(20).background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: theme.cornerRadius))
             }
@@ -608,19 +615,6 @@ extension Notification.Name {
     static let radiusProfileDeleted = Notification.Name("radius.profileDeleted")
 }
 
-struct NavigationButtons: View {
-    @ObservedObject var tab: BrowserEngineTab
-    let hasPage: Bool
-    var body: some View {
-        HStack(spacing: 2) {
-            IconButton(title: "Back", icon: "chevron.left") { tab.goBack() }.disabled(!tab.canGoBack)
-            IconButton(title: "Forward", icon: "chevron.right") { tab.goForward() }.disabled(!tab.canGoForward)
-            IconButton(title: tab.loading ? "Stop loading" : "Reload", icon: tab.loading ? "xmark" : "arrow.clockwise") {
-                if tab.loading { tab.stop() } else { tab.reload() }
-            }.disabled(!hasPage)
-        }
-    }
-}
 struct ZoomControls: View {
     @ObservedObject var tab: BrowserEngineTab
     var body: some View {

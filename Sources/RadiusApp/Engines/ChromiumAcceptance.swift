@@ -39,6 +39,7 @@ enum ChromiumAcceptance {
         guard manager.chromeStyle, manager.chromeWindow?.parent === managerWindow else {
             throw ValidationError("Extension management escaped its native Radius window.")
         }
+        try await verifyFixture(manager, app: app)
         if ProcessInfo.processInfo.environment["RADIUS_CHROMIUM_WEBSTORE_TEST"] == "1" {
             try await verifyWebStore(manager)
         }
@@ -63,11 +64,154 @@ enum ChromiumAcceptance {
         }
         return value
     }
+    private static func verifyFixture(_ manager: ChromiumTab, app: AppState) async throws {
+        guard let sourcePath = ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_EXTENSION_FIXTURE"],
+              let address = ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_URL"],
+              let fixtureURL = URL(string: address), fixtureURL.scheme == "http", fixtureURL.host == "127.0.0.1" else {
+            throw ValidationError("The isolated extension API fixture is not configured.")
+        }
+        let id = "pomncmnnjempbbdlbamhjphmpidacofc"
+        let folder = app.dataDirectory.appendingPathComponent("Chromium/ExtensionAcceptance", isDirectory: true)
+        let installedFolder = folder.appendingPathComponent("current", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        if FileManager.default.fileExists(atPath: installedFolder.path) { try FileManager.default.removeItem(at: installedFolder) }
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: sourcePath, isDirectory: true), to: installedFolder)
+        _ = try await evaluate(manager, "String(await chrome.developerPrivate.updateProfileConfiguration({inDeveloperMode:true}))")
+        _ = try await manager.request("Radius.chooseFixtureDirectory", parameters: [:])
+        _ = try await evaluate(manager, "String(await chrome.developerPrivate.loadUnpacked({failQuietly:true}))")
+        let enabled = try await evaluate(manager, "String((await chrome.developerPrivate.getExtensionsInfo({includeDisabled:true,includeTerminated:true})).find(e => e.id === '\(id)')?.state)")
+        guard enabled == "ENABLED" else { throw ValidationError("The native manager did not load the MV3 fixture.") }
+        _ = try await evaluate(manager, "String(await chrome.developerPrivate.updateExtensionConfiguration({extensionId:'\(id)',pinnedToToolbar:true}))")
+        let page = try ChromiumRuntime.shared.makeTab(profileID: manager.profileID, privateSessionID: nil, dataDirectory: app.dataDirectory)
+        let window = NSWindow(contentRect: NSRect(x: 140, y: 100, width: 1000, height: 720),
+                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.title = "Radius MV3 API acceptance"
+        window.contentView = page.nativeView; window.makeKeyAndOrderFront(nil)
+        defer {
+            for auxiliary in ChromiumRuntime.shared.auxiliaryTabs where auxiliary.profileID == manager.profileID { auxiliary.dispose() }
+            page.dispose(); window.close()
+        }
+        page.load(fixtureURL)
+        var state = try await waitForFixture(page, key: "radiusFixtureWorker", value: "ready")
+        guard state["radiusFixtureManifestVersion"] == "3", state["radiusFixtureScripting"] == "ready",
+              state["radiusFixtureExtensionId"] == id, let count = Int(state["radiusFixtureCount"] ?? "") else {
+            throw ValidationError("The MV3 worker, content script, scripting or storage API did not execute.")
+        }
+        try await click(page, selector: "#radius-fixture-action")
+        state = try await waitForFixture(page, key: "radiusFixtureActionOpened", value: "1")
+        guard state["radiusFixtureActionState"] != "error" else { throw ValidationError("The extension action did not open.") }
+        // Close the action through an ordinary outside click before opening the panel.
+        _ = try await page.request("Input.dispatchMouseEvent", parameters: ["type":"mousePressed", "x":20, "y":20, "button":"left", "clickCount":1])
+        _ = try await page.request("Input.dispatchMouseEvent", parameters: ["type":"mouseReleased", "x":20, "y":20, "button":"left", "clickCount":1])
+        try await click(page, selector: "#radius-fixture-sidepanel")
+        _ = try await waitForFixture(page, key: "radiusFixtureSidePanelOpened", value: "1")
+        print("Radius Chromium acceptance: MV3 content/worker/scripting/storage/action/side-panel documents executed")
+
+        // Exercise the real management command. CEF opens a native auxiliary
+        // Chrome window; its original browser/tab identity must be preserved.
+        _ = try await evaluate(manager, "String(await chrome.developerPrivate.showOptions('\(id)'))")
+        let optionsDeadline = ContinuousClock.now.advanced(by: .seconds(15))
+        var options: ChromiumTab?
+        while ContinuousClock.now < optionsDeadline {
+            options = ChromiumRuntime.shared.auxiliaryTabs.first { $0.profileID == manager.profileID && $0.url?.host == id }
+            if options != nil { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        guard let options else { throw ValidationError("Extension settings did not open in a managed auxiliary Chrome window.") }
+        _ = try await waitForFixture(options, key: "radiusFixtureOptionsState", value: "ready")
+        guard options.chromeWindow?.isVisible == true else { throw ValidationError("The native extension settings window is not visible.") }
+        let permissions = try await evaluate(options, "JSON.stringify(await chrome.permissions.getAll())")
+        guard let permissionData = permissions.data(using: .utf8),
+              let grants = try JSONSerialization.jsonObject(with: permissionData) as? [String: Any],
+              Set(grants["permissions"] as? [String] ?? []).isSuperset(of: ["storage", "activeTab", "scripting", "sidePanel"]),
+              (grants["origins"] as? [String] ?? []).contains("http://127.0.0.1/*") else {
+            throw ValidationError("The fixture's granted extension permissions differ from its requested scope.")
+        }
+        try await click(options, selector: "#nativecheckbox")
+        _ = try await waitForFixture(options, key: "radiusFixtureTheme", value: "dark")
+        _ = try await waitForFixture(page, key: "radiusFixtureTheme", value: "dark")
+        options.dispose()
+        page.reload()
+        state = try await waitForFixture(page, key: "radiusFixtureWorker", value: "ready")
+        // Wait for the next document's worker ping, not an old DOM state during reload.
+        let storageDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while (Int(state["radiusFixtureCount"] ?? "") ?? 0) <= count, ContinuousClock.now < storageDeadline {
+            try await Task.sleep(for: .milliseconds(100)); state = try await fixtureState(page)
+        }
+        guard state["radiusFixtureTheme"] == "dark", (Int(state["radiusFixtureCount"] ?? "") ?? 0) > count else {
+            throw ValidationError("Extension settings/storage did not survive document reload.")
+        }
+        // Private Radius contexts start without regular-profile extensions.
+        let privatePage = try ChromiumRuntime.shared.makeTab(profileID: manager.profileID, privateSessionID: UUID(), dataDirectory: app.dataDirectory)
+        defer { privatePage.dispose() }
+        privatePage.load(fixtureURL)
+        try await waitForLoad(privatePage, host: "127.0.0.1")
+        try await Task.sleep(for: .milliseconds(500))
+        guard try await evaluate(privatePage, "String(document.documentElement.dataset.radiusFixtureContent)") == "undefined" else {
+            throw ValidationError("A regular-profile extension ran in an isolated private context.")
+        }
+        let manifestURL = installedFolder.appendingPathComponent("manifest.json")
+        guard var manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as? [String: Any] else {
+            throw ValidationError("The fixture manifest is invalid.")
+        }
+        manifest["version"] = "1.0.1"
+        try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys]).write(to: manifestURL, options: .atomic)
+        _ = try await evaluate(manager, "String(await chrome.developerPrivate.reload('\(id)',{failQuietly:true}))")
+        page.reload()
+        _ = try await waitForFixture(page, key: "radiusFixtureVersion", value: "1.0.1")
+        _ = try await waitForFixture(page, key: "radiusFixtureTheme", value: "dark")
+        // This validates reload/update behavior for a local fixture. Signed Web
+        // Store update delivery and whole-process restart are separate checks.
+        _ = try await evaluate(manager, "String(await chrome.management.uninstall('\(id)',{showConfirmDialog:false}))")
+        let removed = try await evaluate(manager, "String((await chrome.developerPrivate.getExtensionsInfo({includeDisabled:true,includeTerminated:true})).some(e => e.id === '\(id)'))")
+        guard removed == "false" else { throw ValidationError("The extension manager did not remove the fixture.") }
+        page.reload(); try await waitForLoad(page, host: "127.0.0.1")
+        try await Task.sleep(for: .milliseconds(300))
+        guard try await evaluate(page, "String(document.documentElement.dataset.radiusFixtureContent)") == "undefined" else {
+            throw ValidationError("The removed extension still injected into a new document.")
+        }
+        print("Radius Chromium acceptance: native options window, grants, settings, storage, private isolation, local update and removal passed")
+    }
+    private static func fixtureState(_ tab: ChromiumTab) async throws -> [String: String] {
+        let text = try await evaluate(tab, "JSON.stringify(document.documentElement.dataset)")
+        guard let data = text.data(using: .utf8), let result = try JSONSerialization.jsonObject(with: data) as? [String: String] else {
+            throw ValidationError("The fixture returned invalid state.")
+        }
+        if let error = result["radiusFixtureError"] { throw ValidationError("Extension API fixture: \(error)") }
+        return result
+    }
+    private static func waitForFixture(_ tab: ChromiumTab, key: String, value: String) async throws -> [String: String] {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(15))
+        while ContinuousClock.now < deadline {
+            if let error = tab.errorMessage { throw ValidationError(error) }
+            let state = try await fixtureState(tab)
+            if state[key] == value { return state }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw ValidationError("Extension API fixture did not reach \(key)=\(value).")
+    }
+    private static func click(_ tab: ChromiumTab, selector: String) async throws {
+        let encoded = String(decoding: try JSONSerialization.data(withJSONObject: selector, options: [.fragmentsAllowed]), as: UTF8.self)
+        let point = try await evaluate(tab, "JSON.stringify((() => { const e=document.querySelector(\(encoded)); if (!e) return null; const r=e.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2}; })())")
+        guard let data = point.data(using: .utf8), let position = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) as? [String: Double],
+              let x = position["x"], let y = position["y"] else { throw ValidationError("The extension fixture control is unavailable: \(selector)") }
+        _ = try await tab.request("Input.dispatchMouseEvent", parameters: ["type":"mousePressed", "x":x, "y":y, "button":"left", "clickCount":1])
+        _ = try await tab.request("Input.dispatchMouseEvent", parameters: ["type":"mouseReleased", "x":x, "y":y, "button":"left", "clickCount":1])
+    }
+    private static func waitForLoad(_ tab: ChromiumTab, host: String) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(25))
+        while tab.url?.host != host || tab.loading {
+            if let error = tab.errorMessage { throw ValidationError(error) }
+            guard ContinuousClock.now < deadline else { throw ValidationError("The extension acceptance page did not load.") }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+    }
     private static func verifyWebStore(_ tab: ChromiumTab) async throws {
         // Fixed public MV3 extension, installed only into the fresh acceptance
         // profile above. Never run this probe in the user's browsing profile.
         let extensionID = "ddkjiahejlhfcafbddmgiahcphecmpfh"
         tab.load(URL(string: "https://chromewebstore.google.com/detail/ublock-origin-lite/\(extensionID)?hl=en")!)
+        try await waitForLoad(tab, host: "chromewebstore.google.com")
         let deadline = ContinuousClock.now.advanced(by: .seconds(45))
         var target: [String: Double]?
         while ContinuousClock.now < deadline {

@@ -93,7 +93,7 @@ public struct WindowSession: Identifiable, Codable, Equatable, Sendable {
         var seen = Set<UUID>()
         tabs = Array(tabs.filter { seen.insert($0.id).inserted }.prefix(200))
         for i in tabs.indices {
-            if let url = tabs[i].url, !AddressResolver.isWebURL(url) { tabs[i].url = nil }
+            if let url = tabs[i].url, !AddressResolver.isWebURL(url) { tabs[i].url = nil; tabs[i].title = "New tab" }
             tabs[i].title = String(tabs[i].title.prefix(512))
         }
         if tabs.isEmpty { tabs = [BrowserTab()] }

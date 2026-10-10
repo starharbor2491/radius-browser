@@ -10,6 +10,7 @@ final class ChromiumTab: BrowserEngineTab {
     private let downloads: DownloadCenter
     let profileID: UUID
     let privateSessionID: UUID?
+    let isAuxiliary: Bool
     var downloadCenter: DownloadCenter { downloads }
     func cancelDownloads() async throws { try await downloads.cancelChromiumAndWait(ids: downloadIDs) }
     private let downloadPrefix = UUID().uuidString
@@ -43,6 +44,7 @@ final class ChromiumTab: BrowserEngineTab {
         self.runtime = runtime; self.page = page; self.downloads = downloads
         self.profileID = profileID; self.privateSessionID = privateSessionID
         hostView = Unmanaged<NSView>.fromOpaque(runtime.api!.native_view(page)!).takeUnretainedValue()
+        isAuxiliary = hostView.value(forKey: "auxiliary") as? Bool == true
         super.init()
         runtime.register(self)
         runtime.api!.set_callbacks(page, Unmanaged.passUnretained(self).toOpaque(), { context, event, json in
@@ -55,6 +57,16 @@ final class ChromiumTab: BrowserEngineTab {
             return MainActor.assumeIsolated {
                 let parent = Unmanaged<ChromiumTab>.fromOpaque(context).takeUnretainedValue()
                 let tab = ChromiumTab(runtime: parent.runtime, page: child, downloads: parent.downloads, profileID: parent.profileID, privateSessionID: parent.privateSessionID)
+                if tab.isAuxiliary {
+                    tab.onNotice = parent.onNotice
+                    tab.onBrowserCommand = { [weak parent] command in
+                        if command == "quit" { NSApp.terminate(nil) }
+                        else { parent?.onBrowserCommand?(command) }
+                    }
+                    tab.allowPopups = parent.allowPopups
+                    tab.updatePopupPolicy()
+                    return 1
+                }
                 let target = url.flatMap { URL(string: String(cString: $0)) }
                 let accepted = parent.onCreateWindow?(tab, target) == true
                 if !accepted { tab.dispose() }
@@ -173,6 +185,8 @@ final class ChromiumTab: BrowserEngineTab {
         case Int32(RADIUS_CEF_NOTICE):
             if let message = value["message"] as? String { onNotice?(message) }
         case Int32(RADIUS_CEF_CLOSED):
+            downloads.chromiumOwnerClosed(ids: downloadIDs)
+            downloadIDs.removeAll()
             page = nil; cancelRequests(); runtime.finishedClosing(self); onClose?()
         case Int32(RADIUS_CEF_ACTIVATE):
             onActivate?()

@@ -129,7 +129,7 @@ struct CustomizeView: View {
                     saved.requiredModuleIDs = requirements
                     app.library.preferences.savedConfigurations.append(saved)
                 }.disabled(setupName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                Button("Export…") { app.perform { app.saveFile(try JSONEncoder().encode(SetupPack(name: setupName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "My setup" : String(setupName.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100)), configuration: draft, requiredModuleIDs: requirements)), name: "Radius Setup.json", type: .json) } }
+                Button("Export…") { app.perform { exportSetup(SetupPack(name: setupName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "My setup" : String(setupName.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100)), configuration: draft, requiredModuleIDs: requirements)) } }
                 Button("Import…") { importSetup() }
             }
             Text("Setup files contain appearance, layout, and required module IDs. No history, notes, cookies, or permission grants are shared.").font(.caption).foregroundStyle(.secondary)
@@ -168,6 +168,11 @@ struct CustomizeView: View {
         case .liquidGlass: "Translucent native materials with clear boundaries. An interpretation of Liquid Glass that works on macOS 14 and later."
         case .graphite: "Neutral surfaces and crisp separators for a denser workspace."
         }
+    }
+    private func exportSetup(_ pack: SetupPack) throws {
+        let data = try JSONEncoder().encode(pack)
+        _ = try SetupPack.decode(data)
+        app.saveFile(data, name: "Radius Setup.json", type: .json)
     }
     private func importSetup() {
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.json]

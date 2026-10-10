@@ -55,6 +55,7 @@ extension AppState {
             for await (id, success) in group where success { results.insert(id) }
             return results
         }
+        if webkitResults.count < pending.count { notice = "Some website storage could not be removed. Quit and reopen Radius to retry before those Chromium profiles start." }
         for id in pending where webkitResults.contains(id) {
             do {
                 try await ChromiumRuntime.shared.clearWebsiteData(profileID: id, dataDirectory: dataDirectory)

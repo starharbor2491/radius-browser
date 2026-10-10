@@ -38,6 +38,5 @@ class BrowserEngineTab: NSObject, ObservableObject {
     func find(_ text: String, backwards: Bool = false) { preconditionFailure("An engine must implement find") }
     func pageHTML() async throws -> String { throw ValidationError("This engine cannot capture page HTML.") }
     func capturePNG() async throws -> Data { throw ValidationError("This engine cannot capture the page.") }
-    func saveScreenshot(app: AppState) { app.notice = "This engine cannot capture the page." }
     func dispose() { onChange = nil; onCreateWindow = nil; onClose = nil; onNotice = nil; onActivate = nil; onBrowserCommand = nil; allowPopups = nil }
 }

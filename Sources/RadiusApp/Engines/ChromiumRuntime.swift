@@ -25,7 +25,15 @@ final class ChromiumRuntime: ObservableObject {
     private var didShutDown = false
     func register(_ tab: ChromiumTab) { tabs[ObjectIdentifier(tab)] = tab }
     func retainWhileClosing(_ tab: ChromiumTab) { register(tab) }
-    func finishedClosing(_ tab: ChromiumTab) { tabs.removeValue(forKey: ObjectIdentifier(tab)) }
+    func finishedClosing(_ tab: ChromiumTab) {
+        tabs.removeValue(forKey: ObjectIdentifier(tab))
+        // Private auxiliary windows cannot outlive their native private session.
+        if let session = tab.privateSessionID, !tab.isAuxiliary,
+           !tabs.values.contains(where: { $0.privateSessionID == session && !$0.isAuxiliary }) {
+            for auxiliary in Array(tabs.values) where auxiliary.privateSessionID == session { auxiliary.dispose() }
+        }
+    }
+    var auxiliaryTabs: [ChromiumTab] { tabs.values.filter(\.isAuxiliary) }
     func reportCloseFailure(_ message: String) { status = message }
     var downloadCenters: [DownloadCenter] {
         var seen = Set<ObjectIdentifier>()

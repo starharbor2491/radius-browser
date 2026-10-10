@@ -67,6 +67,97 @@ struct DownloadsTests {
         #expect(item.staging == nil)
     }
 
+    @Test func closedDownloadOwnerPreservesFileWithoutClaimingTheWriterStopped() async throws {
+        let (center, item, directory) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let staging = try #require(item.staging)
+        var cancelRequests = 0
+        item.cancelChromium = { cancelRequests += 1 }
+
+        center.chromiumOwnerClosed(ids: ["download"])
+        center.chromiumOwnerClosed(ids: ["download"])
+
+        #expect(cancelRequests == 1)
+        #expect(item.cancellationRequested)
+        #expect(item.acknowledgementUnavailable)
+        #expect(!item.transferEnded)
+        #expect(!item.active)
+        #expect(!center.hasActive)
+        #expect(item.staging == staging)
+        #expect(try String(contentsOf: staging, encoding: .utf8) == "downloaded file")
+        #expect(item.status.contains("before cancellation was confirmed"))
+        #expect(item.status.contains("temporary file is retained"))
+
+        // Neither retrying nor shutdown may wait for an impossible callback,
+        // delete the file, or turn an unconfirmed close into "Finished".
+        center.cancel(item)
+        try await center.cancelAllAndWait(timeout: .zero)
+        try await center.cancelChromiumAndWait(ids: ["download"], timeout: .zero)
+        #expect(cancelRequests == 1)
+        #expect(!item.transferEnded)
+        #expect(FileManager.default.fileExists(atPath: staging.path))
+    }
+
+    @Test func ownerClosingWhileCancellationWaitsReleasesTheWaitAndKeepsStaging() async throws {
+        let (center, item, directory) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let staging = try #require(item.staging)
+        let closeOwner = Task { @MainActor in
+            await Task.yield()
+            center.chromiumOwnerClosed(ids: ["download"])
+        }
+
+        try await center.cancelChromiumAndWait(ids: ["download"], timeout: .seconds(1))
+        await closeOwner.value
+
+        #expect(item.acknowledgementUnavailable)
+        #expect(!item.transferEnded)
+        #expect(!center.hasActive)
+        #expect(FileManager.default.fileExists(atPath: staging.path))
+    }
+
+    @Test func lateCompletionAfterOwnerClosedNeverReplacesTheDestination() throws {
+        let (center, item, directory) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let staging = try #require(item.staging)
+        let destination = try #require(item.destination)
+        try Data("existing file".utf8).write(to: destination)
+        item.approvedReplacement = true
+
+        center.chromiumOwnerClosed(ids: ["download"])
+        center.updateChromium(id: "download", fraction: 0.8, complete: false, cancelled: false, interrupted: false)
+        #expect(FileManager.default.fileExists(atPath: staging.path))
+        #expect(!item.transferEnded)
+        #expect(try String(contentsOf: destination, encoding: .utf8) == "existing file")
+
+        // A real late terminal event confirms that cleanup is safe. The close
+        // already requested cancellation, so completion must not install a file.
+        center.updateChromium(id: "download", fraction: 1, complete: true, cancelled: false, interrupted: false)
+        #expect(try String(contentsOf: destination, encoding: .utf8) == "existing file")
+        #expect(!FileManager.default.fileExists(atPath: staging.path))
+        #expect(item.transferEnded)
+        #expect(!item.acknowledgementUnavailable)
+        #expect(item.status == "Cancelled")
+    }
+
+    @Test func closedOwnerDoesNotAbandonDownloadsFromOtherTabs() async throws {
+        let (center, item, directory) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let other = DownloadItem(chromiumID: "other-tab", sourceURL: nil, cancel: {
+            Issue.record("An unrelated source tab still owns this download")
+        })
+        center.items.append(other)
+
+        center.chromiumOwnerClosed(ids: ["download"])
+        try await center.cancelChromiumAndWait(ids: ["download"], timeout: .zero)
+
+        #expect(item.acknowledgementUnavailable)
+        #expect(other.active)
+        #expect(!other.acknowledgementUnavailable)
+        #expect(!other.cancellationRequested)
+        #expect(center.hasActive)
+    }
+
     @Test func tabCancellationWaitsForAcknowledgementAndLeavesOtherTabsAlone() async throws {
         let (center, item, directory) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }

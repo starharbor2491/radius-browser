@@ -22,6 +22,10 @@ final class DownloadItem: ObservableObject, Identifiable {
     var destinationPanel: NSSavePanel?
     var cancellationRequested = false
     var transferEnded = false
+    // Browser destruction stops CEF download callbacks without stopping its
+    // writer. This is distinct from receiving an actual terminal update.
+    var acknowledgementUnavailable = false
+    var awaitsTerminalUpdate: Bool { !transferEnded && !acknowledgementUnavailable }
     var progressObservation: NSKeyValueObservation?
     init(_ download: WKDownload) { self.download = download; chromiumID = nil }
     init(chromiumID: String, sourceURL: URL?, cancel: @escaping @MainActor @Sendable () -> Void) {
@@ -66,6 +70,26 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
             else { finish(item) }
         } else if item.active, fraction.isFinite {
             item.fraction = min(1, max(0, fraction))
+        }
+    }
+    /// Call before clearing the closed browser's command target. Mandatory CEF
+    /// closes can leave downloads running without any further status callbacks.
+    /// Preserve their files and let runtime shutdown stop the remaining writers.
+    func chromiumOwnerClosed(ids: Set<String>) {
+        for item in items where item.awaitsTerminalUpdate && item.chromiumID.map({ ids.contains($0) }) == true {
+            item.acknowledgementUnavailable = true
+            item.cancellationRequested = true
+            item.active = false
+            item.status = item.staging == nil
+                ? "Source tab closed before cancellation was confirmed."
+                : "Source tab closed before cancellation was confirmed. The incomplete temporary file is retained."
+            item.destinationPanel?.cancel(nil)
+            // Request cancellation even if an earlier request timed out. Set
+            // state first because a callback can deliver a real terminal update
+            // synchronously; that update may safely perform the usual cleanup.
+            let cancel = item.cancelChromium
+            item.cancelChromium = nil
+            cancel?()
         }
     }
     private func chooseDestination(for item: DownloadItem, suggestedName: String, completion: @MainActor @Sendable (URL?) -> Void) {
@@ -150,6 +174,7 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
     }
     private func endTransfer(_ item: DownloadItem) {
         item.transferEnded = true; item.progressObservation = nil; item.cancelChromium = nil
+        item.acknowledgementUnavailable = false
     }
     func cancel(_ item: DownloadItem) {
         guard item.active else { return }
@@ -168,25 +193,27 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
         }
     }
     func cancelAll() { items.filter(\.active).forEach(cancel) }
+    /// Owner-closed downloads cannot acknowledge cancellation. Keep their files
+    /// and allow the caller to proceed to Chromium shutdown instead of waiting.
     func cancelAllAndWait(timeout: Duration = .seconds(10)) async throws {
-        try await cancelAndWait(items.filter { !$0.transferEnded }, timeout: timeout)
+        try await cancelAndWait(items.filter(\.awaitsTerminalUpdate), timeout: timeout)
     }
     func cancelChromiumAndWait(ids: Set<String>, timeout: Duration = .seconds(10)) async throws {
         try await cancelAndWait(items.filter { item in
-            !item.transferEnded && item.chromiumID.map { ids.contains($0) } == true
+            item.awaitsTerminalUpdate && item.chromiumID.map { ids.contains($0) } == true
         }, timeout: timeout)
     }
     private func cancelAndWait(_ pending: [DownloadItem], timeout: Duration) async throws {
         pending.forEach(cancel)
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
-        while pending.contains(where: { !$0.transferEnded }) {
+        while pending.contains(where: \.awaitsTerminalUpdate) {
             try Task.checkCancellation()
             if clock.now >= deadline {
                 // An engine failure may prevent the final callback. Keep both the
                 // item and staging file intact so a late update can still clean
                 // up safely, and allow the user to retry cancellation.
-                for item in pending where !item.transferEnded {
+                for item in pending where item.awaitsTerminalUpdate {
                     item.active = true
                     item.status = item.staging == nil
                         ? "Cancellation not confirmed. Try cancelling again."
@@ -197,5 +224,5 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
             try await clock.sleep(until: min(deadline, clock.now.advanced(by: .milliseconds(50))))
         }
     }
-    var hasActive: Bool { items.contains { !$0.transferEnded } }
+    var hasActive: Bool { items.contains(where: \.awaitsTerminalUpdate) }
 }
