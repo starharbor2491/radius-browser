@@ -24,7 +24,7 @@ jobs:
       - name: Verify native integration in release configuration
         env:
           RADIUS_DISTRIBUTION_TEST_APP: ${{ github.workspace }}/dist/Radius.app
-        run: swift test -c release --filter 'BrowserIntegrationTests|ResourceModuleTests|ReaderModuleTests|BehaviorModuleTests|DistributionNativeTests|DownloadsTests|ProfilesIntegrationTests|ChromiumProfileDataTests'
+        run: python3 scripts/native-tests.py -c release --filter 'BrowserIntegrationTests|ResourceModuleTests|ReaderModuleTests|BehaviorModuleTests|DistributionNativeTests|DownloadsTests|ProfilesIntegrationTests|ChromiumProfileDataTests'
       - name: Package graphical development installer
         run: python3 scripts/package-release.py --development
       - name: Launch packaged app and capture native screens
