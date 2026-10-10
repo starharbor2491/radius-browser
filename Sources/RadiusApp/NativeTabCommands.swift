@@ -1,15 +1,20 @@
 // SPDX-License-Identifier: MPL-2.0
 import AppKit
 
-/// Chrome auxiliary windows have no SwiftUI scene. Keep their tab commands
+/// Chrome auxiliary windows have no SwiftUI scene. Keep navigation commands
 /// owned by the application and resolve the real key window on every use.
 @MainActor
 final class NativeTabCommands: NSObject, NSMenuItemValidation {
     private var items: [NSMenuItem] = []
+    private let locationItem: NSMenuItem
     private var installing = false
 
     override init() {
+        locationItem = NSMenuItem(title: "Open location…", action: #selector(openLocation(_:)), keyEquivalent: "l")
         super.init()
+        locationItem.identifier = NSUserInterfaceItemIdentifier("radius.location")
+        locationItem.keyEquivalentModifierMask = .command
+        locationItem.target = self
         let definitions: [(String, String, String, NSEvent.ModifierFlags)] = [
             ("new", "New tab", "t", .command),
             ("reopen", "Reopen closed tab", "t", [.command, .shift]),
@@ -30,9 +35,8 @@ final class NativeTabCommands: NSObject, NSMenuItemValidation {
         guard let mainMenu, !installing else { return }
         installing = true
         defer { installing = false }
-        // These unique shortcuts belong to Radius's remaining SwiftUI commands.
-        // They locate the standard groups without depending on localized titles
-        // or changing any SwiftUI-owned item's action, target or enabled state.
+        // Declared shortcuts locate the standard groups independently of their
+        // localized titles. Replace the disabled location anchor with owned dispatch.
         let menus = mainMenu.items.compactMap(\.submenu)
         if let file = menus.first(where: { shortcut("n", [.command, .shift], in: $0) != nil }),
            let newWindow = shortcut("n", [.command, .shift], in: file) {
@@ -52,6 +56,10 @@ final class NativeTabCommands: NSObject, NSMenuItemValidation {
         }
         if let browse = menus.first(where: { shortcut("l", .command, in: $0) != nil }),
            let switchPane = shortcut("`", [.command, .option], in: browse) {
+            if let previousLocation = shortcut("l", .command, in: browse), previousLocation !== locationItem {
+                place(locationItem, in: browse, before: previousLocation)
+                browse.removeItem(previousLocation)
+            }
             place(items[4], in: browse, before: switchPane)
             place(items[3], in: browse, before: items[4])
             browse.autoenablesItems = true
@@ -70,8 +78,12 @@ final class NativeTabCommands: NSObject, NSMenuItemValidation {
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        guard let command = command(for: menuItem), let app = AppDelegate.state,
-              !app.finalQuitDataFrozen, !ChromiumRuntime.shared.finalQuitFrozen else { return false }
+        guard let app = AppDelegate.state, !app.finalQuitDataFrozen,
+              !ChromiumRuntime.shared.finalQuitFrozen else { return false }
+        if menuItem === locationItem {
+            return ChromiumRuntime.shared.focusedNativeTab != nil || focusedBrowser?.app === app
+        }
+        guard let command = command(for: menuItem) else { return false }
         if ChromiumRuntime.shared.focusedNativeTab != nil { return true }
         guard let browser = focusedBrowser, browser.app === app else { return false }
         if case .reopen = command { return browser.hasNativeTabs || !browser.closedTabs.isEmpty }
@@ -84,6 +96,15 @@ final class NativeTabCommands: NSObject, NSMenuItemValidation {
             _ = tab.performNativeTabCommand(command)
         } else {
             focusedBrowser?.performTabCommand(command)
+        }
+    }
+
+    @objc private func openLocation(_ sender: NSMenuItem) {
+        guard sender === locationItem, validateMenuItem(sender) else { return }
+        if let tab = ChromiumRuntime.shared.focusedNativeTab {
+            _ = tab.focusAddressBar()
+        } else if let browser = focusedBrowser {
+            NotificationCenter.default.post(name: .radiusFocusAddress, object: browser.session.id)
         }
     }
 

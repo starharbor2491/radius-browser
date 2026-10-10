@@ -70,7 +70,8 @@ struct BrowserCommands: Commands {
         }
         CommandMenu("Browse") {
             Group {
-                Button("Open location…") { NotificationCenter.default.post(name: .radiusFocusAddress, object: browser?.session.id) }.keyboardShortcut("l").disabled(browser == nil)
+                // NativeTabCommands replaces this anchor with current-window dispatch.
+                Button("Open location…") {}.keyboardShortcut("l").disabled(true)
                 Button("Reload page") { browser?.activeWebTab.reload() }.keyboardShortcut("r").disabled(browser?.hasPage != true)
                 Button("Find in page…") { NotificationCenter.default.post(name: .radiusFind, object: browser?.session.id) }.keyboardShortcut("f").disabled(browser?.hasPage != true)
                 Divider()

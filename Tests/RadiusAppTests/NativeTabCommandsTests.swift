@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 import AppKit
+import os
 import Testing
 @testable import RadiusApp
 
@@ -33,6 +34,14 @@ extension NativeIntegrationTests.BrowserIntegrationTests {
         commands.install(in: menu)
         let file = try #require(menu.items[0].submenu)
         let browse = try #require(menu.items[1].submenu)
+        let location = try #require(browse.items.first { $0.identifier?.rawValue == "radius.location" })
+        let requests = OSAllocatedUnfairLock(initialState: [UUID]())
+        let observer = NotificationCenter.default.addObserver(forName: .radiusFocusAddress, object: nil, queue: nil) { notification in
+            guard let id = notification.object as? UUID else { return }
+            requests.withLock { $0.append(id) }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        func performLocation() { browse.performActionForItem(at: browse.index(of: location)) }
         func item(_ id: String) throws -> NSMenuItem {
             try #require((file.items + browse.items).first { $0.identifier?.rawValue == "radius.tab." + id })
         }
@@ -44,7 +53,9 @@ extension NativeIntegrationTests.BrowserIntegrationTests {
         let original = first.session.selectedTabID
         try await focusCommandWindow(firstWindow)
         file.update(); browse.update()
-        #expect(new.isEnabled && !reopen.isEnabled)
+        #expect(new.isEnabled && !reopen.isEnabled && location.isEnabled)
+        performLocation()
+        #expect(requests.withLock { $0 } == [first.session.id])
         try perform("new")
         #expect(first.session.tabs.count == 2 && second.session.tabs.count == 1)
         let added = first.session.selectedTabID
@@ -62,6 +73,8 @@ extension NativeIntegrationTests.BrowserIntegrationTests {
         // the new actual key window instead of retaining the previous model.
         file.update()
         try await focusCommandWindow(secondWindow)
+        performLocation()
+        #expect(requests.withLock { $0 } == [first.session.id, second.session.id])
         try perform("new")
         #expect(second.session.tabs.count == 2 && first.session.tabs.count == 2)
         let firstSnapshot = first.session, secondSnapshot = second.session
@@ -72,19 +85,24 @@ extension NativeIntegrationTests.BrowserIntegrationTests {
             #expect(NSApp.sendAction(try #require(entry.action), to: entry.target, from: entry))
         }
         #expect(first.session == firstSnapshot && second.session == secondSnapshot)
+        #expect(requests.withLock { $0 } == [first.session.id, second.session.id])
         app.unfreezeQuitData()
         file.update()
         #expect(new.isEnabled)
 
         try await focusCommandWindow(otherWindow)
-        file.update()
-        #expect(!new.isEnabled)
+        file.update(); browse.update()
+        #expect(!new.isEnabled && !location.isEnabled)
+        #expect(NSApp.sendAction(try #require(location.action), to: location.target, from: location))
+        #expect(requests.withLock { $0 } == [first.session.id, second.session.id])
         #expect(NSApp.sendAction(try #require(new.action), to: new.target, from: new))
         #expect(first.session == firstSnapshot && second.session == secondSnapshot)
         try await focusCommandWindow(secondWindow)
         second.closeWindow()
-        file.update()
-        #expect(!new.isEnabled)
+        file.update(); browse.update()
+        #expect(!new.isEnabled && !location.isEnabled)
+        #expect(NSApp.sendAction(try #require(location.action), to: location.target, from: location))
+        #expect(requests.withLock { $0 } == [first.session.id, second.session.id])
         #expect(NSApp.sendAction(try #require(new.action), to: new.target, from: new))
         #expect(second.session == secondSnapshot)
     }
@@ -118,8 +136,8 @@ extension NativeIntegrationTests.BrowserIntegrationTests {
         #expect(dictation.target === NSApp && emoji.target == nil)
         let originals = menu.items.prefix(2).flatMap { $0.submenu?.items ?? [] }
         let owned = originals.filter { $0.target === commands }
-        #expect(owned.count == 5)
-        #expect(Set(owned.compactMap { $0.identifier?.rawValue }).count == 5)
+        #expect(owned.count == 6)
+        #expect(Set(owned.compactMap { $0.identifier?.rawValue }).count == 6)
         #expect(owned.allSatisfy { $0.action != nil })
         commands.install(in: menu)
         #expect(menu.items.prefix(2).flatMap { $0.submenu?.items ?? [] } == originals)
@@ -130,8 +148,8 @@ extension NativeIntegrationTests.BrowserIntegrationTests {
         let restored = replacement.items.flatMap { $0.submenu?.items ?? [] }.filter { $0.target === commands }
         #expect(restored == owned)
         #expect(menu.items.prefix(2).flatMap { $0.submenu?.items ?? [] }.allSatisfy { $0.target !== commands })
-        #expect(restored.map(\.keyEquivalent) == ["t", "t", "w", "[", "]"])
-        #expect(restored.map(\.keyEquivalentModifierMask) == [.command, [.command, .shift], .command, [.command, .shift], [.command, .shift]])
+        #expect(restored.map(\.keyEquivalent) == ["t", "t", "w", "l", "[", "]"])
+        #expect(restored.map(\.keyEquivalentModifierMask) == [.command, [.command, .shift], .command, .command, [.command, .shift], [.command, .shift]])
     }
 
     private func focusCommandWindow(_ window: NSWindow) async throws {
