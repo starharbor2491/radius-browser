@@ -46,6 +46,7 @@ final class ChromiumTab: BrowserEngineTab {
         hostView = Unmanaged<NSView>.fromOpaque(runtime.api!.native_view(page)!).takeUnretainedValue()
         isAuxiliary = hostView.value(forKey: "auxiliary") as? Bool == true
         super.init()
+        chromeStyle = hostView.value(forKey: "chromeStyle") as? Bool == true
         runtime.register(self)
         runtime.api!.set_callbacks(page, Unmanaged.passUnretained(self).toOpaque(), { context, event, json in
             guard let context, let json else { return }
@@ -63,8 +64,8 @@ final class ChromiumTab: BrowserEngineTab {
                         switch command {
                         case "quit": NSApp.terminate(nil)
                         case "closeTab", "closeWindow": tab?.dispose()
-                        case "newWindow": Self.performApplicationMenuItem("New window")
-                        case "privateWindow": Self.performApplicationMenuItem("New private window")
+                        case "newWindow": ChromiumTab.performApplicationMenuItem("New window")
+                        case "privateWindow": ChromiumTab.performApplicationMenuItem("New private window")
                         case "downloads": tab?.downloads.showWindow()
                         default: break
                         }

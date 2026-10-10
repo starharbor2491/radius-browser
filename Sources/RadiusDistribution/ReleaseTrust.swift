@@ -1,9 +1,22 @@
 // SPDX-License-Identifier: MPL-2.0
 import Foundation
 import Security
+import Darwin
 import RadiusCore
 
 public enum ReleaseTrust {
+    /// A universal replacement launches natively, including when its current
+    /// browser process runs under Rosetta. Choose the target Mac's CPU rather
+    /// than sealing an Intel engine into a future Apple silicon host.
+    public static var platformArchitecture: String {
+        #if arch(arm64)
+        return "arm64"
+        #else
+        var appleSilicon: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        return sysctlbyname("hw.optional.arm64", &appleSilicon, &size, nil, 0) == 0 && appleSilicon == 1 ? "arm64" : "x86_64"
+        #endif
+    }
     /// Publisher identity comes from the currently running signed app, never from
     /// an imported manifest, a hash supplied beside a download, or user defaults.
     public static func publisherTeam(of app: URL) throws -> String {
@@ -37,9 +50,14 @@ public enum ReleaseTrust {
         }
     }
     public static func metadata(of app: URL, requireCompatibleArchitecture: Bool = true) throws -> DistributionRelease {
-        guard let bundle = Bundle(url: app), bundle.bundleIdentifier == "org.radius.browser",
-              bundle.executableURL?.lastPathComponent == "Radius",
-              bundle.infoDictionary?["CFBundlePackageType"] as? String == "APPL" else {
+        // Foundation caches Bundle metadata for a URL. The same destination URL
+        // contains a different app after atomic replacement, so read its sealed
+        // property list and executable header directly on every verification.
+        let infoPath = app.appendingPathComponent("Contents/Info.plist")
+        guard let info = try PropertyListSerialization.propertyList(from: boundedData(at: infoPath, maximum: 65_536), format: nil) as? [String: Any],
+              info["CFBundleIdentifier"] as? String == "org.radius.browser",
+              info["CFBundleExecutable"] as? String == "Radius",
+              info["CFBundlePackageType"] as? String == "APPL" else {
             throw ValidationError("Choose a complete Radius application or Radius installer.")
         }
         let path = app.appendingPathComponent("Contents/Resources/Distribution.json")
@@ -49,17 +67,21 @@ public enum ReleaseTrust {
             throw ValidationError("This Radius release has no valid distribution metadata.")
         }
         let release = try JSONDecoder().decode(DistributionRelease.self, from: boundedData(at: path, maximum: 4096))
-        guard bundle.infoDictionary?["CFBundleVersion"] as? String == String(release.build),
-              bundle.infoDictionary?["CFBundleShortVersionString"] as? String == release.version else {
+        guard info["CFBundleVersion"] as? String == String(release.build),
+              info["CFBundleShortVersionString"] as? String == release.version else {
             throw ValidationError("The release version does not match the signed application.")
         }
-        #if arch(arm64)
-        let architecture = "arm64", cpu = 16_777_228
-        #else
-        let architecture = "x86_64", cpu = 16_777_223
-        #endif
-        guard !requireCompatibleArchitecture || bundle.executableArchitectures?.contains(NSNumber(value: cpu)) == true else {
-            throw ValidationError("The Radius executable does not support this Mac.")
+        guard let minimum = info["LSMinimumSystemVersion"] as? String,
+              release.minimumMacOS == nil || release.minimumMacOS == minimum else {
+            throw ValidationError("The macOS requirement does not match the signed application.")
+        }
+        if requireCompatibleArchitecture { try DistributionRelease.validateMinimumMacOS(minimum) }
+        let architecture = platformArchitecture
+        let cpu: UInt32 = architecture == "arm64" ? 16_777_228 : 16_777_223
+        if requireCompatibleArchitecture {
+            guard try executableSupportsCPU(app.appendingPathComponent("Contents/MacOS/Radius"), cpu: cpu) else {
+                throw ValidationError("The Radius executable does not support this Mac.")
+            }
         }
         let runtime = app.appendingPathComponent("Contents/Frameworks/Chromium.radiusengine", isDirectory: true)
         let hasChromium = FileManager.default.fileExists(atPath: runtime.path)
@@ -72,6 +94,30 @@ public enum ReleaseTrust {
             try engine.validate(release: release, architecture: requireCompatibleArchitecture ? architecture : nil)
         }
         return release
+    }
+    private static func executableSupportsCPU(_ executable: URL, cpu: UInt32) throws -> Bool {
+        let values = try executable.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+        guard values.isRegularFile == true, values.isSymbolicLink != true else { return false }
+        let handle = try FileHandle(forReadingFrom: executable)
+        defer { try? handle.close() }
+        let header = [UInt8](try handle.read(upToCount: 4096) ?? Data())
+        func word(_ offset: Int, littleEndian: Bool = false) -> UInt32? {
+            guard offset >= 0, offset + 4 <= header.count else { return nil }
+            let bytes = Array(header[offset..<(offset + 4)])
+            return (littleEndian ? Array(bytes.reversed()) : bytes).reduce(0) { ($0 << 8) | UInt32($1) }
+        }
+        guard let magic = word(0) else { return false }
+        switch magic {
+        case 0xfeedface, 0xfeedfacf: return word(4) == cpu
+        case 0xcefaedfe, 0xcffaedfe: return word(4, littleEndian: true) == cpu
+        case 0xcafebabe, 0xcafebabf, 0xbebafeca, 0xbfbafeca:
+            let littleEndian = magic == 0xbebafeca || magic == 0xbfbafeca
+            let stride = magic == 0xcafebabf || magic == 0xbfbafeca ? 32 : 20
+            guard let count = word(4, littleEndian: littleEndian), count > 0, count <= 64,
+                  8 + Int(count) * stride <= header.count else { return false }
+            return (0..<Int(count)).contains { word(8 + $0 * stride, littleEndian: littleEndian) == cpu }
+        default: return false
+        }
     }
     private static func boundedData(at file: URL, maximum: Int) throws -> Data {
         let handle = try FileHandle(forReadingFrom: file)

@@ -65,6 +65,7 @@ struct ProfilesIntegrationTests {
         #expect((app.library.pendingProfileDeletions ?? []).isEmpty)
         #expect(!FileManager.default.fileExists(atPath: removedPath.path))
         #expect(try Data(contentsOf: keptPath) == Data("keep".utf8))
+        #expect(await cookieValues(profileID: removed.id).isEmpty)
         #expect(await cookieValues(profileID: kept.id) == ["keep"])
         let database = try LibraryDatabase(url: directory.appendingPathComponent("library.sqlite"))
         let saved = try await database.load()

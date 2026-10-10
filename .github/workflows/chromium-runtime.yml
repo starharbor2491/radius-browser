@@ -56,6 +56,8 @@ jobs:
           RADIUS_CHROMIUM_WEBSTORE_TEST: "1"
           RADIUS_CHROMIUM_PACKAGE: ${{ runner.temp }}/radius-cef-runtime/Chromium-${{ matrix.arch }}.radiusengine
         run: ./scripts/smoke-app.sh
+      - name: Verify Chrome Web Store extension survives process restart
+        run: python3 scripts/smoke-chromium-restart.py
       - name: Package graphical development installer
         run: python3 scripts/package-release.py --development
       - name: Archive development runtime

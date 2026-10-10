@@ -331,11 +331,7 @@ final class DistributionManager: ObservableObject {
         return max(currentEpoch, accepted)
     }
     nonisolated private static var architecture: String {
-        #if arch(arm64)
-        "arm64"
-        #else
-        "x86_64"
-        #endif
+        ReleaseTrust.platformArchitecture
     }
     nonisolated private static func verify(_ app: URL, team: String, current: DistributionRelease, floor: Int) throws {
         try ReleaseTrust.verifyBundleTree(app)

@@ -25,6 +25,13 @@ enum AppSmokeTest {
             }
             guard let app = AppDelegate.state, let window = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }),
                   let browser = app.windows.values.compactMap(\.model).first else { throw ValidationError("Browser state is unavailable.") }
+            if ProcessInfo.processInfo.environment["RADIUS_CHROMIUM_EXTENSION_RESTART"] == "1" {
+                try await ChromiumAcceptance.verifyStoreRestart(app: app)
+                guard await app.flush() else { throw ValidationError(app.notice ?? "Could not save restart acceptance data.") }
+                trace("Chromium real-process restart acceptance passed")
+                NSApp.perform(#selector(NSApplication.terminate(_:)), with: nil, afterDelay: 0)
+                return
+            }
             trace("Browser window opened")
             app.library.preferences.completedOnboarding = true
             browser.panel = .resources
@@ -201,6 +208,13 @@ enum AppSmokeTest {
                         try await Task.sleep(for: .milliseconds(100))
                     }
                     guard window.isVisible, browser.activeWebTab.engineID == .webkit else { throw ValidationError("Closing Chromium also closed the native window or WebKit pane.") }
+                    trace("Leaving the native extension manager open to verify quit ownership")
+                    browser.sheet = .extensions
+                    let managerDeadline = ContinuousClock.now.advanced(by: .seconds(15))
+                    while ChromiumRuntime.shared.api?.live_pages() == 0 {
+                        guard ContinuousClock.now < managerDeadline else { throw ValidationError("The native extension sheet did not create its managed page.") }
+                        try await Task.sleep(for: .milliseconds(100))
+                    }
                     trace("Embedded Chromium runtime check passed")
                 }
             }

@@ -1,36 +1,29 @@
-# V1 development status
+# Radius v1 implementation and release status
 
-Radius is a usable native browser development build. It is **not the complete consumer product** defined in PRODUCT_PLAN.md. The standard app browses with WebKit; the optional development bundle adds embedded Chromium Alloy. The interface identifies available engines and unsupported capabilities.
+The v1 implementation combines a native WebKit browser, optional Chrome-style Chromium, 18 module packages, a graphical customization editor, and a verified complete-application installer. Native acceptance is being rerun for the current source; the earlier Alloy artifacts do not certify this implementation.
 
-| Capability | Current scope |
+| Area | Implemented behavior |
 | --- | --- |
-| Native browsing | WebKit windows/tabs, navigation, search, find, zoom, popup controls, dialogs, media prompts, downloads, crash reload |
-| Chromium variant | Native CEF Alloy tab adapter; explicit reopen and default for future tabs; separate engine stores; reader and capture. Runtime must be embedded at build time; Chromium downloads, media, and Chrome extensions are unavailable |
-| Profiles/privacy | Separate persistent stores per profile and engine; a separate temporary context per private window; no private history/session/notes persistence |
-| Local data | Actor-backed SQLite, transactional state, stale-save protection, bounded imports, original-data-preserving recovery; no password database or encryption claim |
-| Executable modules | Resource Monitor, Memory Breakdown, and Reader use independently installed native worker packages. Reader extracts text from a bounded HTML snapshot on request and exits. Exclusive provider replacement stops/reaps the prior worker; disable stops execution; uninstall deletes the installed executable. Factory reinstall payloads remain in the sealed application |
-| Host modules | Notes, Page Capture, and Focus Mode are removable capability descriptors; their implementations remain compiled into the native host |
-| Package trust/updates | Native workers must exactly match a trusted bundled package. Arbitrary imported native code is rejected. Bundled updates and explicit repair/reinstall are available; no remote catalog/update service or OS permission sandbox for workers |
-| Appearance | macOS, Material-inspired, Liquid Glass-inspired, Graphite; light/dark/system, accent, density, corners, transparency, reduced motion. Vendor design systems are interpretations |
-| Layout/tabs | All four tab edges, pin/drag/menu reorder, vertical trees, independent resizable side-by-side/stacked panes, navigation top/bottom, sidebar left/right/hidden and width, bookmarks/status bars |
-| Setup sharing | Configuration only; preview, undo, named setups, bounded import/export. Split preview leaves browsing tabs unchanged |
-| Recovery | Native interface restore, module reset/backups, write retry, database recovery preserving originals, explicit return to WebKit |
-| Distribution | Universal app/worker builder and architecture-specific optional Chromium bundles; development signatures only. No Developer ID/notarization, DMG, automatic app updater, or consumer engine installer |
-| Other plan items | Arbitrary component rearrangement, fonts/icon packs, dependency-bearing setup packs, general removable behavior providers, password/sync/translation providers, and a curated remote catalog are not implemented |
+| Browsing | Multiple windows/profiles, tabs on four edges, pin/reorder/reopen, native history/bookmarks/import, find, zoom, downloads, popup/dialog/media controls, and engine crash recovery |
+| Engines | WebKit by default; Chrome-style CEF Views with Chromium browser services. Tabs can reopen with another engine; each engine retains separate sign-ins |
+| Extensions | Native profile selector, Chrome extension manager and Web Store. Target: MV3 content scripts, service workers, scripting/storage, permissions, actions/popups, options and side panels. Extension-created Chrome windows are managed auxiliary windows; tab/window organization differs from Chrome |
+| Modules | Three independently installed native workers, three bounded behavior programs, twelve declarative packages. Installed payloads are removed on uninstall. Required tab systems and exclusive providers have validated, transactional replacement |
+| Catalogs | Official bundled packages, graphical local package/catalog import, bounded HTTPS community catalogs, payload integrity receipts, publisher and permission previews, dependency/version validation |
+| Appearance | macOS, Material, Liquid Glass, Graphite; typography, text/spacing scales, icon packs, colors and contrast feedback, borders/shadows, density/corners, component overrides and accessibility preferences |
+| Layout | Tabs on four edges, trees, split panes, multiple toolbar regions, draggable controls with keyboard placement/reorder, address/tab widths, sidebars on either side, responsive second panel, automatic sidebar hiding, menus and start widgets |
+| Setups | Preview, undo, saved configurations and bounded import/export with module requirements. Dependencies and activation permissions are reviewed before atomic application; browsing data and permission grants are excluded |
+| Privacy | Separate engine/profile stores; temporary private stores; no private browsing metadata/notes. Comprehensive profile deletion and website-data clearing have durable restart cleanup, scope checks and failure recovery |
+| Recovery | Native settings/modules/recovery survive engine failure; original-preserving library/module backups, configuration restore, write retry, safe return to WebKit, interrupted-package rollback |
+| Distribution | Universal WebKit app plus architecture-specific Chromium payloads in the same app. Graphical DMGs and signed update/offline-import flows stage a whole verified app, then activate with a READY-confirmed helper after explicit restart |
 
-## Verification
+## Verification boundary
 
-The suite currently contains 30 portable tests (25 core and 5 reader-parser tests) and 19 native integration tests. Portable checks include SQLite/state recovery, bounded imports, bookmark entities and hostile malformed input, tree/split normalization, package transactions, executable payload removal, exclusive resource-provider selection, damaged-package repair, interrupted updates, and symlink rejection. Native checks use real WebKit views and native resource workers for privacy, profile changes, popup openers, generated subframes, dialogs, split state, engine descriptors, worker replacement/removal, rejection of damaged replacement candidates, retained notes, repair after relaunch, and one-shot Reader extraction/uninstall.
+The current portable suite passes 60 tests, including database recovery, hostile imports, profile deletion/rollback, compatibility bounds, module installation and interrupted transaction rollback, publisher/ABI/update policy, and downgrade rejection. All 18 factory packages validate. Native tests additionally exercise real WebKit storage, downloads, module workers and app installation staging. Current macOS results and artifacts will be recorded in AUDIT.md after their runs finish.
 
-The standard application workflow builds both CPU architectures, verifies signatures, and launches the packaged app with isolated data. It captures appearance/control screens and checks real HTTP browsing, split panes, reader extraction, saving, and ordinary termination. The separate embedded Chromium workflow runs on native ARM and Intel, including HTTPS, content capture, context isolation, popup adoption, pre-initialization cancellation, close, and ordinary quit. See [AUDIT.md](AUDIT.md) for the specific successful source/run evidence; failed or earlier runs do not certify a later commit.
+The Chromium workflow runs on ARM and Intel. It must pass actual embedded HTTP/HTTPS rendering, Reader/capture, profile/private isolation, popup/auxiliary lifetime, Chrome toolbar geometry/focus, MV3 lifecycle, genuine Web Store installation, and ordinary shutdown. Building the bridge or loading an unpacked fixture alone does not establish Web Store compatibility.
 
-## Consumer release gates
+Developer ID and notarization credentials are not configured. Development artifacts are ad-hoc signed and unnotarized. The production workflow requires those credentials, signs nested code with hardened runtime, notarizes/staples the app and DMG, and fails closed if trust is unavailable. Development builds do not enable the trusted network installer by weakening publisher verification.
 
-1. Preserve passing native CI for the packaged source and perform the interactive [clean-Mac checklist](TESTING.md), including visible Chromium composition on a clean Mac, VoiceOver, IME, representative websites, media permissions, download races, recovery, and session/focus behavior. The source and artifacts in AUDIT.md pass native CI; those automated checks do not replace interactive acceptance.
-2. Provide a supported Chrome-style embedding architecture for the required Chrome extensions, then pass consumer installation, Manifest V3 APIs, restart/update/removal, and isolation checks in [CHROMIUM.md](CHROMIUM.md). CEF native-parent Alloy is insufficient.
-3. Implement a signed consumer engine install/update/removal flow and an offline installer with the same application behavior.
-4. Complete the remaining module/component requirements before advertising the broader plan's modularity. Three current optional behaviors remain in the host, and the catalog/update service is local only.
-5. Supply Developer ID and notarization credentials; configure/verify hardened runtime; notarize/staple and install on a clean Mac. No signing identity is configured in this workspace.
-6. Measure launch, idle CPU, full browser-process memory, keyboard latency, and battery behavior before making performance claims.
+Interactive clean-Mac acceptance remains necessary for signing/distribution, VoiceOver, IME, multiple displays, media prompts and representative websites. No benchmark or universal extension-compatibility claim is made. Password, sync, translation, further engines and interchangeable engine internals are ecosystem expansion examples rather than shipped providers.
 
-No weekly usage-limit reset was invoked.
+No weekly usage-limit reset was invoked by the agent.

@@ -141,4 +141,20 @@ final class DistributionTests: XCTestCase {
         XCTAssertThrowsError(try JSONDecoder().decode(DistributionEngineManifest.self, from: booleanABI))
     }
 
+    func testReleaseRejectsUnsupportedMacOSAndKeepsLegacyMetadataCompatible() throws {
+        let current = DistributionRelease(build: 20, version: "1.0.0", securityEpoch: 154, architecture: "universal", chromium: false)
+        let candidate = DistributionRelease(build: 21, version: "1.0.1", securityEpoch: 154, architecture: "arm64", chromium: true, minimumMacOS: "14.5")
+        let oldOS = OperatingSystemVersion(majorVersion: 14, minorVersion: 4, patchVersion: 99)
+        XCTAssertThrowsError(try candidate.validate(current: current, minimumEpoch: 154, architecture: "arm64", operatingSystemVersion: oldOS))
+        try candidate.validate(current: current, minimumEpoch: 154, architecture: "arm64", operatingSystemVersion: OperatingSystemVersion(majorVersion: 14, minorVersion: 5, patchVersion: 0))
+        try candidate.validate(current: current, minimumEpoch: 154, architecture: "arm64", operatingSystemVersion: OperatingSystemVersion(majorVersion: 15, minorVersion: 0, patchVersion: 0))
+        for invalid in ["", "14", "14..5", "14.5beta", "-14.5", "14.5.0.0", "14.1000"] {
+            XCTAssertThrowsError(try DistributionRelease.validateMinimumMacOS(invalid, operatingSystemVersion: oldOS))
+        }
+        let legacy = Data(#"{"format":1,"build":20,"version":"1.0.0","securityEpoch":154,"architecture":"universal","chromium":false}"#.utf8)
+        let decoded = try JSONDecoder().decode(DistributionRelease.self, from: legacy)
+        XCTAssertNil(decoded.minimumMacOS)
+        try decoded.validate(current: current, minimumEpoch: 154, architecture: "arm64", operatingSystemVersion: OperatingSystemVersion(majorVersion: 14, minorVersion: 0, patchVersion: 0))
+    }
+
 }

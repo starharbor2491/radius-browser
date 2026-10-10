@@ -218,15 +218,18 @@ public struct DeclarativeModulePackage: Codable, Equatable, Sendable {
     }
     public func payload() throws -> Data {
         try manifest.validate()
+        let payload: Data
         switch manifest.runtime {
         case .behaviorProgram:
             guard let program, definition == nil else { throw ValidationError("A behavior package needs its program.") }
-            try program.validate(capability: manifest.capability); return try JSONEncoder().encode(program)
+            try program.validate(capability: manifest.capability); payload = try JSONEncoder().encode(program)
         case .declarative:
             guard let definition, program == nil else { throw ValidationError("A declarative package needs its definition.") }
-            try definition.validate(capability: manifest.capability); return try JSONEncoder().encode(definition)
+            try definition.validate(capability: manifest.capability); payload = try JSONEncoder().encode(definition)
         default: throw ValidationError("Community packages cannot contain native code or descriptor-only features.")
         }
+        guard payload.count <= 128 * 1024 else { throw ValidationError("A module's payload exceeds 128 KB.") }
+        return payload
     }
     public static func decode(_ data: Data) throws -> Self {
         guard data.count <= 192 * 1024 else { throw ValidationError("Local packages exceed 192 KB.") }

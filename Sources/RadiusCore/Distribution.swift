@@ -10,11 +10,14 @@ public struct DistributionRelease: Codable, Equatable, Sendable {
     public let securityEpoch: Int
     public let architecture: String
     public let chromium: Bool
-    public init(build: Int, version: String, securityEpoch: Int, architecture: String, chromium: Bool) {
+    public let minimumMacOS: String?
+    public init(build: Int, version: String, securityEpoch: Int, architecture: String, chromium: Bool, minimumMacOS: String = "14.0") {
         self.format = 1; self.build = build; self.version = version
         self.securityEpoch = securityEpoch; self.architecture = architecture; self.chromium = chromium
+        self.minimumMacOS = minimumMacOS
     }
-    public func validate(current: DistributionRelease, minimumEpoch: Int, architecture: String) throws {
+    public func validate(current: DistributionRelease, minimumEpoch: Int, architecture: String, operatingSystemVersion: OperatingSystemVersion? = nil) throws {
+        try Self.validateMinimumMacOS(minimumMacOS ?? "14.0", operatingSystemVersion: operatingSystemVersion)
         guard format == 1, build > 0, !version.isEmpty, version.count <= 64,
               version.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || ".-+".contains($0)) }), securityEpoch >= 0,
               self.architecture == architecture || self.architecture == "universal" else {
@@ -22,6 +25,25 @@ public struct DistributionRelease: Codable, Equatable, Sendable {
         }
         guard build >= current.build, securityEpoch >= max(current.securityEpoch, minimumEpoch) else {
             throw ValidationError("Radius will not install an older application or an engine below the accepted security version.")
+        }
+    }
+    public static func validateMinimumMacOS(_ minimum: String, operatingSystemVersion: OperatingSystemVersion? = nil) throws {
+        let components = minimum.split(separator: ".", omittingEmptySubsequences: false)
+        let numbers = components.compactMap { Int($0) }
+        guard (2...3).contains(components.count), numbers.count == components.count,
+              components.allSatisfy({ !$0.isEmpty && $0.allSatisfy({ $0.isASCII && $0.isNumber }) }),
+              numbers.allSatisfy({ (0...999).contains($0) }), numbers[0] > 0 else {
+            throw ValidationError("The release has an invalid macOS compatibility requirement.")
+        }
+        let actual: OperatingSystemVersion?
+        #if os(macOS)
+        actual = operatingSystemVersion ?? ProcessInfo.processInfo.operatingSystemVersion
+        #else
+        actual = operatingSystemVersion
+        #endif
+        if let actual,
+           (actual.majorVersion, actual.minorVersion, actual.patchVersion) < (numbers[0], numbers[1], numbers.count == 3 ? numbers[2] : 0) {
+            throw ValidationError("This release requires macOS \(minimum) or later. Your installed application has been kept.")
         }
     }
 }

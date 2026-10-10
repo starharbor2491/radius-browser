@@ -44,17 +44,16 @@ extension AppState {
         var completed = Set<UUID>()
         // Website-store removal has a deadline. All requests start together so a
         // damaged store cannot add an unbounded delay for each deleted profile.
-        let webkitResults = await withTaskGroup(of: (UUID, Bool).self) { group in
-            for id in pending {
-                group.addTask { @MainActor in
-                    do { try await WebsiteStoreRemoval.remove(id); return (id, true) }
-                    catch { return (id, false) }
-                }
-            }
-            var results = Set<UUID>()
-            for await (id, success) in group where success { results.insert(id) }
-            return results
+        let requests = pending.map { id in
+            (id, Task { @MainActor in
+                do { try await WebsiteStoreRemoval.remove(id); return true }
+                catch { return false }
+            })
         }
+        var webkitResults = Set<UUID>()
+        await withTaskCancellationHandler {
+            for (id, task) in requests { if await task.value { webkitResults.insert(id) } }
+        } onCancel: { for (_, task) in requests { task.cancel() } }
         if webkitResults.count < pending.count { notice = "Some website storage could not be removed. Quit and reopen Radius to retry before those Chromium profiles start." }
         for id in pending where webkitResults.contains(id) {
             do {

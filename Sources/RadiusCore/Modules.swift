@@ -58,6 +58,7 @@ public struct ModuleManifest: Identifiable, Codable, Equatable, Sendable {
               (runtime == .nativeReaderWorker && capability == .reader) ||
               (runtime == .behaviorProgram && [.notes, .screenshot, .focusMode].contains(capability)) ||
               (runtime == .declarative && declarativeRoles.contains(capability)) else { throw ValidationError("This module role and runtime are incompatible.") }
+        guard try JSONEncoder().encode(self).count <= 32 * 1024 else { throw ValidationError("Module manifest exceeds 32 KB.") }
     }
     public static func validID(_ id: String) -> Bool {
         !id.isEmpty && id == id.lowercased() && id.count <= 80 && !id.hasPrefix(".") && !id.contains("..") &&
@@ -371,7 +372,10 @@ public struct ModuleRepository: Sendable {
         let url = try settingsURL(id)
         if FileManager.default.fileExists(atPath: url.path) {
             try rejectLink(url)
-            let saved = try JSONDecoder().decode([String: ModuleValue].self, from: boundedRead(url, limit: 64 * 1024))
+            let data = try boundedRead(url, limit: 64 * 1024)
+            try ModuleJSONBounds.validate(data)
+            let saved = try JSONDecoder().decode([String: ModuleValue].self, from: data)
+            try ModuleValue.object(saved).validate()
             for schema in module.manifest.settings ?? [] {
                 if let value = saved[schema.id], (try? schema.validate(value: value)) != nil { values[schema.id] = value }
             }
@@ -384,7 +388,9 @@ public struct ModuleRepository: Sendable {
         }
         try schema.validate(value: value)
         var values = try settings(for: id); values[key] = value
-        try JSONEncoder().encode(values).write(to: settingsURL(id), options: .atomic)
+        let data = try JSONEncoder().encode(values)
+        guard data.count <= 64 * 1024 else { throw ValidationError("Module settings exceed 64 KB.") }
+        try data.write(to: settingsURL(id), options: .atomic)
     }
     public func deleteSettings(for id: String) throws {
         let url = try settingsURL(id)

@@ -45,8 +45,8 @@ for worker in RadiusResourceMonitor RadiusMemoryMonitor RadiusReaderWorker; do
   codesign --verify --strict "$payload"
 done
 cp Resources/Info.plist "$app_directory/Contents/Info.plist"
-# Separate signed helper slices preserve the running host's architecture under
-# Rosetta and let Radius directly own/stop the actual updater process.
+# Separate signed helper slices support the Mac's native CPU under Rosetta and
+# let Radius directly own/stop the actual updater process.
 rm -rf "$app_directory/Contents/Resources/Updater"
 for architecture in arm64 x86_64; do
   helper_directory="$app_directory/Contents/Resources/Updater/$architecture"

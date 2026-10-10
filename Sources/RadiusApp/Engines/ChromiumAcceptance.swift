@@ -42,8 +42,46 @@ enum ChromiumAcceptance {
         try await verifyFixture(manager, app: app)
         if ProcessInfo.processInfo.environment["RADIUS_CHROMIUM_WEBSTORE_TEST"] == "1" {
             try await verifyWebStore(manager)
+            let version = try await evaluate(manager, "String((await chrome.developerPrivate.getExtensionsInfo({includeDisabled:true,includeTerminated:true})).find(e => e.id === 'ddkjiahejlhfcafbddmgiahcphecmpfh')?.version)")
+            let receipt: [String: Any] = ["profileID": manager.profileID.uuidString, "version": version,
+                                          "processID": ProcessInfo.processInfo.processIdentifier]
+            try JSONSerialization.data(withJSONObject: receipt).write(
+                to: app.dataDirectory.appendingPathComponent("Chromium/ExtensionAcceptance/webstore-restart.json"), options: .atomic)
         }
         print("Radius Chromium acceptance: Chrome Views, native child geometry/focus, and extension manager passed")
+    }
+    static func verifyStoreRestart(app: AppState) async throws {
+        guard ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_DATA"] != nil,
+              ProcessInfo.processInfo.environment["RADIUS_CHROMIUM_EXTENSION_RESTART"] == "1",
+              ProcessInfo.processInfo.arguments.contains("--smoke-test") else {
+            throw ValidationError("Extension restart acceptance requires the isolated second smoke-test launch.")
+        }
+        let receiptURL = app.dataDirectory.appendingPathComponent("Chromium/ExtensionAcceptance/webstore-restart.json")
+        let size = try receiptURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        guard size > 0, size <= 4096,
+              let receipt = try JSONSerialization.jsonObject(with: Data(contentsOf: receiptURL)) as? [String: Any],
+              let profile = receipt["profileID"] as? String, let profileID = UUID(uuidString: profile),
+              let version = receipt["version"] as? String,
+              let processID = receipt["processID"] as? Int, processID != Int(ProcessInfo.processInfo.processIdentifier) else {
+            throw ValidationError("The Web Store restart receipt is missing or was created in this same process.")
+        }
+        let manager = try ChromiumRuntime.shared.makeTab(profileID: profileID, privateSessionID: nil, dataDirectory: app.dataDirectory)
+        let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 900, height: 680),
+                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.title = "Radius extension restart acceptance"
+        window.contentView = manager.nativeView; window.makeKeyAndOrderFront(nil)
+        defer { manager.dispose(); window.close() }
+        manager.showExtensions(); try await waitForManager(manager)
+        let text = try await evaluate(manager, "JSON.stringify((await chrome.developerPrivate.getExtensionsInfo({includeDisabled:true,includeTerminated:true})).find(e => e.id === 'ddkjiahejlhfcafbddmgiahcphecmpfh') || null)")
+        guard let data = text.data(using: .utf8), let installed = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) as? [String: Any],
+              installed["state"] as? String == "ENABLED", installed["version"] as? String == version else {
+            throw ValidationError("The Chrome Web Store extension did not persist enabled across the full process restart.")
+        }
+        _ = try await evaluate(manager, "String(await chrome.management.uninstall('ddkjiahejlhfcafbddmgiahcphecmpfh',{showConfirmDialog:false}))")
+        let remains = try await evaluate(manager, "String((await chrome.developerPrivate.getExtensionsInfo({includeDisabled:true,includeTerminated:true})).some(e => e.id === 'ddkjiahejlhfcafbddmgiahcphecmpfh'))")
+        guard remains == "false" else { throw ValidationError("The Web Store extension could not be removed after restart.") }
+        try FileManager.default.removeItem(at: receiptURL)
+        print("Radius Chromium acceptance: Web Store extension persisted across a full process restart and was removed")
     }
     private static func waitForManager(_ tab: ChromiumTab) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(20))
@@ -114,7 +152,7 @@ enum ChromiumAcceptance {
         let optionsDeadline = ContinuousClock.now.advanced(by: .seconds(15))
         var options: ChromiumTab?
         while ContinuousClock.now < optionsDeadline {
-            options = ChromiumRuntime.shared.auxiliaryTabs.first { $0.profileID == manager.profileID && $0.url?.host == id }
+            options = ChromiumRuntime.shared.auxiliaryTabs.first { $0.profileID == manager.profileID && $0.url?.host == id && $0.chromeWindow?.isVisible == true }
             if options != nil { break }
             try await Task.sleep(for: .milliseconds(100))
         }
@@ -131,7 +169,28 @@ enum ChromiumAcceptance {
         try await click(options, selector: "#nativecheckbox")
         _ = try await waitForFixture(options, key: "radiusFixtureTheme", value: "dark")
         _ = try await waitForFixture(page, key: "radiusFixtureTheme", value: "dark")
+        let createdTabID = try await evaluate(options, "String((await chrome.tabs.create({url:chrome.runtime.getURL('options.html?api=tab')})).id)")
+        let createdTab = try await waitForAuxiliary(profileID: manager.profileID, query: "api=tab")
+        guard try await evaluate(createdTab, "String((await chrome.tabs.getCurrent()).id)") == createdTabID else {
+            throw ValidationError("The extension-created tab lost its Chromium tab identity.")
+        }
+        let createdWindowID = try await evaluate(options, "String((await chrome.windows.create({url:chrome.runtime.getURL('options.html?api=window'),type:'normal'})).id)")
+        let createdWindow = try await waitForAuxiliary(profileID: manager.profileID, query: "api=window")
+        guard try await evaluate(createdWindow, "String((await chrome.windows.getCurrent()).id)") == createdWindowID else {
+            throw ValidationError("The extension-created window lost its Chromium window identity.")
+        }
+        _ = try await evaluate(options, "String(!!window.open(chrome.runtime.getURL('options.html?api=popup'),'_blank'))")
+        let descendant = try await waitForAuxiliary(profileID: manager.profileID, query: "api=popup")
+        guard try await evaluate(descendant, "String(!!window.opener)") == "true" else {
+            throw ValidationError("An auxiliary popup lost its original opener relationship.")
+        }
         options.dispose()
+        guard try await evaluate(createdTab, "String((await chrome.tabs.getCurrent()).id)") == createdTabID,
+              try await evaluate(createdWindow, "String((await chrome.windows.getCurrent()).id)") == createdWindowID else {
+            throw ValidationError("An auxiliary window stopped working when its origin tab closed.")
+        }
+        createdTab.dispose(); createdWindow.dispose(); descendant.dispose()
+        print("Radius Chromium acceptance: tabs.create/windows.create identities and auxiliary popup opener/lifetime passed")
         page.reload()
         state = try await waitForFixture(page, key: "radiusFixtureWorker", value: "ready")
         // Wait for the next document's worker ping, not an old DOM state during reload.
@@ -180,6 +239,17 @@ enum ChromiumAcceptance {
         }
         if let error = result["radiusFixtureError"] { throw ValidationError("Extension API fixture: \(error)") }
         return result
+    }
+    private static func waitForAuxiliary(profileID: UUID, query: String) async throws -> ChromiumTab {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(15))
+        while ContinuousClock.now < deadline {
+            if let tab = ChromiumRuntime.shared.auxiliaryTabs.first(where: { $0.profileID == profileID && $0.url?.query == query }) {
+                _ = try await waitForFixture(tab, key: "radiusFixtureOptionsState", value: "ready")
+                if tab.chromeWindow?.isVisible == true { return tab }
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw ValidationError("The extension-created auxiliary browser did not load: \(query)")
     }
     private static func waitForFixture(_ tab: ChromiumTab, key: String, value: String) async throws -> [String: String] {
         let deadline = ContinuousClock.now.advanced(by: .seconds(15))

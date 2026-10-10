@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MPL-2.0
-"""Build an optional Radius Alloy adapter package from the pinned upstream CEF SDK.
+"""Build an optional Radius Chrome Views adapter from the pinned upstream CEF SDK.
 
 This is a development package. Ad-hoc signatures verify local integrity; they do
 not provide Developer ID publisher trust or notarized consumer distribution.

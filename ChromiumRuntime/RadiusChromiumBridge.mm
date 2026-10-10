@@ -34,12 +34,14 @@
 @property(nonatomic, assign) NSWindow* browserWindow;
 @property(nonatomic, assign) BOOL contentHidden;
 @property(nonatomic, assign) BOOL auxiliary;
+@property(nonatomic, assign) BOOL chromeStyle;
 - (void)synchronizeBrowserWindow;
 @end
 @implementation RadiusChromiumHostView
 @synthesize browserWindow;
 @synthesize contentHidden;
 @synthesize auxiliary;
+@synthesize chromeStyle;
 - (void)synchronizeBrowserWindow {
   if (self.auxiliary) return;
   NSWindow* child = self.browserWindow;
@@ -243,11 +245,11 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     if (!diagnostics || !page_ || !page_->fixture_dialog || mode!=FILE_DIALOG_OPEN_FOLDER ||
         browser->GetMainFrame()->GetURL().ToString().rfind("chrome://extensions/",0)!=0) return false;
     page_->fixture_dialog=false;
-    const std::string path=data_root+"/ExtensionAcceptance/current";
-    if (![[NSFileManager defaultManager] fileExistsAtPath:[NSString stringWithUTF8String:(path+"/manifest.json").c_str()]]) {
+    const std::string fixture_path=data_root+"/ExtensionAcceptance/current";
+    if (![[NSFileManager defaultManager] fileExistsAtPath:[NSString stringWithUTF8String:(fixture_path+"/manifest.json").c_str()]]) {
       callback->Cancel(); return true;
     }
-    callback->Continue({CefString(path)}); return true;
+    callback->Continue({CefString(fixture_path)}); return true;
   }
   bool OnChromeCommand(CefRefPtr<CefBrowser> browser,int id,cef_window_open_disposition_t disposition) override {
     if (auto client = ForBrowser(browser); client && client != this) return client->OnChromeCommand(browser,id,disposition);
@@ -313,6 +315,10 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     page_->browser = browser;
     page_->browser_id = browser->GetIdentifier();
     browser_pages[page_->browser_id] = page_;
+    page_->view.chromeStyle = browser->GetHost()->GetRuntimeStyle()==CEF_RUNTIME_STYLE_CHROME;
+    auto capabilities = CefDictionaryValue::Create();
+    capabilities->SetBool("chromeStyle",page_->view.chromeStyle);
+    Emit(page_,RADIUS_CEF_STATE,capabilities);
     page_->pending_popup = false;
     for (auto& entry : pages) entry.second->client->ForgetPopup(page_);
     page_->observer = browser->GetHost()->AddDevToolsMessageObserver(this);

@@ -204,6 +204,42 @@ import Testing
     #expect(try repo.settings(for: manifest.id)["defaultTitle"] == .string("Untitled note"))
 }
 
+@Test func unicodeMetadataAndProgramsCannotCreateUnreadablePackages() throws {
+    let directory = temporaryModuleDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
+    let repo = try ModuleRepository(root: directory.appendingPathComponent("Modules"))
+    var manifest = behaviorManifest("org.test.unicode")
+    manifest.summary = "a" + String(repeating: "\u{301}", count: 20_000)
+    #expect(manifest.summary.count == 1)
+    #expect(throws: (any Error).self) { try repo.install(manifest, payload: JSONEncoder().encode(officialProgram("org.radius.notes"))) }
+    #expect(try repo.installed().isEmpty)
+    manifest.summary = "Bounded metadata"
+    var program = try officialProgram("org.radius.notes")
+    program.entrypoints["create"] = ModuleExpression(op: .object, fields: [
+        "title": ModuleExpression(op: .literal, value: .string("a" + String(repeating: "\u{301}", count: 70_000))),
+        "text": ModuleExpression(op: .literal, value: .string(""))
+    ])
+    let package = DeclarativeModulePackage(manifest: manifest, program: program)
+    #expect(throws: (any Error).self) { try package.payload() }
+    let catalog = DeclarativeModuleCatalog(name: "Oversized program", packages: [package])
+    #expect(throws: (any Error).self) { try DeclarativeModuleCatalog.decode(JSONEncoder().encode(catalog)) }
+}
+
+@Test func savedModuleSettingsRejectExcessiveBytesAndDeepMalformedData() throws {
+    let directory = temporaryModuleDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
+    let repo = try ModuleRepository(root: directory.appendingPathComponent("Modules"))
+    let manifest = try ModuleManifest.decode(Data(contentsOf: officialModuleDirectory("org.radius.notes").appendingPathComponent("manifest.json")))
+    try repo.install(manifest, payload: JSONEncoder().encode(officialProgram(manifest.id)))
+    try repo.setSetting("defaultTitle", value: .string("Keep this value"), for: manifest.id)
+    let oversized = "a" + String(repeating: "\u{301}", count: 40_000)
+    #expect(oversized.count == 1)
+    #expect(throws: (any Error).self) { try repo.setSetting("defaultTitle", value: .string(oversized), for: manifest.id) }
+    #expect(try repo.settings(for: manifest.id)["defaultTitle"] == .string("Keep this value"))
+    let saved = directory.appendingPathComponent("ModuleData").appendingPathComponent(manifest.id + ".json")
+    try Data(("{\"unknown\":" + String(repeating: "[", count: 1000) + "0" + String(repeating: "]", count: 1000) + "}").utf8).write(to: saved)
+    #expect(throws: (any Error).self) { try repo.settings(for: manifest.id) }
+    #expect(try repo.installed().first?.enabled == true)
+}
+
 @Test func behaviorProgramsRejectDeepUnknownAndExcessiveInstructionsBeforeExecution() throws {
     let deep = Data((String(repeating: "[", count: 1000) + "0" + String(repeating: "]", count: 1000)).utf8)
     #expect(throws: (any Error).self) { try ModuleProgram.decode(deep) }
