@@ -91,6 +91,34 @@ enum AppSmokeTest {
                 trace("Extracting reader text")
                 let text = try await app.readerText(from: browser.activeWebTab)
                 guard text.contains("Local browser check") else { throw ValidationError("Reader could not read the HTTP fixture.") }
+                trace("Capturing customized controls at wide and narrow window sizes")
+                let originalFrame = window.frame
+                let originalConfiguration = app.configuration
+                var customized = originalConfiguration
+                customized.theme.typography = .rounded; customized.theme.fontScale = 1.2
+                customized.theme.spacingScale = 1.15; customized.theme.iconStyle = .filled
+                customized.theme.surfaceHex = "#17212B"; customized.theme.textHex = "#F1F5F9"
+                customized.theme.accentHex = "#66D9CC"; customized.theme.colorMode = .dark
+                customized.theme.borderWidth = 1; customized.theme.shadowStrength = 0.2
+                var tabAppearance = ComponentAppearance(); tabAppearance.density = .compact; tabAppearance.cornerRadius = 6
+                customized.theme.tabsAppearance = tabAppearance
+                customized.layout.tabs = .leading; customized.layout.tabsWidth = 300
+                customized.layout.sidebar = .trailing; customized.layout.sidebarWidth = 360
+                customized.layout.secondaryPanel = "bookmarks"
+                customized.layout.toolbarComponents = ToolbarComponent.browserDefaults + [
+                    .init(command: .newTab, region: .top), .init(command: .reader, region: .top),
+                    .init(command: .screenshot, region: .bottom), .init(command: .downloads, region: .bottom),
+                    .init(command: .customize, region: .overflow)
+                ]
+                app.applyConfiguration(customized)
+                for width in [1240.0, 800.0] {
+                    window.setContentSize(NSSize(width: width, height: 720))
+                    try await Task.sleep(for: .milliseconds(450))
+                    guard let view = window.contentView else { throw ValidationError("Customized browser content is unavailable.") }
+                    try capture(view, to: output.appendingPathComponent("Radius-customized-\(Int(width)).png"))
+                }
+                window.setFrame(originalFrame, display: true)
+                app.applyConfiguration(originalConfiguration)
                 trace("Verifying split panes and tree tabs")
                 browser.panel = nil
                 var config = app.library.preferences.configuration

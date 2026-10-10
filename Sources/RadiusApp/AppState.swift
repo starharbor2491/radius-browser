@@ -13,6 +13,7 @@ final class AppState: ObservableObject {
     @Published private(set) var resourceWorkerGeneration = UUID()
     @Published var previewConfiguration: Configuration?
     @Published var deletingProfileIDs = Set<UUID>()
+    @Published var profilesAwaitingWebsiteDataRemoval = Set<UUID>()
     let dataDirectory: URL
     @Published var catalog: [ModuleManifest] = []
     @Published var communityCatalogNames: [String] = []

@@ -41,6 +41,12 @@ extension AppState {
         let pending = Array(Set(deleted + clearRequests))
         ChromiumRuntime.shared.blockProfilesPendingDeletion(Set(pending))
         guard !pending.isEmpty else { return }
+        // A queued request takes effect when cleanup starts. If either engine's
+        // removal fails, do not reopen the profile with its previous cookies.
+        profilesAwaitingWebsiteDataRemoval.formUnion(pending)
+        for model in windows.values.compactMap(\.model) where profilesAwaitingWebsiteDataRemoval.contains(model.session.profileID) {
+            model.disposeEngineTabs()
+        }
         var completed = Set<UUID>()
         // Website-store removal has a deadline. All requests start together so a
         // damaged store cannot add an unbounded delay for each deleted profile.
@@ -54,7 +60,7 @@ extension AppState {
         await withTaskCancellationHandler {
             for (id, task) in requests { if await task.value { webkitResults.insert(id) } }
         } onCancel: { for (_, task) in requests { task.cancel() } }
-        if webkitResults.count < pending.count { notice = "Some website storage could not be removed. Quit and reopen Radius to retry before those Chromium profiles start." }
+        if webkitResults.count < pending.count { notice = "Some website storage could not be removed. Browsing in those profiles is paused. Quit and reopen Radius to retry." }
         for id in pending where webkitResults.contains(id) {
             do {
                 try await ChromiumRuntime.shared.clearWebsiteData(profileID: id, dataDirectory: dataDirectory)
@@ -71,6 +77,7 @@ extension AppState {
             }
         }
         ChromiumRuntime.shared.blockProfilesPendingDeletion(Set((library.pendingProfileDeletions ?? []) + (library.pendingWebsiteDataClears ?? [])))
+        profilesAwaitingWebsiteDataRemoval = Set((library.pendingProfileDeletions ?? []) + (library.pendingWebsiteDataClears ?? []))
     }
 
     func requestWebsiteDataClear(_ id: UUID) async throws {

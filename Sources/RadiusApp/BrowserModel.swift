@@ -48,6 +48,10 @@ final class BrowserModel: ObservableObject {
     }
     func webTab(_ id: UUID) -> BrowserEngineTab {
         if app.deletingProfileIDs.contains(session.profileID) { return UnavailableEngineTab(engine: selectedTab.engineID ?? .webkit, reason: "This profile is being deleted.") }
+        if app.profilesAwaitingWebsiteDataRemoval.contains(session.profileID) {
+            return UnavailableEngineTab(engine: session.tabs.first(where: { $0.id == id })?.engineID ?? .webkit,
+                reason: "Website data removal is pending for this profile. Quit and reopen Radius to retry before browsing.")
+        }
         if let cached = webTabs[id] { return cached }
         let engine = session.tabs.first(where: { $0.id == id })?.engineID ?? .webkit
         // Quitting may be cancelled. Keep this placeholder out of the cache so

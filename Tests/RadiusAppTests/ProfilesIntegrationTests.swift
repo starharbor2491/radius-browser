@@ -170,6 +170,42 @@ struct ProfilesIntegrationTests {
         #expect(browser.activeWebTab is UnavailableEngineTab)
     }
 
+    @Test func websiteClearFailureBlocksRestoredWebKitUntilItsStoreCanBeRemoved() async throws {
+        let (app, directory) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let profileID = app.library.profiles[0].id
+        let original = BrowserModel(app: app, isPrivate: false)
+        defer { original.closeWindow() }
+        var oldPage: WebTab? = try #require(original.activeWebTab as? WebTab)
+        #expect(oldPage?.webView.configuration.websiteDataStore.identifier == profileID)
+        try await setCookie(profileID: profileID, value: "pending")
+        try await app.requestWebsiteDataClear(profileID)
+
+        // A live store cannot be removed. This models another running Radius
+        // copy retaining the website context while the new launch retries.
+        let restarted = AppState(directory: directory)
+        await restarted.load()
+        try #require(restarted.ready)
+        #expect(restarted.library.pendingWebsiteDataClears == [profileID])
+        let restored = BrowserModel(app: restarted, isPrivate: false)
+        defer { restored.closeWindow() }
+        #expect(restored.activeWebTab is UnavailableEngineTab)
+        #expect(restored.activeWebTab.errorMessage != nil)
+
+        original.disposeEngineTabs(); oldPage = nil
+        let deadline = ContinuousClock().now.advanced(by: .seconds(10))
+        repeat {
+            await restarted.finishPendingProfileDeletions()
+            if (restarted.library.pendingWebsiteDataClears ?? []).isEmpty { break }
+            try await Task.sleep(for: .milliseconds(100))
+        } while ContinuousClock().now < deadline
+        #expect((restarted.library.pendingWebsiteDataClears ?? []).isEmpty)
+        #expect(restored.activeWebTab is WebTab)
+        #expect(await cookieValues(profileID: profileID).isEmpty)
+        restored.disposeEngineTabs()
+        await removeStores([profileID])
+    }
+
     private func fixture() async throws -> (AppState, URL) {
         _ = NSApplication.shared
         let directory = temporaryDirectory(), app = AppState(directory: directory)
@@ -201,8 +237,11 @@ struct ProfilesIntegrationTests {
         #expect(await cookieValues(profileID: profileID) == [value])
     }
     private func cookieValues(profileID: UUID) async -> [String] {
-        await WKWebsiteDataStore(forIdentifier: profileID).httpCookieStore.getAllCookies()
-            .filter { $0.name == "radius-profile-test" }.map(\.value).sorted()
+        await withCheckedContinuation { continuation in
+            WKWebsiteDataStore(forIdentifier: profileID).httpCookieStore.getAllCookies { cookies in
+                continuation.resume(returning: cookies.filter { $0.name == "radius-profile-test" }.map(\.value).sorted())
+            }
+        }
     }
     private func removeStores(_ ids: [UUID]) async {
         for id in ids {
