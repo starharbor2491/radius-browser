@@ -46,7 +46,7 @@ struct ResourceModuleTests {
             // A preflight can service the run loop before worker reaping starts.
             // Keep a real source pending until the guarded critical section, then
             // invalidate it before the probe itself can reenter the run loop.
-            let runLoop = CFRunLoopGetCurrent()
+            let runLoop = CFRunLoopGetMain()
             let timer = try #require(CFRunLoopTimerCreateWithHandler(nil, CFAbsoluteTimeGetCurrent(), 0.001, 0, 0) { timer in
                 MainActor.assumeIsolated {
                     guard probe.app.stoppingModuleWorkers, !probe.fired else { return }
