@@ -152,6 +152,7 @@ class BrowserViewDelegate;
 class WindowDelegate;
 std::map<Page*, std::unique_ptr<Page>> pages;
 std::map<int,Page*> browser_pages;
+std::map<std::pair<int,int>,Page*> pending_popups;
 std::map<int,CefRefPtr<CefBrowser>> unowned_browsers;
 struct Page {
   RadiusChromiumHostView* view = [[RadiusChromiumHostView alloc] initWithFrame:NSMakeRect(0, 0, 800, 600)];
@@ -320,14 +321,14 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     capabilities->SetBool("chromeStyle",page_->view.chromeStyle);
     Emit(page_,RADIUS_CEF_STATE,capabilities);
     page_->pending_popup = false;
-    for (auto& entry : pages) entry.second->client->ForgetPopup(page_);
+    ForgetPopup(page_);
     page_->observer = browser->GetHost()->AddDevToolsMessageObserver(this);
     if (page_->closing) browser->GetHost()->CloseBrowser(true);
     else if (!page_->pending_url.empty()) browser->GetMainFrame()->LoadURL(page_->pending_url);
   }
   void ForgetPopup(Page* child) {
-    for (auto found = pending_popups_.begin(); found != pending_popups_.end();) {
-      if (found->second == child) found = pending_popups_.erase(found); else ++found;
+    for (auto found = pending_popups.begin(); found != pending_popups.end();) {
+      if (found->second == child) found = pending_popups.erase(found); else ++found;
     }
   }
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
@@ -360,7 +361,7 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     const bool adopted = page_->popup(page_->callback_context, child, url.c_str()) != 0;
     Trace(adopted ? "popup adopted by native tab" : "popup rejected by native tab");
     if (!adopted) { Destroy(child); return true; }
-    pending_popups_[popup_id] = child;
+    pending_popups[{browser->GetIdentifier(),popup_id}] = child;
     // Leave parent_view empty: Views creates the intact Chrome-style popup.
     window.runtime_style = CEF_RUNTIME_STYLE_CHROME;
     client = child->client;
@@ -369,9 +370,11 @@ class Client final : public CefClient, public CefLifeSpanHandler,
   void OnBeforePopupAborted(CefRefPtr<CefBrowser> browser, int popup_id) override {
     if (auto client = ForBrowser(browser); client && client != this) return client->OnBeforePopupAborted(browser,popup_id);
     Trace("popup creation aborted");
-    auto found = pending_popups_.find(popup_id);
-    if (found == pending_popups_.end()) return;
-    Page* child = found->second; pending_popups_.erase(found);
+    // A native auxiliary's inherited client can outlive the source Page. Keep
+    // pending ownership keyed by source browser ID until creation or abortion.
+    auto found = pending_popups.find({browser->GetIdentifier(),popup_id});
+    if (found == pending_popups.end()) return;
+    Page* child = found->second; pending_popups.erase(found);
     if (pages.count(child) && !child->browser) {
       Message(child, RADIUS_CEF_CLOSED, "Popup could not be created."); Destroy(child);
     }
@@ -542,7 +545,6 @@ class Client final : public CefClient, public CefLifeSpanHandler,
   }
  private:
   Page* page_;
-  std::map<int,Page*> pending_popups_;
   struct Download {
     CefRefPtr<CefBeforeDownloadCallback> before;
     CefRefPtr<CefDownloadItemCallback> control;

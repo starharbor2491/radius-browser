@@ -72,8 +72,10 @@ jobs:
           path = Path(os.environ['RUNNER_TEMP']) / 'radius-cef-runtime' / 'radius-adapter-${{ matrix.arch }}.json'
           evidence = json.loads(path.read_text())
           evidence['radiusEmbeddedRuntimeValidated'] = True
+          evidence['chromeExtensions'] = True
+          evidence['runtimeStyle'] = 'chrome'
           evidence['testedSource'] = os.environ['GITHUB_SHA']
-          evidence['nativeChecks'] = ['HTTP', 'HTTPS', 'reader', 'PNG capture', 'profiles', 'private windows', 'normal/private popup policy and opener', 'tab close', 'normal quit']
+          evidence['nativeChecks'] = ['HTTP', 'HTTPS', 'reader', 'PNG capture', 'profiles', 'private windows', 'normal/private popup policy and opener', 'Chrome toolbar geometry and focus', 'MV3 lifecycle and APIs', 'extension auxiliary window identity and lifetime', 'Chrome Web Store installation', 'extension persistence after process restart', 'extension removal', 'tab close', 'extension manager open during normal quit']
           path.write_text(json.dumps(evidence, indent=2) + '\n')
           PY
       - uses: actions/upload-artifact@v4
@@ -92,6 +94,8 @@ jobs:
             dist/screenshots/*.png
             dist/smoke-*.log
             dist/smoke-sample.txt
+            dist/native-tests*.log
+            dist/native-tests*.txt
             dist/smoke-data/Chromium/engine.log
             ${{ runner.temp }}/radius-cef-runtime/radius-adapter-*.json
           if-no-files-found: warn

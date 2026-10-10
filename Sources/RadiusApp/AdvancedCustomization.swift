@@ -25,6 +25,7 @@ struct AdvancedAppearance: View {
                 Picker("Icon style", selection: optional(\.iconStyle, fallback: .outline)) {
                     ForEach(InterfaceIconStyle.allCases, id: \.self) { Text($0.rawValue.capitalized).tag($0) }
                 }
+                Text("Style uses the active icon pack's available outline or filled variants.").font(.caption).foregroundStyle(.secondary)
                 color("Custom accent", path: \.accentHex, fallback: .systemBlue)
                 color("Surface color", path: \.surfaceHex, fallback: .windowBackgroundColor)
                 color("Text color", path: \.textHex, fallback: .labelColor)

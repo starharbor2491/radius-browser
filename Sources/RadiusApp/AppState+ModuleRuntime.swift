@@ -126,7 +126,7 @@ extension AppState {
         if let existing, existing.version >= (available?.version ?? 0) { return existing }
         return available ?? existing
     }
-    func validateModuleRequirements(for ids: [String], replacingRootProviders: Bool = true, preparingActivation: Bool = true) throws -> [ModuleManifest] {
+    func validateModuleRequirements(for ids: [String], replacingRootProviders: Bool = true, preparingActivation: Bool = true, repairingIDs: Set<String> = []) throws -> [ModuleManifest] {
         guard ids.count <= 64, let repository else { throw ValidationError("Repair module storage first.") }
         var result: [ModuleManifest] = [], seen = Set<String>(), roles: [ModuleCapability: String] = [:]
         for id in ids {
@@ -135,7 +135,11 @@ extension AppState {
                     throw ValidationError("These requirements choose multiple providers for \(manifest.capability.rawValue). Choose one before applying the setup.")
                 }
                 if manifest.capability.isExclusive { roles[manifest.capability] = manifest.id }
-                if let existing = installedModules.first(where: { $0.id == manifest.id && $0.manifest == manifest }) {
+                if let existing = installedModules.first(where: { $0.id == manifest.id }),
+                   existing.manifest.capability != manifest.capability || (existing.manifest.runtime != nil && existing.manifest.runtime != manifest.runtime) {
+                    throw ValidationError("A package update cannot change its module role or runtime. Import it with a new module ID instead.")
+                }
+                if !repairingIDs.contains(manifest.id), let existing = installedModules.first(where: { $0.id == manifest.id && $0.manifest == manifest }) {
                     try validateModulePayload(existing, requireEnabled: false)
                 } else {
                     guard let payload = modulePayloads[manifest.id] else { throw ValidationError("The catalog is missing \(manifest.name)'s package payload.") }
@@ -144,6 +148,14 @@ extension AppState {
                     else { guard manifest.runtime?.isNative == true, bundledModuleIDs.contains(manifest.id), !payload.isEmpty, payload.count <= 8 * 1024 * 1024 else { throw ValidationError("This native package is not a trusted bundled worker.") } }
                 }
                 result.append(manifest)
+            }
+        }
+        if !preparingActivation {
+            for manifest in result where installedModules.contains(where: { $0.id == manifest.id && $0.enabled }) {
+                guard manifest.dependencies.allSatisfy({ id in
+                    installedModules.contains { $0.id == id && $0.enabled } &&
+                    (result.first(where: { $0.id == id })?.version ?? 0) >= (manifest.dependencyVersions?[id] ?? 1)
+                }) else { throw ValidationError("Update \(manifest.name) separately first. Updating this disabled module must not disable or replace an active dependency.") }
             }
         }
         // An enabled external dependent cannot be left attached to a provider
@@ -158,6 +170,40 @@ extension AppState {
             }
         }
         return result
+    }
+    func compatibleReinstallationManifest(for id: String) throws -> ModuleManifest {
+        guard let current = installedModules.first(where: { $0.id == id }),
+              let available = catalog.first(where: { $0.id == id && $0.runtime != nil }) else { throw ValidationError("This package has no available catalog source. Add or refresh its source catalog before reinstalling.") }
+        if available.version > current.manifest.version {
+            throw ValidationError("Choose Update to review the newer package and its dependencies before reinstalling it.")
+        }
+        guard available == current.manifest else { throw ValidationError("The catalog does not contain this installed version and definition. Refresh its source catalog before reinstalling. The installed package is kept.") }
+        return available
+    }
+    /// All candidates start with their existing activation choice, and new
+    /// packages stay disabled until the approved closure is ready to activate.
+    func installApprovedModuleCode(_ requirements: [ModuleManifest], repairingIDs: Set<String> = []) throws {
+        guard let repository else { throw ValidationError("Repair module storage first.") }
+        for manifest in requirements {
+            if !repairingIDs.contains(manifest.id), installedModules.contains(where: { $0.id == manifest.id && $0.manifest == manifest }) { continue }
+            ResourceWorker.stopAll(moduleID: manifest.id); cancelReaderRequests(moduleID: manifest.id)
+            let previous = installedModules.first(where: { $0.id == manifest.id })?.enabled ?? false
+            try repository.install(manifest, enabled: previous, payload: modulePayloads[manifest.id])
+        }
+        installedModules = try repository.installed()
+    }
+    func activateApprovedModuleRequirements(_ requirements: [ModuleManifest]) throws {
+        guard let repository else { throw ValidationError("Repair module storage first.") }
+        for manifest in requirements {
+            guard let installed = installedModules.first(where: { $0.id == manifest.id && $0.manifest == manifest }) else { throw ValidationError("A required package did not install.") }
+            if !installed.enabled {
+                if manifest.capability.isExclusive {
+                    if manifest.capability == .resourceMonitor { try replaceResourceProvider(with: manifest.id) }
+                    else { try repository.replaceProvider(role: manifest.capability, with: manifest.id) }
+                } else { try repository.setEnabled(manifest.id, true) }
+                installedModules = try repository.installed()
+            }
+        }
     }
     func withAtomicModuleChanges<T>(for ids: [String], _ operation: () throws -> T) throws -> T {
         guard let repository else { throw ValidationError("Repair module storage first.") }

@@ -195,7 +195,7 @@ struct BrowserWindow: View {
             }
             .padding(.horizontal, 10).padding(.vertical, navigationTheme.density == .compact ? 3 : 5)
             .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: navigationTheme.cornerRadius))
-            .overlay(RoundedRectangle(cornerRadius: navigationTheme.cornerRadius).stroke(addressFocused ? Color.accentColor : .primary.opacity(0.16), lineWidth: addressFocused ? 2 : 1))
+            .overlay(RoundedRectangle(cornerRadius: navigationTheme.cornerRadius).stroke(addressFocused ? navigationTheme.tint : .primary.opacity(0.16), lineWidth: addressFocused ? 2 : 1))
             .frame(maxWidth: layout.addressWidth.map { CGFloat(640 * $0) } ?? .infinity)
             } else {
                 Text(model.isPrivate ? "Private Chromium" : "Chromium").font(navigationTheme.interfaceFont()).foregroundStyle(.secondary)
@@ -351,7 +351,7 @@ struct BrowserWindow: View {
             HStack(spacing: 8) {
                 Button { model.selectTab(id) } label: {
                     HStack(spacing: 8) {
-                        Image(systemName: selected ? "circle.inset.filled" : "circle").foregroundStyle(selected ? theme.accent.color : .secondary)
+                        Image(systemName: selected ? "circle.inset.filled" : "circle").foregroundStyle(selected ? theme.tint : .secondary)
                         Text(descriptor?.title ?? "New tab").lineLimit(1)
                         Spacer()
                     }.contentShape(Rectangle())
@@ -407,7 +407,7 @@ struct BrowserWindow: View {
                 Button("Modules") { model.sheet = .modules }
                 Button("Customize") { model.sheet = .customize }
                 Button("Settings") { model.sheet = .settings }
-            }.buttonStyle(.plain).foregroundStyle(Color.accentColor)
+            }.buttonStyle(.plain).foregroundStyle(theme.tint)
         }.padding(48).frame(maxWidth: 820).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             .background(Color(nsColor: .textBackgroundColor))
     }

@@ -52,6 +52,8 @@ jobs:
           path: |
             dist/smoke-*.log
             dist/smoke-sample.txt
+            dist/native-tests*.log
+            dist/native-tests*.txt
           if-no-files-found: warn
   portable-core:
     runs-on: ubuntu-24.04

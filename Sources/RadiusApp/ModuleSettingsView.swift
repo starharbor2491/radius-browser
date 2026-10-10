@@ -9,7 +9,11 @@ struct ModuleSettingsView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text(manifest.name).font(.headline)
             Text("Module preferences stay on this Mac and are retained when you disable the package.").font(.caption).foregroundStyle(.secondary)
-            ForEach(manifest.settings ?? []) { schema in setting(schema) }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    ForEach(manifest.settings ?? []) { schema in setting(schema) }
+                }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 2)
+            }.frame(height: min(420, max(70, CGFloat((manifest.settings ?? []).count * 76))))
         }.padding(20).frame(width: 360)
     }
     @ViewBuilder private func setting(_ schema: ModuleSetting) -> some View {

@@ -188,32 +188,17 @@ final class AppState: ObservableObject {
         }
     }
     /// Called after the install dialog approves the bundled package and any dependencies.
-    func installApprovedModule(_ id: String) throws {
+    func installApprovedModule(_ id: String, repairing: Bool = false) throws {
         guard let repository else { throw ValidationError("Open Recovery to repair module storage first.") }
+        if repairing { _ = try compatibleReinstallationManifest(for: id) }
         let activate = installedModules.first { $0.id == id }?.enabled ?? true
-        let requirements = try validateModuleRequirements(for: [id], replacingRootProviders: false, preparingActivation: activate)
-        let plan = try repository.installationPlan(for: id, catalog: catalog)
+        let requirements = try validateModuleRequirements(for: [id], replacingRootProviders: false, preparingActivation: activate, repairingIDs: repairing ? [id] : [])
         try withAtomicModuleChanges(for: requirements.map(\.id)) {
             // Install every code candidate before activating dependency roles. An
             // updated dependent must release its old provider before replacement.
-            for manifest in plan {
-                if installedModules.contains(where: { $0.id == manifest.id && $0.manifest == manifest }) { continue }
-                ResourceWorker.stopAll(moduleID: manifest.id); cancelReaderRequests(moduleID: manifest.id)
-                let previous = installedModules.first(where: { $0.id == manifest.id })?.enabled
-                try repository.install(manifest, enabled: previous, payload: modulePayloads[manifest.id])
-            }
-            installedModules = try repository.installed()
+            try installApprovedModuleCode(requirements, repairingIDs: repairing ? [id] : [])
             if activate {
-                for manifest in requirements where manifest.id != id {
-                    guard let installed = installedModules.first(where: { $0.id == manifest.id }) else { throw ValidationError("A required package did not install.") }
-                    if !installed.enabled {
-                        if manifest.capability.isExclusive {
-                            if manifest.capability == .resourceMonitor { try replaceResourceProvider(with: manifest.id) }
-                            else { try repository.replaceProvider(role: manifest.capability, with: manifest.id) }
-                        } else { try repository.setEnabled(manifest.id, true) }
-                        installedModules = try repository.installed()
-                    }
-                }
+                try activateApprovedModuleRequirements(requirements.filter { $0.id != id })
                 if let target = installedModules.first(where: { $0.id == id }), !target.enabled,
                    !target.manifest.capability.isExclusive || !installedModules.contains(where: { $0.enabled && $0.manifest.capability == target.manifest.capability && $0.id != id }) {
                     try repository.setEnabled(id, true)
@@ -224,21 +209,14 @@ final class AppState: ObservableObject {
     }
     func reinstallWorker(_ module: InstalledModule) {
         perform {
-            guard let bundled = catalog.first(where: { $0.id == module.id && $0.runtime != nil }) else {
-                throw ValidationError("This worker has no bundled replacement.")
-            }
-            guard approveModules([bundled]) else { return }
+            _ = try compatibleReinstallationManifest(for: module.id)
+            let requirements = try validateModuleRequirements(for: [module.id], replacingRootProviders: false, preparingActivation: module.enabled, repairingIDs: [module.id])
+            guard approveModules(requirements, activateDependencies: module.enabled) else { return }
             try reinstallApprovedWorker(module.id)
         }
     }
     func reinstallApprovedWorker(_ id: String) throws {
-        guard let repository, let bundled = catalog.first(where: { $0.id == id && $0.runtime != nil }),
-              let current = installedModules.first(where: { $0.id == id }) else { throw ValidationError("This worker has no bundled replacement.") }
-        defer { resourceWorkerGeneration = UUID() }
-        ResourceWorker.stopAll(moduleID: id)
-        cancelReaderRequests(moduleID: id)
-        try repository.install(bundled, enabled: current.enabled, payload: modulePayloads[id])
-        installedModules = try repository.installed()
+        try installApprovedModule(id, repairing: true)
     }
     func importModule() {
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.json]; panel.canChooseDirectories = false
@@ -267,6 +245,9 @@ final class AppState: ObservableObject {
         for manifest in manifests {
             packageDetails += "\(manifest.name) v\(manifest.version) · \(manifest.publisher)\n"
             if !manifest.dependencies.isEmpty { packageDetails += "Requires: " + manifest.dependencies.joined(separator: ", ") + "\n" }
+            if !activateRequirements && !activateDependencies && !installedModules.contains(where: { $0.id == manifest.id }) {
+                packageDetails += "Installs disabled while the requested module remains disabled.\n"
+            }
             if let current = installedModules.first(where: { $0.id == manifest.id }), !current.enabled {
                 packageDetails += activateRequirements ? "Approval enables this required module.\n" : requiredIDs.contains(manifest.id) && activateDependencies ? "This required dependency is currently disabled; approving enables it.\n" : "Your disabled choice will be kept.\n"
             }

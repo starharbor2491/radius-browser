@@ -90,6 +90,10 @@ struct ModuleCard: View {
                 Text(app.bundledModuleIDs.contains(manifest.id) ? "Official bundled package" : "Publisher unverified")
             }.font(.caption).foregroundStyle(.secondary)
             if !manifest.dependencies.isEmpty { Text("Requires: " + manifest.dependencies.joined(separator: ", ")).font(.caption).foregroundStyle(.secondary) }
+            if installed != nil && (manifest.capability == .theme || manifest.capability == .layout) {
+                Text(manifest.capability == .theme ? "Disabling or uninstalling keeps the applied appearance. Choose another theme or restore defaults in Customize to change it." : "Disabling or uninstalling keeps the applied arrangement. Choose another layout or restore defaults in Customize to change it.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             if isLegacyReader {
                 HStack {
                     Text("This legacy descriptor no longer provides Reader. Install or update the removable Reader package.")

@@ -93,6 +93,109 @@ import RadiusCore
     #expect(app.library.sessions == sessions)
 }
 
+@Test @MainActor func updatingADisabledBehaviorInstallsNewDependenciesWithoutEnablingThem() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("radius-disabled-update-" + UUID().uuidString)
+    let previous = AppDelegate.state
+    defer { AppDelegate.state = previous; try? FileManager.default.removeItem(at: directory) }
+    let app = AppState(directory: directory)
+    let repo = try ModuleRepository(root: directory.appendingPathComponent("Modules")); app.repository = repo
+    var focus = ModuleManifest(id: "org.test.focus", name: "Focus", summary: "Focus policy", capability: .focusMode, runtime: .behaviorProgram)
+    let focusBytes = try completeBehaviorFixture(Data(#"{"formatVersion":1,"entrypoints":{"enter":{"op":"object","fields":{"active":{"op":"literal","value":true},"hiddenComponents":{"op":"literal","value":["tabs"]}}}}}"#.utf8), capability: .focusMode)
+    try repo.install(focus, enabled: false, payload: focusBytes)
+    let dependency = ModuleManifest(id: "org.test.widget", name: "Widget", summary: "New dependency", capability: .startWidget, runtime: .declarative)
+    focus.version = 2; focus.dependencies = [dependency.id]
+    app.catalog = [focus, dependency]
+    app.modulePayloads = [focus.id: focusBytes, dependency.id: Data(#"{"formatVersion":1,"widgetTitle":"Dependency","widgetBody":"Starts only when enabled"}"#.utf8)]
+    app.installedModules = try repo.installed()
+    try app.installApprovedModule(focus.id)
+    #expect(app.installedModules.count == 2)
+    #expect(app.installedModules.allSatisfy { !$0.enabled })
+    #expect(app.installedModules.first(where: { $0.id == focus.id })?.manifest.version == 2)
+    #expect(app.startWidgets.isEmpty)
+}
+
+@Test @MainActor func aDisabledUpdateCannotDisableAnActiveDependencyThroughItsNewRequirements() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("radius-active-dependency-" + UUID().uuidString)
+    let previous = AppDelegate.state
+    defer { AppDelegate.state = previous; try? FileManager.default.removeItem(at: directory) }
+    let app = AppState(directory: directory)
+    let repo = try ModuleRepository(root: directory.appendingPathComponent("Modules")); app.repository = repo
+    var notes = ModuleManifest(id: "org.test.notes", name: "Notes", summary: "An active dependency", capability: .notes, runtime: .behaviorProgram)
+    let notesBytes = try completeBehaviorFixture(Data(#"{"formatVersion":1,"entrypoints":{"create":{"op":"object","fields":{"title":{"op":"literal","value":"Existing notes"},"text":{"op":"literal","value":""}}}}}"#.utf8), capability: .notes)
+    try repo.install(notes, payload: notesBytes)
+    var focus = ModuleManifest(id: "org.test.focus", name: "Focus", summary: "Disabled consumer", capability: .focusMode, dependencies: [notes.id], runtime: .behaviorProgram)
+    let focusBytes = try completeBehaviorFixture(Data(#"{"formatVersion":1,"entrypoints":{"enter":{"op":"object","fields":{"active":{"op":"literal","value":true},"hiddenComponents":{"op":"literal","value":["tabs"]}}}}}"#.utf8), capability: .focusMode)
+    try repo.install(focus, enabled: false, payload: focusBytes)
+    let widget = ModuleManifest(id: "org.test.widget", name: "Widget", summary: "New requirement", capability: .startWidget, runtime: .declarative)
+    notes.version = 2; notes.dependencies = [widget.id]
+    focus.version = 2; focus.dependencyVersions = [notes.id: 2]
+    app.catalog = [focus, notes, widget]
+    app.modulePayloads = [focus.id: focusBytes, notes.id: notesBytes, widget.id: Data(#"{"formatVersion":1,"widgetTitle":"Widget","widgetBody":"New dependency"}"#.utf8)]
+    app.installedModules = try repo.installed()
+    let before = app.installedModules
+    #expect(throws: (any Error).self) { try app.installApprovedModule(focus.id) }
+    #expect(try repo.installed() == before)
+    #expect(try app.behaviorResult(.notes, event: "create")["title"] == .string("Existing notes"))
+}
+
+@Test @MainActor func reinstallRefusesCatalogDowngradesAndRepairsTheApprovedVersionWithDisabledDependencies() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("radius-exact-reinstall-" + UUID().uuidString)
+    let previous = AppDelegate.state
+    defer { AppDelegate.state = previous; try? FileManager.default.removeItem(at: directory) }
+    let app = AppState(directory: directory)
+    let repo = try ModuleRepository(root: directory.appendingPathComponent("Modules")); app.repository = repo
+    let widget = ModuleManifest(id: "org.test.widget", name: "Widget", summary: "Dependency", capability: .startWidget, runtime: .declarative)
+    let installed = ModuleManifest(id: "org.test.notes", name: "Notes", version: 2, summary: "Current notes", capability: .notes, dependencies: [widget.id], runtime: .behaviorProgram)
+    let bytes = try completeBehaviorFixture(Data(#"{"formatVersion":1,"entrypoints":{"create":{"op":"object","fields":{"title":{"op":"literal","value":"Version two"},"text":{"op":"literal","value":""}}}}}"#.utf8), capability: .notes)
+    try repo.install(installed, enabled: false, payload: bytes)
+    var older = installed; older.version = 1
+    app.catalog = [older, widget]; app.modulePayloads = [installed.id: bytes, widget.id: Data(#"{"formatVersion":1,"widgetTitle":"Widget","widgetBody":"Dependency"}"#.utf8)]
+    app.installedModules = try repo.installed()
+    #expect(throws: (any Error).self) { try app.reinstallApprovedWorker(installed.id) }
+    #expect(try repo.installed().map(\.manifest) == [installed])
+    #expect(try repo.dataPayload(for: installed.id, runtime: .behaviorProgram, requireEnabled: false) == bytes)
+    app.catalog = [installed, widget]
+    try Data("damaged".utf8).write(to: repo.root.appendingPathComponent(installed.id).appendingPathComponent("program.json"))
+    try app.reinstallApprovedWorker(installed.id)
+    #expect(try repo.dataPayload(for: installed.id, runtime: .behaviorProgram, requireEnabled: false) == bytes)
+    #expect(app.installedModules.count == 2)
+    #expect(app.installedModules.allSatisfy { !$0.enabled })
+}
+
+@Test @MainActor func aValidatedSetupReleasesOldDependenciesBeforeReplacingProvidersInEitherOrder() throws {
+    let previous = AppDelegate.state
+    defer { AppDelegate.state = previous }
+    for providerFirst in [true, false] {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("radius-setup-order-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let app = AppState(directory: directory)
+        let repo = try ModuleRepository(root: directory.appendingPathComponent("Modules")); app.repository = repo
+        let original = ModuleManifest(id: "org.test.original", name: "Original", summary: "Original notes", capability: .notes, runtime: .behaviorProgram)
+        var replacement = original; replacement.id = "org.test.replacement"; replacement.name = "Replacement"
+        let originalBytes = try completeBehaviorFixture(Data(#"{"formatVersion":1,"entrypoints":{"create":{"op":"object","fields":{"title":{"op":"literal","value":"Original"},"text":{"op":"literal","value":""}}}}}"#.utf8), capability: .notes)
+        let replacementBytes = try completeBehaviorFixture(Data(#"{"formatVersion":1,"entrypoints":{"create":{"op":"object","fields":{"title":{"op":"literal","value":"Replacement"},"text":{"op":"literal","value":""}}}}}"#.utf8), capability: .notes)
+        try repo.install(original, payload: originalBytes)
+        var widget = ModuleManifest(id: "org.test.widget", name: "Widget", summary: "Former dependent", capability: .startWidget, dependencies: [original.id], runtime: .declarative)
+        let widgetBytes = Data(#"{"formatVersion":1,"widgetTitle":"Widget","widgetBody":"Old provider no longer required after update"}"#.utf8)
+        try repo.install(widget, payload: widgetBytes)
+        widget.version = 2; widget.dependencies = []
+        app.catalog = [replacement, widget]; app.modulePayloads = [replacement.id: replacementBytes, widget.id: widgetBytes]
+        app.installedModules = try repo.installed()
+        let note = Note(profileID: app.library.profiles[0].id, title: "Saved", text: "Kept while providers change")
+        app.library.notes = [note]
+        let ids = providerFirst ? [replacement.id, widget.id] : [widget.id, replacement.id]
+        let requirements = try app.validateModuleRequirements(for: ids)
+        var configuration = Configuration(); configuration.theme.density = .compact
+        try app.applyApprovedSetup(configuration, requirements: requirements)
+        #expect(app.installedModules.first(where: { $0.id == replacement.id })?.enabled == true)
+        #expect(app.installedModules.first(where: { $0.id == original.id })?.enabled == false)
+        #expect(app.installedModules.first(where: { $0.id == widget.id })?.manifest.version == 2)
+        #expect(try app.behaviorResult(.notes, event: "create")["title"] == .string("Replacement"))
+        #expect(app.library.notes == [note])
+        #expect(app.library.preferences.configuration == configuration)
+    }
+}
+
 private func completeBehaviorFixture(_ bytes: Data, capability: ModuleCapability) throws -> Data {
     var program = try ModuleProgram.decode(bytes)
     if capability == .notes {

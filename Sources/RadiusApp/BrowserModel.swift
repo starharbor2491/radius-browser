@@ -237,6 +237,7 @@ final class BrowserModel: ObservableObject {
     }
     func switchProfile(_ id: UUID) {
         guard id != session.profileID, app.library.profiles.contains(where: { $0.id == id }) else { return }
+        guard app.deletingProfileIDs.isDisjoint(with: [id, session.profileID]) else { app.notice = "Wait for profile deletion to finish before switching profiles."; return }
         let alert = NSAlert(); alert.messageText = "Switch profile?"
         alert.informativeText = "Open pages will reload in the selected profile. Sign-ins stay separate. Unsaved page work may be lost."
         alert.addButton(withTitle: "Switch profile"); alert.addButton(withTitle: "Cancel")
@@ -245,6 +246,7 @@ final class BrowserModel: ObservableObject {
     }
     func changeProfile(_ id: UUID) {
         guard !isClosed, app.library.profiles.contains(where: { $0.id == id }) else { return }
+        guard app.deletingProfileIDs.isDisjoint(with: [id, session.profileID]) else { app.notice = "Wait for profile deletion to finish before switching profiles."; return }
         webTabs.values.forEach { $0.dispose() }; webTabs.removeAll(); closedTabs.removeAll()
         session.profileID = id; panel = nil
         for i in session.tabs.indices {

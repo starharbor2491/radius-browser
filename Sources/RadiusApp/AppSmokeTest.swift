@@ -227,6 +227,7 @@ enum AppSmokeTest {
                     // WindowServer capture includes GPU-backed layers omitted by Cocoa bitmap caching.
                     await captureWindow(window, to: output.appendingPathComponent("Radius-chromium-window.png"))
                     if let chromeWindow = chromium.chromeWindow { await captureWindow(chromeWindow, to: output.appendingPathComponent("Radius-chromium-toolbar-window.png")) }
+                    try await ChromiumAcceptance.verifyKeyboardRouting(browser: browser, ownerWindow: window)
                     try await ChromiumAcceptance.verifyHostAndManagement(chromium, app: app, ownerWindow: window)
                     trace("Closing Chromium while WebKit and Radius remain open")
                     browser.closeTab(id)

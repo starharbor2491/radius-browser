@@ -5,6 +5,88 @@ import RadiusCore
 /// Executed only by the packaged application's isolated native smoke test.
 @MainActor
 enum ChromiumAcceptance {
+    static func verifyKeyboardRouting(browser: BrowserModel, ownerWindow: NSWindow) async throws {
+        guard ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_DATA"] != nil,
+              ProcessInfo.processInfo.arguments.contains("--smoke-test"),
+              let address = ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_URL"],
+              var components = URLComponents(string: address), components.host == "127.0.0.1" else {
+            throw ValidationError("Keyboard acceptance requires the isolated loopback smoke test.")
+        }
+        let originalIDs = Set(browser.session.tabs.map(\.id))
+        let selected = browser.session.selectedTabID
+        let split = browser.session.split
+        let splitSuppressed = browser.session.splitSuppressed
+        defer {
+            for id in browser.session.tabs.map(\.id) where !originalIDs.contains(id) { browser.closeTab(id) }
+            browser.session.split = split
+            browser.session.splitSuppressed = splitSuppressed
+            browser.selectTab(selected)
+        }
+        browser.newTab(url: components.url, engine: .chromium)
+        let probeID = browser.session.selectedTabID
+        guard let tab = browser.activeWebTab as? ChromiumTab else { throw ValidationError("The shortcut probe did not create a Chromium tab.") }
+        try await waitForLoad(tab, host: "127.0.0.1")
+        let showDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while tab.chromeWindow?.isVisible != true {
+            guard ContinuousClock.now < showDeadline else { throw ValidationError("The shortcut probe's Chrome child did not become visible.") }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        guard let chrome = tab.chromeWindow else { throw ValidationError("The shortcut probe has no native Chrome window.") }
+        if let pair = browser.session.split {
+            browser.selectTab(pair.first == probeID ? pair.second : pair.first)
+            ownerWindow.makeKeyAndOrderFront(nil)
+        }
+        chrome.makeKeyAndOrderFront(nil); tab.focus()
+        try await Task.sleep(for: .milliseconds(200))
+        guard chrome.isKeyWindow, browser.session.selectedTabID == probeID else {
+            throw ValidationError("Focusing the Chrome pane did not select its native Radius tab.")
+        }
+        // Send ordinary AppKit events to our own key window. Do not invoke the
+        // browser command callback or grant system accessibility permission.
+        try key("l", code: 37, modifiers: .command, window: chrome)
+        components.fragment = "radius-native-shortcut"
+        guard let target = components.url else { throw ValidationError("The shortcut probe address is invalid.") }
+        for character in target.absoluteString { try key(String(character), code: 0, window: chrome) }
+        try key("\r", code: 36, window: chrome)
+        let locationDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while tab.url != target || tab.loading {
+            guard ContinuousClock.now < locationDeadline else { throw ValidationError("Native Cmd-L did not route typed navigation to Chrome's address bar.") }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        chrome.makeKeyAndOrderFront(nil); tab.focus()
+        let beforeNew = Set(browser.session.tabs.map(\.id))
+        try key("t", code: 17, modifiers: .command, window: chrome)
+        try await Task.sleep(for: .milliseconds(300))
+        let created = Set(browser.session.tabs.map(\.id)).subtracting(beforeNew)
+        guard created.count == 1, created.contains(browser.session.selectedTabID) else {
+            throw ValidationError("Native Cmd-T from Chrome did not create and select one Radius tab.")
+        }
+        for id in created { browser.closeTab(id) }
+        browser.selectTab(probeID)
+        chrome.makeKeyAndOrderFront(nil); tab.focus()
+        try await Task.sleep(for: .milliseconds(100))
+        try key("w", code: 13, modifiers: .command, window: chrome)
+        try await Task.sleep(for: .milliseconds(300))
+        guard !browser.session.tabs.contains(where: { $0.id == probeID }),
+              Set(browser.session.tabs.map(\.id)) == originalIDs, ownerWindow.isVisible else {
+            throw ValidationError("Native Cmd-W from Chrome did not close only its Radius tab.")
+        }
+        browser.session.split = split
+        browser.session.splitSuppressed = splitSuppressed
+        browser.selectTab(selected)
+        try await Task.sleep(for: .milliseconds(300))
+        print("Radius Chromium acceptance: focused Chrome pane and native Cmd-L/T/W routing passed")
+    }
+    private static func key(_ characters: String, code: UInt16, modifiers: NSEvent.ModifierFlags = [], window: NSWindow) throws {
+        for type in [NSEvent.EventType.keyDown, .keyUp] {
+            guard let event = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: modifiers,
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
+                characters: characters, charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code) else {
+                throw ValidationError("AppKit could not create the owned-window keyboard event.")
+            }
+            NSApp.sendEvent(event)
+        }
+    }
     static func verifyHostAndManagement(_ tab: ChromiumTab, app: AppState, ownerWindow: NSWindow) async throws {
         guard ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_DATA"] != nil,
               ProcessInfo.processInfo.arguments.contains("--smoke-test") else {
@@ -96,8 +178,14 @@ enum ChromiumAcceptance {
             "expression": "(async () => { return \(expression); })()", "awaitPromise": true, "returnByValue": true,
             "userGesture": true
         ])
-        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              object["exceptionDetails"] == nil, let result = object["result"] as? [String: Any],
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw ValidationError("Chrome extension acceptance returned invalid JavaScript results.")
+        }
+        if let exception = object["exceptionDetails"] as? [String: Any] {
+            let detail = (exception["exception"] as? [String: Any])?["description"] as? String ?? exception["text"] as? String ?? "Unknown exception"
+            throw ValidationError("Chrome extension acceptance JavaScript: \(String(detail.prefix(1200)))")
+        }
+        guard let result = object["result"] as? [String: Any],
               let value = result["value"] as? String else {
             throw ValidationError("Chrome extension acceptance JavaScript failed.")
         }
@@ -110,6 +198,7 @@ enum ChromiumAcceptance {
             throw ValidationError("The isolated extension API fixture is not configured.")
         }
         let id = "pomncmnnjempbbdlbamhjphmpidacofc"
+        print("Radius Chromium acceptance: loading the isolated native MV3 API fixture")
         let folder = app.dataDirectory.appendingPathComponent("Chromium/ExtensionAcceptance", isDirectory: true)
         let installedFolder = folder.appendingPathComponent("current", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -136,6 +225,7 @@ enum ChromiumAcceptance {
               state["radiusFixtureExtensionId"] == id, let count = Int(state["radiusFixtureCount"] ?? "") else {
             throw ValidationError("The MV3 worker, content script, scripting or storage API did not execute.")
         }
+        print("Radius Chromium acceptance: opening the native extension action and side panel")
         try await click(page, selector: "#radius-fixture-action")
         state = try await waitForFixture(page, key: "radiusFixtureActionOpened", value: "1")
         guard state["radiusFixtureActionState"] != "error" else { throw ValidationError("The extension action did not open.") }
@@ -233,7 +323,8 @@ enum ChromiumAcceptance {
         print("Radius Chromium acceptance: native options window, grants, settings, storage, private isolation, local update and removal passed")
     }
     private static func fixtureState(_ tab: ChromiumTab) async throws -> [String: String] {
-        let text = try await evaluate(tab, "JSON.stringify(document.documentElement.dataset)")
+        if tab.loading { return [:] }
+        let text = try await evaluate(tab, "JSON.stringify(document.documentElement ? document.documentElement.dataset : {})")
         guard let data = text.data(using: .utf8), let result = try JSONSerialization.jsonObject(with: data) as? [String: String] else {
             throw ValidationError("The fixture returned invalid state.")
         }

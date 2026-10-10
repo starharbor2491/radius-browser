@@ -65,15 +65,15 @@ struct ProfilesIntegrationTests {
         #expect((app.library.pendingProfileDeletions ?? []).isEmpty)
         #expect(!FileManager.default.fileExists(atPath: removedPath.path))
         #expect(try Data(contentsOf: keptPath) == Data("keep".utf8))
-        #expect(await cookieValues(profileID: removed.id).isEmpty)
-        #expect(await cookieValues(profileID: kept.id) == ["keep"])
+        #expect(try await cookieValues(profileID: removed.id).isEmpty)
+        #expect(try await cookieValues(profileID: kept.id) == ["keep"])
         let database = try LibraryDatabase(url: directory.appendingPathComponent("library.sqlite"))
         let saved = try await database.load()
         #expect(saved.profiles == [kept])
         #expect(saved.sessions.first(where: { $0.id == regular.session.id }) == regular.session)
         #expect(!saved.sessions.contains { $0.id == privateWindow.session.id })
         #expect(!saved.sessions.flatMap(\.tabs).contains { $0.url?.host == "removed.invalid" })
-        await removeStores([removed.id, kept.id])
+        try await removeStores([removed.id, kept.id])
     }
 
     @Test func failedMetadataCommitRestoresTheProfileWithoutErasingItsFilesOrLeavingTabsBlocked() async throws {
@@ -129,7 +129,7 @@ struct ProfilesIntegrationTests {
         try await app.requestWebsiteDataClear(cleared.id)
         #expect(app.library.pendingWebsiteDataClears == [cleared.id])
         #expect(FileManager.default.fileExists(atPath: clearedPath.path))
-        #expect(await cookieValues(profileID: cleared.id) == ["clear"])
+        #expect(try await cookieValues(profileID: cleared.id) == ["clear"])
         let database = try LibraryDatabase(url: directory.appendingPathComponent("library.sqlite"))
         #expect(try await database.load().pendingWebsiteDataClears == [cleared.id])
 
@@ -144,10 +144,10 @@ struct ProfilesIntegrationTests {
         #expect(restarted.library.history == expectedHistory)
         #expect(!FileManager.default.fileExists(atPath: clearedPath.path))
         #expect(try Data(contentsOf: keptPath) == Data("keep".utf8))
-        #expect(await cookieValues(profileID: cleared.id).isEmpty)
-        #expect(await cookieValues(profileID: kept.id) == ["keep"])
+        #expect(try await cookieValues(profileID: cleared.id).isEmpty)
+        #expect(try await cookieValues(profileID: kept.id) == ["keep"])
         #expect((try await database.load().pendingWebsiteDataClears ?? []).isEmpty)
-        await removeStores([cleared.id, kept.id])
+        try await removeStores([cleared.id, kept.id])
     }
 
     @Test func callbacksCannotReinsertDataWhileTheirProfileIsBeingDeleted() async throws {
@@ -201,9 +201,36 @@ struct ProfilesIntegrationTests {
         } while ContinuousClock().now < deadline
         #expect((restarted.library.pendingWebsiteDataClears ?? []).isEmpty)
         #expect(restored.activeWebTab is WebTab)
-        #expect(await cookieValues(profileID: profileID).isEmpty)
+        #expect(try await cookieValues(profileID: profileID).isEmpty)
         restored.disposeEngineTabs()
-        await removeStores([profileID])
+        try await removeStores([profileID])
+    }
+
+    @Test func switchingProfilesDuringDeletionKeepsBothSourceAndDestinationContextsIntact() async throws {
+        let (app, directory) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let deleting = app.library.profiles[0], kept = Profile(name: "Keep")
+        app.library.profiles.append(kept)
+        let source = BrowserModel(app: app, isPrivate: true)
+        let destination = BrowserModel(app: app, isPrivate: true)
+        defer { source.closeWindow(); destination.closeWindow() }
+        destination.changeProfile(kept.id)
+        source.session.tabs[0].url = URL(string: "https://source.invalid")
+        destination.session.tabs[0].url = URL(string: "https://destination.invalid")
+        let sourceSession = source.session, destinationSession = destination.session
+        let retainedPage = destination.activeWebTab
+
+        app.deletingProfileIDs.insert(deleting.id)
+        source.changeProfile(kept.id)
+        destination.changeProfile(deleting.id)
+        #expect(source.session == sourceSession)
+        #expect(destination.session == destinationSession)
+        #expect(destination.activeWebTab === retainedPage)
+        #expect(source.activeWebTab is UnavailableEngineTab)
+
+        app.deletingProfileIDs.remove(deleting.id)
+        source.changeProfile(kept.id)
+        #expect(source.session.profileID == kept.id)
     }
 
     private func fixture() async throws -> (AppState, URL) {
@@ -233,21 +260,59 @@ struct ProfilesIntegrationTests {
     }
     private func setCookie(profileID: UUID, value: String) async throws {
         let cookie = try #require(HTTPCookie(properties: [.domain: "profiles.fixture.invalid", .path: "/", .name: "radius-profile-test", .value: value]))
-        await WKWebsiteDataStore(forIdentifier: profileID).httpCookieStore.setCookie(cookie)
-        #expect(await cookieValues(profileID: profileID) == [value])
+        try await ProfileCallbackWait<Void>.wait("setting profile cookie") { request in
+            WKWebsiteDataStore(forIdentifier: profileID).httpCookieStore.setCookie(cookie) {
+                Task { @MainActor in request.finish(.success(())) }
+            }
+        }
+        #expect(try await cookieValues(profileID: profileID) == [value])
     }
-    private func cookieValues(profileID: UUID) async -> [String] {
-        await withCheckedContinuation { continuation in
+    private func cookieValues(profileID: UUID) async throws -> [String] {
+        try await ProfileCallbackWait<[String]>.wait("reading profile cookies") { request in
             WKWebsiteDataStore(forIdentifier: profileID).httpCookieStore.getAllCookies { cookies in
-                continuation.resume(returning: cookies.filter { $0.name == "radius-profile-test" }.map(\.value).sorted())
+                let values = cookies.filter { $0.name == "radius-profile-test" }.map(\.value).sorted()
+                Task { @MainActor in request.finish(.success(values)) }
             }
         }
     }
-    private func removeStores(_ ids: [UUID]) async {
+    private func removeStores(_ ids: [UUID]) async throws {
         for id in ids {
-            await withCheckedContinuation { continuation in
-                WKWebsiteDataStore.remove(forIdentifier: id) { _ in continuation.resume() }
+            try await ProfileCallbackWait<Void>.wait("removing test website storage") { request in
+                WKWebsiteDataStore.remove(forIdentifier: id) { error in
+                    Task { @MainActor in
+                        if let error { request.finish(.failure(error)) }
+                        else { request.finish(.success(())) }
+                    }
+                }
             }
         }
+    }
+}
+
+/// SDK callbacks must fail within a deadline, including cleanup after a test.
+/// One-shot completion also makes a late WebKit response harmless.
+@MainActor
+private final class ProfileCallbackWait<Value: Sendable> {
+    private var continuation: CheckedContinuation<Value, any Error>?
+    private var deadline: Task<Void, Never>?
+    static func wait(_ operationName: String, operation: (ProfileCallbackWait<Value>) -> Void) async throws -> Value {
+        let request = ProfileCallbackWait<Value>()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                request.continuation = continuation
+                request.deadline = Task {
+                    do { try await Task.sleep(for: .seconds(10)) }
+                    catch { return }
+                    request.finish(.failure(ValidationError("WebKit timed out while \(operationName).")))
+                }
+                operation(request)
+                if Task.isCancelled { request.finish(.failure(CancellationError())) }
+            }
+        } onCancel: { Task { @MainActor in request.finish(.failure(CancellationError())) } }
+    }
+    func finish(_ result: Result<Value, any Error>) {
+        guard let continuation else { return }
+        self.continuation = nil; deadline?.cancel(); deadline = nil
+        continuation.resume(with: result)
     }
 }

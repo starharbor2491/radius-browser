@@ -37,6 +37,10 @@ struct BrowserSymbol: View {
     @Environment(\.browserSymbols) private var symbols
     private var resolved: String {
         let candidate = symbols[name] ?? name
+        if theme.iconStyle == .outline, candidate.hasSuffix(".fill") {
+            let outline = String(candidate.dropLast(5))
+            if NSImage(systemSymbolName: outline, accessibilityDescription: nil) != nil { return outline }
+        }
         let filled = candidate.hasSuffix(".fill") ? candidate : candidate + ".fill"
         if theme.iconStyle == .filled, NSImage(systemSymbolName: filled, accessibilityDescription: nil) != nil { return filled }
         return NSImage(systemSymbolName: candidate, accessibilityDescription: nil) != nil ? candidate : name
@@ -77,8 +81,8 @@ struct IconButton: View {
     var body: some View {
         Button(action: action) {
             BrowserSymbol(name: icon).frame(width: theme.density == .compact ? 28 : 32, height: theme.density == .compact ? 28 : 32)
-                .foregroundStyle(contrast == .increased ? Color.primary : (active ? Color.accentColor : theme.foreground))
-                .background(active ? Color.accentColor.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: theme.cornerRadius))
+                .foregroundStyle(contrast == .increased ? Color.primary : (active ? theme.tint : theme.foreground))
+                .background(active ? theme.tint.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: theme.cornerRadius))
         }.buttonStyle(.plain).help(title).accessibilityLabel(title)
     }
 }

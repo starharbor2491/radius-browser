@@ -26,7 +26,10 @@ extension AppState {
             throw ValidationError(notice ?? "The profile could not be saved. Nothing was erased.")
         }
         ChromiumRuntime.shared.blockProfilesPendingDeletion(Set((library.pendingProfileDeletions ?? []) + (library.pendingWebsiteDataClears ?? [])))
-        for window in affected { window.resetAfterProfileDeletion(replacementID: replacement) }
+        // New windows may have opened while downloads and engine closure awaited.
+        for window in windows.values.compactMap(\.model) where window.session.profileID == id {
+            window.resetAfterProfileDeletion(replacementID: replacement)
+        }
         NotificationCenter.default.post(name: .radiusProfileDeleted, object: id)
         await finishPendingProfileDeletions()
         if (library.pendingProfileDeletions ?? []).contains(id) {

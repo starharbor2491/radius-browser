@@ -86,11 +86,15 @@ jobs:
       - name: Native packaged application acceptance
         env:
           CHROMIUM_ARCH: ${{ matrix.chromium }}
+          RADIUS_CHROMIUM_WEBSTORE_TEST: "1"
         run: |
           if [[ -n "$CHROMIUM_ARCH" ]]; then
             export RADIUS_CHROMIUM_PACKAGE="$RUNNER_TEMP/radius-runtime/Chromium-$CHROMIUM_ARCH.radiusengine"
           fi
           ./scripts/smoke-app.sh
+      - name: Verify installed Chrome Web Store extension after process restart
+        if: matrix.chromium != ''
+        run: python3 scripts/smoke-chromium-restart.py
       - name: Notarize application and graphical offline installer
         run: python3 scripts/package-release.py
       - uses: actions/upload-artifact@v4

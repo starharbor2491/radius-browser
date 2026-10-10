@@ -15,7 +15,7 @@ struct CustomizeView: View {
     @State private var requirements: [String] = []
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            SheetHeader(title: "Customize", subtitle: "Change the look. Arrange your space. Keep your place.")
+            SheetHeader(title: "Customize", subtitle: "Appearance, layouts, and saved setups.")
             HStack(alignment: .top, spacing: 28) {
                 VStack(alignment: .leading, spacing: 16) {
                     Picker("Customize category", selection: $selection) { Text("Appearance").tag(0); Text("Layout").tag(1); Text("Saved setups").tag(2) }.pickerStyle(.segmented).labelsHidden()
@@ -53,13 +53,13 @@ struct CustomizeView: View {
             field("Accent") {
                 HStack(spacing: 12) {
                     ForEach(Accent.allCases, id: \.self) { accent in
-                        Button { change { $0.theme.accent = accent } } label: {
+                        Button { change { $0.theme.accent = accent; $0.theme.accentHex = nil } } label: {
                             Circle().fill(accent.color).frame(width: 28, height: 28)
-                                .overlay { if draft.theme.accent == accent { Image(systemName: "checkmark").font(.caption.bold()).foregroundStyle(accent == .teal || accent == .orange ? Color.black : Color.white) } }
-                                .overlay { if draft.theme.accent == accent { Circle().stroke(.primary, lineWidth: 2).padding(-3) } }
+                                .overlay { if draft.theme.accentHex == nil && draft.theme.accent == accent { Image(systemName: "checkmark").font(.caption.bold()).foregroundStyle(accent == .teal || accent == .orange ? Color.black : Color.white) } }
+                                .overlay { if draft.theme.accentHex == nil && draft.theme.accent == accent { Circle().stroke(.primary, lineWidth: 2).padding(-3) } }
                                 .padding(4).contentShape(Rectangle())
                         }.buttonStyle(.plain).help(accent.rawValue.capitalized).accessibilityLabel("\(accent.rawValue.capitalized) accent")
-                            .accessibilityAddTraits(draft.theme.accent == accent ? .isSelected : [])
+                            .accessibilityAddTraits(draft.theme.accentHex == nil && draft.theme.accent == accent ? .isSelected : [])
                     }
                 }
             }
@@ -183,7 +183,7 @@ struct CustomizeView: View {
             let required = pack.requiredModuleIDs ?? []
             let available = required.filter { id in app.catalog.contains(where: { $0.id == id }) || app.installedModules.contains(where: { $0.id == id }) }
             let missing = required.filter { !available.contains($0) }
-            let plan = (try? app.moduleInstallationPlan(for: available)) ?? []
+            let plan = (try? app.validateModuleRequirements(for: available)) ?? available.compactMap { app.moduleManifestCandidate($0) }
             let alert = NSAlert(); alert.messageText = "Preview \(pack.name)"
             alert.informativeText = "This setup changes appearance and layout.\n\nRequired packages:\n" + (required.isEmpty ? "None" : (plan.map { "\($0.name) · \($0.publisher)" } + missing.map { "Unavailable: " + $0 }).joined(separator: "\n")) + "\n\nAdd unavailable catalogs in Modules or remove their requirements in Saved setups. Packages and permissions are reviewed before Apply. Importing this preview does not install anything."
             alert.addButton(withTitle: "Preview setup"); alert.addButton(withTitle: "Cancel")
@@ -199,11 +199,11 @@ struct LayoutPreview: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 5) { Circle().fill(.red); Circle().fill(.yellow); Circle().fill(.green); Spacer() }.frame(height: 8).padding(10)
-            if layout.tabs == .top { miniTabs }
+            if layout.hideTabStrip != true && layout.tabs == .top { miniTabs }
             if layout.navigation == .top { miniNavigation }
             if layout.bookmarksBar { Text("Bookmarks").font(.system(size: 8)).frame(maxWidth: .infinity, alignment: .leading).padding(5).background(.quaternary) }
             HStack(spacing: 0) {
-                if layout.tabs == .leading { verticalTabs }
+                if layout.hideTabStrip != true && layout.tabs == .leading { verticalTabs }
                 if layout.sidebar == .leading { miniSidebar }
                 Group {
                     if layout.split == .sideBySide { HStack(spacing: 0) { miniDocument; Divider(); miniDocument } }
@@ -211,10 +211,10 @@ struct LayoutPreview: View {
                     else { miniDocument }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 if layout.sidebar == .trailing { miniSidebar }
-                if layout.tabs == .trailing { verticalTabs }
+                if layout.hideTabStrip != true && layout.tabs == .trailing { verticalTabs }
             }
             if layout.navigation == .bottom { miniNavigation }
-            if layout.tabs == .bottom { miniTabs }
+            if layout.hideTabStrip != true && layout.tabs == .bottom { miniTabs }
             if layout.statusBar { Text("WebKit").font(.system(size: 7)).frame(maxWidth: .infinity, alignment: .leading).padding(5) }
         }.modifier(ChromeSurface(theme: theme)).clipShape(RoundedRectangle(cornerRadius: theme.cornerRadius))
             .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius).stroke(.primary.opacity(0.15)))

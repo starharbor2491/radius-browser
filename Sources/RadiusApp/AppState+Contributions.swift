@@ -42,23 +42,20 @@ extension AppState {
         // Preview publisher, all dependencies, and permission differences before
         // any installation, role replacement, or configuration mutation.
         guard approveModules(requirements, activateRequirements: true) else { return false }
+        try applyApprovedSetup(configuration, requirements: requirements)
+        return true
+    }
+    func applyApprovedSetup(_ configuration: Configuration, requirements: [ModuleManifest]) throws {
         try withAtomicModuleChanges(for: requirements.map(\.id)) {
-            for id in required { try installApprovedModule(id) }
-            guard let repository else { throw ValidationError("Repair module storage first.") }
-            for manifest in requirements {
-                guard let installed = installedModules.first(where: { $0.id == manifest.id }) else { throw ValidationError("A required package did not install.") }
-                if manifest.capability.isExclusive {
-                    if manifest.capability == .resourceMonitor { try replaceResourceProvider(with: manifest.id) }
-                    else { try repository.replaceProvider(role: manifest.capability, with: manifest.id) }
-                } else if !installed.enabled { try repository.setEnabled(manifest.id, true) }
-                installedModules = try repository.installed()
-            }
+            // Release every old dependency using the already validated whole
+            // setup before replacing any providers; required ID order is inert.
+            try installApprovedModuleCode(requirements)
+            try activateApprovedModuleRequirements(requirements)
             applyConfiguration(configuration)
         }
         // The setup explicitly supplies customized values; preserve them after
         // contribution defaults have been synchronized at the transaction boundary.
         applyConfiguration(configuration)
-        return true
     }
     var configurationModuleRequirements: [String] {
         installedModules.filter { $0.enabled && [.tabSystem, .theme, .layout, .icons, .menu, .startWidget].contains($0.manifest.capability) }.map(\.id)
