@@ -49,7 +49,7 @@ struct BrowserWindow: View {
     @State private var captureTask: Task<Void, Never>?
     @State private var capturing = false
     @State private var navigationEpoch = 0
-    @State private var windowWidth: CGFloat = 1000
+    @State private var windowWidth: CGFloat = 760
     @Environment(\.openWindow) private var openWindow
     @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
     @Environment(\.colorSchemeContrast) private var systemContrast
@@ -91,13 +91,13 @@ struct BrowserWindow: View {
             }
             if !hidden("bookmarks") && layout.bookmarksBar { bookmarksBar }
             HStack(spacing: 0) {
-                if showTabs && layout.tabs == .leading { tabs(vertical: true).frame(width: min(layout.tabsWidth ?? 190, max(140, windowWidth * 0.22))) }
+                if showTabs && layout.tabs == .leading { tabs(vertical: true).frame(width: min(layout.tabsWidth ?? 190, max(140, windowWidth * 0.22))).background(BrowserLayoutRegion(identifier: "radius.verticalTabs")) }
                 if !hidden("sidebar") && layout.sidebar == .leading && visiblePanel != nil { sidebar }
                 if let secondaryPanel, layout.sidebar != .leading { secondarySidebar(secondaryPanel) }
-                page.frame(maxWidth: .infinity, maxHeight: .infinity)
+                page.frame(maxWidth: .infinity, maxHeight: .infinity).background(BrowserLayoutRegion(identifier: "radius.page"))
                 if !hidden("sidebar") && layout.sidebar == .trailing && visiblePanel != nil { sidebar }
                 if let secondaryPanel, layout.sidebar == .leading { secondarySidebar(secondaryPanel) }
-                if showTabs && layout.tabs == .trailing { tabs(vertical: true).frame(width: min(layout.tabsWidth ?? 190, max(140, windowWidth * 0.22))) }
+                if showTabs && layout.tabs == .trailing { tabs(vertical: true).frame(width: min(layout.tabsWidth ?? 190, max(140, windowWidth * 0.22))).background(BrowserLayoutRegion(identifier: "radius.verticalTabs")) }
             }
             if !hidden("navigation") {
                 if layout.navigation == .bottom { navigation }
@@ -117,8 +117,7 @@ struct BrowserWindow: View {
         .focusedSceneObject(model)
         .animation(theme.reducedMotion || systemReduceMotion ? nil : .easeOut(duration: 0.16), value: visiblePanel)
         .background(WindowCloseObserver(model: model))
-        .background(GeometryReader { geometry in Color.clear.preference(key: BrowserWindowWidthKey.self, value: geometry.size.width) })
-        .onPreferenceChange(BrowserWindowWidthKey.self) { windowWidth = $0 }
+        .background(BrowserLayoutRegion(identifier: "radius.browserLayout", onWindowWidth: { width in if windowWidth != width { windowWidth = width } }))
     }
     private var presentation: some View {
         browserLayout
@@ -414,6 +413,7 @@ struct BrowserWindow: View {
     private var sidebar: some View {
         SidebarView(model: model, panel: visiblePanel ?? .bookmarks).frame(width: min(layout.sidebarWidth, max(180, windowWidth * 0.24)))
             .modifier(ChromeSurface(theme: sidebarTheme)).overlay(alignment: layout.sidebar == .leading ? .trailing : .leading) { Divider() }
+            .background(BrowserLayoutRegion(identifier: "radius.primarySidebar"))
     }
     private var bookmarksBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -431,7 +431,8 @@ struct BrowserWindow: View {
     }
     private func focusAddress() { addressFocused = !model.activeWebTab.focusAddressBar() }
     private func secondarySidebar(_ panel: BrowserPanel) -> some View {
-        SidebarView(model: model, panel: panel).frame(width: min(layout.sidebarWidth, max(180, windowWidth * 0.24))).modifier(ChromeSurface(theme: sidebarTheme))
+        SidebarView(model: model, panel: panel, onClose: model.closeSecondarySidebar).frame(width: min(layout.sidebarWidth, max(180, windowWidth * 0.24))).modifier(ChromeSurface(theme: sidebarTheme))
+            .background(BrowserLayoutRegion(identifier: "radius.secondarySidebar"))
     }
     private func components(in region: ToolbarRegion) -> [ToolbarComponent] {
         (layout.toolbarComponents ?? ToolbarComponent.browserDefaults).filter {
@@ -626,7 +627,34 @@ struct ZoomControls: View {
     }
 }
 
-private struct BrowserWindowWidthKey: PreferenceKey {
-    static let defaultValue: CGFloat = 1000
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+/// Native window notifications provide the actual content width even when
+/// SwiftUI preference propagation is interrupted by presentation modifiers.
+private struct BrowserLayoutRegion: NSViewRepresentable {
+    let identifier: String
+    var onWindowWidth: (@MainActor (CGFloat) -> Void)? = nil
+    func makeNSView(context: Context) -> RegionView {
+        let view = RegionView(); view.identifier = NSUserInterfaceItemIdentifier(identifier)
+        view.onWindowWidth = onWindowWidth; return view
+    }
+    func updateNSView(_ view: RegionView, context: Context) {
+        view.identifier = NSUserInterfaceItemIdentifier(identifier); view.onWindowWidth = onWindowWidth
+    }
+    @MainActor final class RegionView: NSView {
+        var onWindowWidth: (@MainActor (CGFloat) -> Void)?
+        private var resizeObservation: NotificationObservation?
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow(); resizeObservation = nil
+            guard let window, onWindowWidth != nil else { return }
+            resizeObservation = NotificationObservation(NotificationCenter.default.addObserver(forName: NSWindow.didResizeNotification, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.publishWindowWidth() }
+            })
+            // Attaching an AppKit view can happen during a SwiftUI update.
+            Task { @MainActor [weak self] in self?.publishWindowWidth() }
+        }
+        private func publishWindowWidth() {
+            guard let width = window?.contentView?.bounds.width, width.isFinite, width > 0 else { return }
+            onWindowWidth?(width)
+        }
+    }
 }

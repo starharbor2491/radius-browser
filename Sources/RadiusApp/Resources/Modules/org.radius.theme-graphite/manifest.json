@@ -2,7 +2,7 @@
   "id": "org.radius.theme-graphite",
   "name": "Graphite Theme",
   "version": 1,
-  "summary": "Graphite Theme supplied as a removable declarative package.",
+  "summary": "Neutral surfaces and restrained accents that follow your Mac’s light or dark appearance.",
   "publisher": "Radius",
   "source": "https://github.com/starharbor2491/radius-browser",
   "capability": "theme",

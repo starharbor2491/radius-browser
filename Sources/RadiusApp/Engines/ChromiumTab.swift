@@ -17,10 +17,12 @@ final class ChromiumTab: BrowserEngineTab {
     private var downloadIDs = Set<String>()
     private var disposing = false
     private var closeTask: Task<Void, Never>?
+    private var chromeFocusObserver: NSObjectProtocol?
     @Published private(set) var chromeStyle = false
-    override var hasNativeNavigationChrome: Bool { chromeStyle }
+    @Published private(set) var navigationChrome = false
+    override var hasNativeNavigationChrome: Bool { chromeStyle && navigationChrome }
     override func focusAddressBar() -> Bool {
-        guard chromeStyle else { return false }
+        guard hasNativeNavigationChrome else { return false }
         command(Int(RADIUS_CEF_FOCUS_LOCATION)); return true
     }
     private var page: UnsafeMutableRawPointer?
@@ -47,6 +49,7 @@ final class ChromiumTab: BrowserEngineTab {
         isAuxiliary = hostView.value(forKey: "auxiliary") as? Bool == true
         super.init()
         chromeStyle = hostView.value(forKey: "chromeStyle") as? Bool == true
+        navigationChrome = hostView.value(forKey: "navigationChrome") as? Bool == true
         runtime.register(self)
         runtime.api!.set_callbacks(page, Unmanaged.passUnretained(self).toOpaque(), { context, event, json in
             guard let context, let json else { return }
@@ -80,6 +83,16 @@ final class ChromiumTab: BrowserEngineTab {
                 return accepted ? 1 : 0
             }
         })
+        // AppKit can change an attached child's key status without a distinct
+        // Views activation transition. Use the actual owned NSWindow event to
+        // keep Radius's selected split pane and native commands synchronized.
+        chromeFocusObserver = NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main) { [weak self] notification in
+            MainActor.assumeIsolated {
+                guard let self, let window = notification.object as? NSWindow,
+                      window === self.chromeWindow else { return }
+                self.onActivate?()
+            }
+        }
     }
     private static func performApplicationMenuItem(_ title: String) {
         func perform(in menu: NSMenu) -> Bool {
@@ -109,7 +122,12 @@ final class ChromiumTab: BrowserEngineTab {
     override func goForward() { errorMessage = nil; command(Int(RADIUS_CEF_FORWARD)) }
     override func setZoom(_ value: Double) { super.setZoom(value); command(Int(RADIUS_CEF_ZOOM), value: zoom) }
     override func updatePopupPolicy() { command(Int(RADIUS_CEF_POPUPS), value: allowPopups?() == true ? 1 : 0) }
-    override func focus() { command(Int(RADIUS_CEF_FOCUS)) }
+    override func focus() {
+        command(Int(RADIUS_CEF_FOCUS))
+        // Re-selecting the native pane while this child is already key emits
+        // no AppKit key-window notification, but still changes command context.
+        if chromeWindow?.isKeyWindow == true { onActivate?() }
+    }
     override func find(_ text: String, backwards: Bool = false) { command(Int(RADIUS_CEF_FIND), text: text, value: backwards ? 1 : 0) }
     override func pageHTML() async throws -> String {
         let clock = ContinuousClock()
@@ -188,6 +206,7 @@ final class ChromiumTab: BrowserEngineTab {
         switch event {
         case Int32(RADIUS_CEF_STATE), Int32(RADIUS_CEF_FINISHED):
             if let chrome = value["chromeStyle"] as? Bool { chromeStyle = chrome }
+            if let chrome = value["navigationChrome"] as? Bool { navigationChrome = chrome }
             if value["navigationStart"] as? Bool == true { didStartNavigation(); return }
             if let address = value["url"] as? String { pageURL = URL(string: address) }
             if let title = value["title"] as? String { pageTitle = title.isEmpty ? nil : title }
@@ -204,6 +223,7 @@ final class ChromiumTab: BrowserEngineTab {
         case Int32(RADIUS_CEF_NOTICE):
             if let message = value["message"] as? String { onNotice?(message) }
         case Int32(RADIUS_CEF_CLOSED):
+            removeFocusObserver()
             downloads.chromiumOwnerClosed(ids: downloadIDs)
             downloadIDs.removeAll()
             page = nil; cancelRequests(); runtime.finishedClosing(self); onClose?()
@@ -270,6 +290,7 @@ final class ChromiumTab: BrowserEngineTab {
         let notice = onNotice
         if !disposing {
             disposing = true
+            removeFocusObserver()
             cancelRequests(); super.dispose()
         }
         // A previous cancellation attempt can time out while Chromium still
@@ -293,6 +314,10 @@ final class ChromiumTab: BrowserEngineTab {
                 }
             }
         }
+    }
+    private func removeFocusObserver() {
+        if let chromeFocusObserver { NotificationCenter.default.removeObserver(chromeFocusObserver) }
+        chromeFocusObserver = nil
     }
     private func closePage() {
         if let page { runtime.api?.close_page(page); self.page = nil }

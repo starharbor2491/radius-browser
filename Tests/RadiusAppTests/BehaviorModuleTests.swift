@@ -4,6 +4,8 @@ import Testing
 import RadiusCore
 @testable import RadiusApp
 
+extension NativeIntegrationTests {
+struct BehaviorModuleTests {
 @Test @MainActor func applicationUpdatesRefreshNativeSignaturesWithoutRestoringRemovedOrDisabledPackages() throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("radius-worker-upgrade-" + UUID().uuidString)
     let previous = AppDelegate.state
@@ -235,6 +237,28 @@ import RadiusCore
     try app.setModuleEnabledApproved(replacement.id, enabled: true)
     #expect(app.library.preferences.configuration.theme == newTheme)
     #expect(app.library.preferences.configuration.layout == custom.layout)
+
+    // Tab-system updates change provider behavior rather than user appearance
+    // defaults. The exported configuration must match that updated behavior.
+    var tabs = ModuleManifest(id: "org.test.tabs", name: "Tabs", summary: "Tab presentation", capability: .tabSystem, runtime: .declarative)
+    app.catalog.append(tabs); app.modulePayloads[tabs.id] = Data(#"{"formatVersion":1,"treeTabs":false}"#.utf8)
+    try app.installApprovedModule(tabs.id)
+    let parent = BrowserTab(title: "Pinned", pinned: true), child = BrowserTab(title: "Child", parentID: parent.id)
+    app.library.sessions = [WindowSession(profileID: app.library.profiles[0].id, tabs: [parent, child])]
+    let sessions = app.library.sessions
+    var expected = app.library.preferences.configuration
+    expected.layout.treeTabs = true; expected.normalize()
+    tabs.version = 2
+    app.catalog.removeAll { $0.id == tabs.id }; app.catalog.append(tabs)
+    app.modulePayloads[tabs.id] = Data(#"{"formatVersion":1,"treeTabs":true}"#.utf8)
+    try app.installApprovedModule(tabs.id)
+    #expect(app.library.preferences.configuration == expected)
+    #expect(try repo.definition(for: tabs.id).treeTabs == app.library.preferences.configuration.layout.treeTabs)
+    #expect(app.configurationModuleRequirements.contains(tabs.id))
+    #expect(app.library.sessions == sessions)
+}
+
+}
 }
 
 private struct AppearanceDefinitionFixture: Encodable {

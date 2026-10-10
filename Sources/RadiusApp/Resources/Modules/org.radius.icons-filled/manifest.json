@@ -2,7 +2,7 @@
   "id": "org.radius.icons-filled",
   "name": "Filled Icons",
   "version": 1,
-  "summary": "Filled Icons supplied as a removable declarative package.",
+  "summary": "Solid icons for navigation, bookmarks, history, and modules.",
   "publisher": "Radius",
   "source": "https://github.com/starharbor2491/radius-browser",
   "capability": "icons",

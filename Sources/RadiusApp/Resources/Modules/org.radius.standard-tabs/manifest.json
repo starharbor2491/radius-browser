@@ -2,7 +2,7 @@
   "id": "org.radius.standard-tabs",
   "name": "Standard Tabs",
   "version": 1,
-  "summary": "Standard Tabs supplied as a removable declarative package.",
+  "summary": "A flat tab list without nested branches.",
   "publisher": "Radius",
   "source": "https://github.com/starharbor2491/radius-browser",
   "capability": "tabSystem",

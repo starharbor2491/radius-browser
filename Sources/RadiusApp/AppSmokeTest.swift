@@ -112,11 +112,41 @@ enum AppSmokeTest {
                     .init(command: .customize, region: .overflow)
                 ]
                 app.applyConfiguration(customized)
+                var wideTabsWidth: CGFloat = 0, wideSidebarWidth: CGFloat = 0
                 for width in [1240.0, 800.0] {
                     window.setContentSize(NSSize(width: width, height: 720))
                     try await Task.sleep(for: .milliseconds(450))
                     guard let view = window.contentView else { throw ValidationError("Customized browser content is unavailable.") }
+                    guard abs(view.bounds.width - width) < 2,
+                          let tabs = layoutRegion("radius.verticalTabs", in: view),
+                          let primary = layoutRegion("radius.primarySidebar", in: view),
+                          let page = layoutRegion("radius.page", in: view), page.bounds.width >= 300 else {
+                        throw ValidationError("The customized browser did not fit its actual \(Int(width))-point content area with a usable page.")
+                    }
+                    let secondary = layoutRegion("radius.secondarySidebar", in: view)
+                    trace("Customized layout: content \(Int(view.bounds.width)), tabs \(Int(tabs.bounds.width)), primary sidebar \(Int(primary.bounds.width)), secondary \(secondary == nil ? "hidden" : "visible"), page \(Int(page.bounds.width))")
+                    if width == 1240 {
+                        guard let secondary, secondary.bounds.width >= 180, tabs.bounds.width > 220, primary.bounds.width > 240,
+                              tabs.bounds.width <= 300, primary.bounds.width <= 360 else {
+                            throw ValidationError("The wide browser did not render its second sidebar or use its actual width for panel sizing.")
+                        }
+                        wideTabsWidth = tabs.bounds.width; wideSidebarWidth = primary.bounds.width
+                    } else {
+                        guard secondary == nil, tabs.bounds.width < wideTabsWidth, primary.bounds.width < wideSidebarWidth else {
+                            throw ValidationError("The narrow browser did not shrink its panels and hide the second sidebar.")
+                        }
+                    }
                     try capture(view, to: output.appendingPathComponent("Radius-customized-\(Int(width)).png"))
+                }
+                window.setContentSize(NSSize(width: 1240, height: 720))
+                try await Task.sleep(for: .milliseconds(250))
+                browser.closeSecondarySidebar()
+                try await Task.sleep(for: .milliseconds(250))
+                guard let view = window.contentView, browser.panel == .resources,
+                      layoutRegion("radius.primarySidebar", in: view) != nil,
+                      layoutRegion("radius.secondarySidebar", in: view) == nil,
+                      app.library.preferences.configuration.layout.secondaryPanel == nil else {
+                    throw ValidationError("Closing the second sidebar did not retain the primary panel and save the change.")
                 }
                 window.setFrame(originalFrame, display: true)
                 app.applyConfiguration(originalConfiguration)
@@ -228,8 +258,21 @@ enum AppSmokeTest {
                     // WindowServer capture includes GPU-backed layers omitted by Cocoa bitmap caching.
                     await captureWindow(window, to: output.appendingPathComponent("Radius-chromium-window.png"))
                     if let chromeWindow = chromium.chromeWindow { await captureWindow(chromeWindow, to: output.appendingPathComponent("Radius-chromium-toolbar-window.png")) }
-                    try await ChromiumAcceptance.verifyKeyboardRouting(browser: browser, ownerWindow: window)
-                    try await ChromiumAcceptance.verifyHostAndManagement(chromium, app: app, ownerWindow: window)
+                    // These checks restore their own windows/session state. Collect
+                    // independent failures so a shortcut defect does not conceal
+                    // extension incompatibility; every failure still rejects the run.
+                    var acceptanceFailures: [String] = []
+                    do { try await ChromiumAcceptance.verifyKeyboardRouting(browser: browser, ownerWindow: window) }
+                    catch {
+                        let message = "Keyboard routing: " + error.localizedDescription
+                        acceptanceFailures.append(message); trace(message)
+                    }
+                    do { try await ChromiumAcceptance.verifyHostAndManagement(chromium, app: app, ownerWindow: window) }
+                    catch {
+                        let message = "Chrome hosting/extensions: " + error.localizedDescription
+                        acceptanceFailures.append(message); trace(message)
+                    }
+                    if !acceptanceFailures.isEmpty { throw ValidationError(acceptanceFailures.joined(separator: "\n")) }
                     trace("Closing Chromium while WebKit and Radius remain open")
                     browser.closeTab(id)
                     let closeDeadline = Date().addingTimeInterval(10)
@@ -250,6 +293,11 @@ enum AppSmokeTest {
             // Let this actor job return before AppKit enters its deferred-termination loop.
             NSApp.perform(#selector(NSApplication.terminate(_:)), with: nil, afterDelay: 0)
         } catch { fail(error.localizedDescription) }
+    }
+    private static func layoutRegion(_ identifier: String, in root: NSView) -> NSView? {
+        if root.identifier?.rawValue == identifier, !root.isHidden, root.bounds.width > 0, root.bounds.height > 0 { return root }
+        for child in root.subviews { if let match = layoutRegion(identifier, in: child) { return match } }
+        return nil
     }
     private static func capture(_ view: NSView, to url: URL) throws {
         guard let image = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw ValidationError("Cannot capture \(url.lastPathComponent).") }

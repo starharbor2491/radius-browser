@@ -35,6 +35,7 @@
 @property(nonatomic, assign) BOOL contentHidden;
 @property(nonatomic, assign) BOOL auxiliary;
 @property(nonatomic, assign) BOOL chromeStyle;
+@property(nonatomic, assign) BOOL navigationChrome;
 - (void)synchronizeBrowserWindow;
 @end
 @implementation RadiusChromiumHostView
@@ -42,6 +43,7 @@
 @synthesize contentHidden;
 @synthesize auxiliary;
 @synthesize chromeStyle;
+@synthesize navigationChrome;
 - (void)synchronizeBrowserWindow {
   if (self.auxiliary) return;
   NSWindow* child = self.browserWindow;
@@ -159,6 +161,7 @@ struct Page {
   CefRefPtr<CefBrowser> browser;
   CefRefPtr<Client> client;
   CefRefPtr<CefBrowserView> browser_view;
+  CefRefPtr<CefView> toolbar;
   CefRefPtr<CefWindow> window;
   CefRefPtr<BrowserViewDelegate> view_delegate;
   CefRefPtr<WindowDelegate> window_delegate;
@@ -197,6 +200,7 @@ void State(Page* page, bool finished = false) {
   value->SetString("url", page->browser->GetMainFrame()->GetURL());
   value->SetString("title",page->title);
   value->SetBool("chromeStyle",page->browser->GetHost()->GetRuntimeStyle()==CEF_RUNTIME_STYLE_CHROME);
+  value->SetBool("navigationChrome",page->view.navigationChrome);
   value->SetBool("loading", page->browser->IsLoading());
   value->SetBool("canGoBack", page->browser->CanGoBack());
   value->SetBool("canGoForward", page->browser->CanGoForward());
@@ -565,11 +569,8 @@ class WindowDelegate final : public CefWindowDelegate {
     layout_settings.horizontal = false;
     auto layout = window->SetToBoxLayout(layout_settings);
     window->AddChildView(page_->browser_view);
-    // GetChromeToolbar becomes available after the browser enters a window.
-    if (auto toolbar = page_->browser_view->GetChromeToolbar()) {
-      window->AddChildView(toolbar);
-      window->ReorderChildView(toolbar,0);
-    }
+    // Chrome controls are attached by BrowserViewDelegate::OnWindowChanged,
+    // the documented point at which GetChromeToolbar becomes available.
     layout->SetFlexForView(page_->browser_view,1);
     NSView* native = (NSView*)window->GetWindowHandle();
     page_->view.browserWindow = [native window];
@@ -622,6 +623,29 @@ class BrowserViewDelegate final : public CefBrowserViewDelegate {
  public:
   explicit BrowserViewDelegate(Page* page) : page_(page) {}
   void DetachPage() { page_ = nullptr; }
+  void OnWindowChanged(CefRefPtr<CefView> view,bool added) override {
+    if (!page_) return;
+    if (added && !page_->toolbar) {
+      auto browser_view=view->AsBrowserView();
+      auto window=view->GetWindow();
+      if (browser_view && window) {
+        page_->toolbar=browser_view->GetChromeToolbar();
+        if (page_->toolbar) {
+          window->AddChildViewAt(page_->toolbar,0);
+          window->Layout();
+          page_->view.navigationChrome=YES;
+          Trace("Chrome toolbar attached after BrowserView entered its window");
+        }
+      }
+    } else if (!added && page_->toolbar) {
+      if (page_->window && page_->toolbar->IsAttached()) page_->window->RemoveChildView(page_->toolbar);
+      page_->toolbar=nullptr;
+      page_->view.navigationChrome=NO;
+    }
+    auto capabilities=CefDictionaryValue::Create();
+    capabilities->SetBool("navigationChrome",page_->view.navigationChrome);
+    Emit(page_,RADIUS_CEF_STATE,capabilities);
+  }
   CefRefPtr<CefBrowserViewDelegate> GetDelegateForPopupBrowserView(
       CefRefPtr<CefBrowserView>,const CefBrowserSettings&,CefRefPtr<CefClient> client,bool) override {
     for (auto& entry : pages) {
@@ -907,6 +931,19 @@ bool AcceptFixtureExtension(Page* page) {
 }
 void DevTools(void* opaque,int id,const char* method,const char* parameters) {
   auto page=static_cast<Page*>(opaque);
+  if (diagnostics && std::string(method)=="Radius.chromeHostState") {
+    auto result=CefDictionaryValue::Create();
+    result->SetBool("toolbarPresent",page->toolbar!=nullptr);
+    if (page->toolbar) {
+      const auto bounds=page->toolbar->GetBounds();
+      result->SetInt("toolbarWidth",bounds.width); result->SetInt("toolbarHeight",bounds.height);
+      result->SetBool("toolbarVisible",page->toolbar->IsVisible());
+      result->SetBool("toolbarDrawn",page->toolbar->IsDrawn());
+    }
+    result->SetBool("windowVisible",page->window && page->window->IsVisible());
+    auto response=CefDictionaryValue::Create(); response->SetInt("id",id); response->SetBool("success",true);
+    response->SetDictionary("result",result); Emit(page,RADIUS_CEF_RESULT,response); return;
+  }
   if (diagnostics && std::string(method)=="Radius.chooseFixtureDirectory") {
     page->fixture_dialog=true;
     auto result=CefDictionaryValue::Create(); result->SetBool("armed",true);

@@ -3,6 +3,7 @@ import Foundation
 import Testing
 @testable import RadiusApp
 
+extension NativeIntegrationTests {
 struct ChromiumProfileDataTests {
     @Test func erasesOnlySelectedProfileAndDoesNotFollowInteriorLinks() throws {
         let root = temporaryDirectory(), id = UUID(), other = UUID()
@@ -49,4 +50,6 @@ struct ChromiumProfileDataTests {
     private func temporaryDirectory() -> URL {
         FileManager.default.temporaryDirectory.appendingPathComponent("RadiusProfileErase-\(UUID().uuidString)", isDirectory: true)
     }
+}
+
 }

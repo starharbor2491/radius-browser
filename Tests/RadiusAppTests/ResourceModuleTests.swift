@@ -4,6 +4,7 @@ import Testing
 import RadiusCore
 @testable import RadiusApp
 
+extension NativeIntegrationTests {
 @Suite(.serialized)
 @MainActor
 struct ResourceModuleTests {
@@ -141,4 +142,6 @@ struct ResourceModuleTests {
         }
         throw ValidationError("The real native resource worker did not publish a sample.")
     }
+}
+
 }

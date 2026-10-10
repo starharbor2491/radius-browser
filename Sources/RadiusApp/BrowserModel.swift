@@ -14,6 +14,14 @@ final class BrowserModel: ObservableObject {
     @Published var focusMode = false { didSet { if !focusMode { focusHiddenComponents = []; focusProviderID = nil } } }
     @Published var focusHiddenComponents = Set<String>()
     var focusProviderID: String?
+    func closeSecondarySidebar() {
+        if var preview = app.previewConfiguration {
+            preview.layout.secondaryPanel = nil; app.previewConfiguration = preview
+        } else {
+            var configuration = app.library.preferences.configuration
+            configuration.layout.secondaryPanel = nil; app.applyConfiguration(configuration)
+        }
+    }
     func enterFocus() {
         app.perform {
             let requested = try app.requestedFocusPresentation()

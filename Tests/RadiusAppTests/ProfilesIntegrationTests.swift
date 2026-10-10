@@ -5,6 +5,7 @@ import Testing
 import RadiusCore
 @testable import RadiusApp
 
+extension NativeIntegrationTests {
 @Suite(.serialized)
 @MainActor
 struct ProfilesIntegrationTests {
@@ -406,6 +407,8 @@ struct ProfilesIntegrationTests {
             }
         }
     }
+}
+
 }
 
 /// SDK callbacks must fail within a deadline, including cleanup after a test.

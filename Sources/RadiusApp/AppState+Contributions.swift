@@ -7,8 +7,11 @@ extension AppState {
         guard ready && !suspendingModuleContributions else { return }
         var next = library.preferences.configuration
         for role in [ModuleCapability.layout, .theme, .tabSystem] {
-            guard let current = installedModules.first(where: { $0.enabled && $0.manifest.capability == role }),
-                  previous.first(where: { $0.enabled && $0.manifest.capability == role })?.id != current.id,
+            guard let current = installedModules.first(where: { $0.enabled && $0.manifest.capability == role }) else { continue }
+            let earlier = previous.first(where: { $0.enabled && $0.manifest.capability == role })
+            // Appearance and arrangement defaults preserve edits across updates.
+            // Tab presentation is the provider's behavior, so its updates apply.
+            guard earlier?.id != current.id || (role == .tabSystem && earlier != current),
                   let definition = declarativeDefinition(role) else { continue }
             switch role {
             case .theme: if let theme = definition.theme { next.theme = theme }

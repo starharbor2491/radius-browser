@@ -5,6 +5,7 @@ import Testing
 import RadiusCore
 @testable import RadiusApp
 
+extension NativeIntegrationTests {
 @Suite(.serialized)
 @MainActor
 struct BrowserIntegrationTests {
@@ -290,6 +291,8 @@ struct BrowserIntegrationTests {
             try await Task.sleep(for: .milliseconds(20))
         }
     }
+}
+
 }
 
 @MainActor

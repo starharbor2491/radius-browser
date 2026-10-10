@@ -2,7 +2,7 @@
   "id": "org.radius.theme-material",
   "name": "Material Theme",
   "version": 1,
-  "summary": "Material Theme supplied as a removable declarative package.",
+  "summary": "Lightly tinted surfaces and rounded controls that follow your Mac’s appearance.",
   "publisher": "Radius",
   "source": "https://github.com/starharbor2491/radius-browser",
   "capability": "theme",

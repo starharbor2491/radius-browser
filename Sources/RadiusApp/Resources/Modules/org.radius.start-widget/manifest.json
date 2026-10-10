@@ -2,7 +2,7 @@
   "id": "org.radius.start-widget",
   "name": "Start Page Prompt",
   "version": 1,
-  "summary": "Start Page Prompt supplied as a removable declarative package.",
+  "summary": "A short writing prompt on new-tab pages.",
   "publisher": "Radius",
   "source": "https://github.com/starharbor2491/radius-browser",
   "capability": "startWidget",

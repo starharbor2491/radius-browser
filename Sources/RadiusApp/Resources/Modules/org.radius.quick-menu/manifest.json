@@ -2,7 +2,7 @@
   "id": "org.radius.quick-menu",
   "name": "Quick Menu",
   "version": 1,
-  "summary": "Quick Menu supplied as a removable declarative package.",
+  "summary": "Quick access to new tabs, bookmarks, customization, and modules.",
   "publisher": "Radius",
   "source": "https://github.com/starharbor2491/radius-browser",
   "capability": "menu",

@@ -52,6 +52,7 @@ enum ChromiumAcceptance {
             try await Task.sleep(for: .milliseconds(100))
         }
         guard let chrome = tab.chromeWindow else { throw ValidationError("The shortcut probe has no native Chrome window.") }
+        try await verifyChromeGeometry(tab, ownerWindow: ownerWindow)
         if let pair = browser.session.split {
             browser.selectTab(pair.first == probeID ? pair.second : pair.first)
             ownerWindow.makeKeyAndOrderFront(nil)
@@ -59,7 +60,7 @@ enum ChromiumAcceptance {
         chrome.makeKeyAndOrderFront(nil); tab.focus()
         try await Task.sleep(for: .milliseconds(200))
         guard chrome.isKeyWindow, browser.session.selectedTabID == probeID else {
-            throw ValidationError("Focusing the Chrome pane did not select its native Radius tab.")
+            throw ValidationError("Focusing the Chrome pane did not select its native Radius tab (key=\(chrome.isKeyWindow), visible=\(chrome.isVisible), selectedProbe=\(browser.session.selectedTabID == probeID)).")
         }
         // Send ordinary AppKit events to our own key window. Do not invoke the
         // browser command callback or grant system accessibility permission.
@@ -107,23 +108,36 @@ enum ChromiumAcceptance {
             NSApp.sendEvent(event)
         }
     }
+    private static func verifyChromeGeometry(_ tab: ChromiumTab, ownerWindow: NSWindow) async throws {
+        guard let chrome = tab.chromeWindow else { throw ValidationError("Chrome has no native window.") }
+        let expected = ownerWindow.convertToScreen(tab.nativeView.convert(tab.nativeView.visibleRect, to: nil))
+        let nativeState = try await tab.request("Radius.chromeHostState", parameters: [:])
+        let state = try JSONSerialization.jsonObject(with: nativeState) as? [String: Any] ?? [:]
+        print("Radius Chromium geometry: owner=\(ownerWindow.windowNumber) \(ownerWindow.frame), child=\(chrome.windowNumber) \(chrome.frame), parent=\(chrome.parent?.windowNumber ?? -1), anchor=\(expected), chrome=\(String(decoding: nativeState, as: UTF8.self))")
+        guard chrome !== ownerWindow, chrome.parent === ownerWindow,
+              abs(chrome.frame.minX - expected.minX) < 2, abs(chrome.frame.minY - expected.minY) < 2,
+              abs(chrome.frame.width - expected.width) < 2, abs(chrome.frame.height - expected.height) < 2 else {
+            throw ValidationError("The Chrome window does not fit its native page anchor; see the recorded window frames.")
+        }
+        guard tab.hasNativeNavigationChrome, state["toolbarDrawn"] as? Bool == true,
+              (state["toolbarWidth"] as? Int ?? 0) > 20, (state["toolbarHeight"] as? Int ?? 0) > 20 else {
+            throw ValidationError("The Chrome navigation toolbar is not visibly laid out inside its native child window.")
+        }
+    }
     static func verifyHostAndManagement(_ tab: ChromiumTab, app: AppState, ownerWindow: NSWindow) async throws {
         guard ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_DATA"] != nil,
               ProcessInfo.processInfo.arguments.contains("--smoke-test") else {
             throw ValidationError("Chromium acceptance requires the isolated smoke-test launch.")
         }
-        guard tab.chromeStyle, let child = tab.chromeWindow, child !== ownerWindow,
+        guard tab.chromeStyle, tab.hasNativeNavigationChrome, let child = tab.chromeWindow, child !== ownerWindow,
               child.parent === ownerWindow, child.isVisible else {
             throw ValidationError("Chromium is not an intact Chrome-style child window in Radius.")
         }
-        let expected = ownerWindow.convertToScreen(tab.nativeView.convert(tab.nativeView.visibleRect, to: nil))
-        guard abs(child.frame.minX - expected.minX) < 2, abs(child.frame.minY - expected.minY) < 2,
-              abs(child.frame.width - expected.width) < 2, abs(child.frame.height - expected.height) < 2 else {
-            throw ValidationError("The Chrome pane does not match its native layout anchor.")
-        }
+        try await verifyChromeGeometry(tab, ownerWindow: ownerWindow)
         guard tab.focusAddressBar() else { throw ValidationError("Chrome's address control is unavailable.") }
         try await Task.sleep(for: .milliseconds(100))
         guard child.isKeyWindow else { throw ValidationError("The Chrome toolbar cannot receive keyboard focus.") }
+        try await verifySessionCookieAfterLastBrowserCloses(app: app)
         let manager = try ChromiumRuntime.shared.makeTab(profileID: UUID(), privateSessionID: nil, dataDirectory: app.dataDirectory)
         let managerWindow = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 900, height: 680),
                                      styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
@@ -151,6 +165,44 @@ enum ChromiumAcceptance {
                 to: app.dataDirectory.appendingPathComponent("Chromium/ExtensionAcceptance/webstore-restart.json"), options: .atomic)
         }
         print("Radius Chromium acceptance: Chrome Views, native child geometry/focus, and extension manager passed")
+    }
+    private static func verifySessionCookieAfterLastBrowserCloses(app: AppState) async throws {
+        guard let address = ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_URL"],
+              let url = URL(string: address), url.host == "127.0.0.1" else {
+            throw ValidationError("The Chromium session-cookie probe requires the loopback fixture.")
+        }
+        let profile = UUID()
+        let first = try ChromiumRuntime.shared.makeTab(profileID: profile, privateSessionID: nil, dataDirectory: app.dataDirectory)
+        let window = NSWindow(contentRect: NSRect(x: 120, y: 100, width: 900, height: 680),
+                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.title = "Radius session-cookie acceptance"
+        window.contentView = first.nativeView; window.makeKeyAndOrderFront(nil)
+        defer { first.dispose(); window.close() }
+        first.load(url); try await waitForLoad(first, host: "127.0.0.1")
+        let cookie = "radiusSession" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        guard try await evaluate(first, "(document.cookie = '\(cookie)=present; path=/', document.cookie)")
+            .contains(cookie + "=present") else {
+            throw ValidationError("Chromium did not seed an expiry-free session cookie.")
+        }
+        var closed = false
+        first.onClose = { closed = true }
+        // Page.close follows Chrome's actual close lifecycle. Disposing the
+        // Swift adapter alone only starts asynchronous CEF destruction.
+        _ = try? await first.request("Page.close", parameters: [:], timeout: .seconds(5))
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while !closed {
+            guard ContinuousClock.now < deadline else { throw ValidationError("The last Chromium profile browser did not acknowledge closing.") }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        let reopened = try ChromiumRuntime.shared.makeTab(profileID: profile, privateSessionID: nil, dataDirectory: app.dataDirectory)
+        defer { reopened.dispose() }
+        window.contentView = reopened.nativeView
+        reopened.load(url); try await waitForLoad(reopened, host: "127.0.0.1")
+        guard try await evaluate(reopened, "document.cookie").contains(cookie + "=present") else {
+            throw ValidationError("Closing the last Chromium browser signed out its regular profile while Radius was still running.")
+        }
+        print("Radius Chromium acceptance: expiry-free profile cookie survived its last browser closing")
     }
     static func verifyStoreRestart(app: AppState) async throws {
         guard ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_DATA"] != nil,

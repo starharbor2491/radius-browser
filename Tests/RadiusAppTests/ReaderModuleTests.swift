@@ -6,6 +6,7 @@ import Testing
 import RadiusCore
 @testable import RadiusApp
 
+extension NativeIntegrationTests {
 @Suite(.serialized)
 @MainActor
 struct ReaderModuleTests {
@@ -117,6 +118,8 @@ struct ReaderModuleTests {
         }
         #expect(await app.flush())
     }
+}
+
 }
 
 @MainActor

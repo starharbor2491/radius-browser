@@ -6,6 +6,7 @@ import RadiusCore
 import RadiusDistribution
 @testable import RadiusApp
 
+extension NativeIntegrationTests {
 @Suite(.serialized)
 struct DistributionNativeTests {
     @Test func consumerRequirementSupportsNotarizationAndRejectsUnidentifiedCode() throws {
@@ -96,4 +97,6 @@ struct DistributionNativeTests {
         }
         _ = try ReleaseTrust.metadata(of: app)
     }
+}
+
 }

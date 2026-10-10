@@ -6,10 +6,11 @@ import RadiusCore
 struct SidebarView: View {
     @ObservedObject var model: BrowserModel
     let panel: BrowserPanel
+    var onClose: (() -> Void)? = nil
     @State private var search = ""
     var body: some View {
         VStack(spacing: 0) {
-            HStack { Label(panel.label, systemImage: panel.icon).font(.headline); Spacer(); IconButton(title: "Close sidebar", icon: "xmark") { model.panel = nil } }.padding(12)
+            HStack { Label(panel.label, systemImage: panel.icon).font(.headline); Spacer(); IconButton(title: "Close sidebar", icon: "xmark") { if let onClose { onClose() } else { model.panel = nil } } }.padding(12)
             Divider()
             switch panel {
             case .bookmarks: bookmarks

@@ -2,7 +2,7 @@
   "id": "org.radius.layout-compact",
   "name": "Compact Workspace",
   "version": 1,
-  "summary": "Compact Workspace supplied as a removable declarative package.",
+  "summary": "Tabs and address controls below the page, with the sidebar hidden.",
   "publisher": "Radius",
   "source": "https://github.com/starharbor2491/radius-browser",
   "capability": "layout",

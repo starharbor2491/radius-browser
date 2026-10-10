@@ -4,6 +4,7 @@ import RadiusCore
 import Testing
 @testable import RadiusApp
 
+extension NativeIntegrationTests {
 @Suite(.serialized)
 @MainActor
 struct DownloadsTests {
@@ -351,4 +352,6 @@ struct DownloadsTests {
         center.items = [item]
         return (center, item, directory)
     }
+}
+
 }

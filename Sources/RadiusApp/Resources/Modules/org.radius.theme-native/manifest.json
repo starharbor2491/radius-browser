@@ -2,7 +2,7 @@
   "id": "org.radius.theme-native",
   "name": "macOS Theme",
   "version": 1,
-  "summary": "macOS Theme supplied as a removable declarative package.",
+  "summary": "Familiar macOS colors and controls that follow your Mac’s appearance.",
   "publisher": "Radius",
   "source": "https://github.com/starharbor2491/radius-browser",
   "capability": "theme",
