@@ -196,6 +196,53 @@ import RadiusCore
     }
 }
 
+@Test @MainActor func appearancePackageUpdatesKeepCustomizationsAndNewProvidersApplyTheirDefaults() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("radius-appearance-update-" + UUID().uuidString)
+    let previous = AppDelegate.state
+    defer { AppDelegate.state = previous; try? FileManager.default.removeItem(at: directory) }
+    let app = AppState(directory: directory)
+    defer { app.ready = false }
+    let repo = try ModuleRepository(root: directory.appendingPathComponent("Modules")); app.repository = repo
+    var theme = ModuleManifest(id: "org.test.theme", name: "Theme", summary: "Appearance defaults", capability: .theme, runtime: .declarative)
+    var layout = ModuleManifest(id: "org.test.layout", name: "Layout", summary: "Arrangement defaults", capability: .layout, runtime: .declarative)
+    try repo.install(theme, payload: JSONEncoder().encode(AppearanceDefinitionFixture(theme: Theme())))
+    try repo.install(layout, payload: JSONEncoder().encode(AppearanceDefinitionFixture(layout: BrowserLayout())))
+    app.installedModules = try repo.installed(); app.ready = true
+    var custom = Configuration()
+    custom.theme.accent = .purple; custom.theme.fontScale = 1.2
+    custom.layout.sidebarWidth = 315; custom.layout.navigation = .bottom
+    app.applyConfiguration(custom)
+    var newTheme = Theme(); newTheme.accent = .orange
+    var newLayout = BrowserLayout(); newLayout.sidebar = .hidden
+    theme.version = 2; layout.version = 2
+    let themeBytes = try JSONEncoder().encode(AppearanceDefinitionFixture(theme: newTheme))
+    let layoutBytes = try JSONEncoder().encode(AppearanceDefinitionFixture(layout: newLayout))
+    app.catalog = [theme, layout]; app.modulePayloads = [theme.id: themeBytes, layout.id: layoutBytes]
+    try app.installApprovedModule(theme.id)
+    try app.installApprovedModule(layout.id)
+    #expect(app.installedModules.allSatisfy { $0.enabled && $0.manifest.version == 2 })
+    #expect(app.library.preferences.configuration == custom)
+    #expect(try repo.definition(for: theme.id).theme == newTheme)
+    #expect(try repo.definition(for: layout.id).layout == newLayout)
+
+    // Changing providers is a separate user choice and still applies the new
+    // package's defaults, including re-enabling after an explicit disable.
+    var replacement = theme; replacement.id = "org.test.replacement-theme"
+    app.catalog.append(replacement); app.modulePayloads[replacement.id] = themeBytes
+    try app.installApprovedModule(replacement.id)
+    #expect(app.library.preferences.configuration == custom)
+    try app.setModuleEnabledApproved(theme.id, enabled: false)
+    try app.setModuleEnabledApproved(replacement.id, enabled: true)
+    #expect(app.library.preferences.configuration.theme == newTheme)
+    #expect(app.library.preferences.configuration.layout == custom.layout)
+}
+
+private struct AppearanceDefinitionFixture: Encodable {
+    let formatVersion = 1
+    var theme: Theme? = nil
+    var layout: BrowserLayout? = nil
+}
+
 private func completeBehaviorFixture(_ bytes: Data, capability: ModuleCapability) throws -> Data {
     var program = try ModuleProgram.decode(bytes)
     if capability == .notes {

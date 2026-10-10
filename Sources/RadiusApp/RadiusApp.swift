@@ -31,15 +31,19 @@ struct BrowserCommands: Commands {
         }
         CommandGroup(after: .newItem) {
             Button("Close tab") { if let browser { browser.closeTab(browser.session.selectedTabID) } }.keyboardShortcut("w").disabled(browser == nil)
-            Button("Close window") { NSApp.keyWindow?.performClose(nil) }.keyboardShortcut("w", modifiers: [.command, .shift])
+            Button("Close window") {
+                var window = NSApp.keyWindow
+                while let parent = window?.parent { window = parent }
+                window?.performClose(nil)
+            }.keyboardShortcut("w", modifiers: [.command, .shift])
         }
         CommandMenu("Browse") {
             Button("Open location…") { NotificationCenter.default.post(name: .radiusFocusAddress, object: browser?.session.id) }.keyboardShortcut("l").disabled(browser == nil)
             Button("Reload page") { browser?.activeWebTab.reload() }.keyboardShortcut("r").disabled(browser?.hasPage != true)
             Button("Find in page…") { NotificationCenter.default.post(name: .radiusFind, object: browser?.session.id) }.keyboardShortcut("f").disabled(browser?.hasPage != true)
             Divider()
-            Button("Previous tab") { browser?.selectRelativeTab(-1) }.keyboardShortcut("[", modifiers: [.command, .shift])
-            Button("Next tab") { browser?.selectRelativeTab(1) }.keyboardShortcut("]", modifiers: [.command, .shift])
+            Button("Previous tab") { browser?.selectRelativeTab(-1) }.keyboardShortcut("[", modifiers: [.command, .shift]).disabled(browser == nil)
+            Button("Next tab") { browser?.selectRelativeTab(1) }.keyboardShortcut("]", modifiers: [.command, .shift]).disabled(browser == nil)
             Button("Switch browsing pane") { browser?.selectOtherPane() }
                 .keyboardShortcut("`", modifiers: [.command, .option]).disabled(browser?.session.split == nil)
             Button(browser?.session.split == nil ? "Split side by side" : "Return to one pane") {

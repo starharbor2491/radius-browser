@@ -91,6 +91,7 @@ struct RadiusUpdater {
             try? FileManager.default.removeItem(at: journal.deletingLastPathComponent().appendingPathComponent("pending-install.json"))
             let configuration = NSWorkspace.OpenConfiguration()
             configuration.activates = true
+            configuration.createsNewApplicationInstance = true
             _ = try await NSWorkspace.shared.openApplication(at: destination, configuration: configuration)
         } catch {
             NSApplication.shared.setActivationPolicy(.accessory)
@@ -106,6 +107,7 @@ struct RadiusUpdater {
                 do {
                     let configuration = NSWorkspace.OpenConfiguration()
                     configuration.activates = true
+                    configuration.createsNewApplicationInstance = true
                     _ = try await NSWorkspace.shared.openApplication(at: destination, configuration: configuration)
                 } catch {
                     let launchAlert = NSAlert()

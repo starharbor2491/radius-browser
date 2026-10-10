@@ -8,7 +8,7 @@ The disk image opens in Finder and contains Radius, an Applications shortcut, an
 
 Installing/removing Chromium replaces the complete signed application after Radius quits. This avoids changing a running signed app or changing CEF's framework/helper paths beneath live renderers. Engine removal requires reopening Chromium tabs with WebKit before saving and quitting. Profiles, addresses, tab organization, custom layouts, installed module choices, and engine website data are kept; sign-in contexts and unsaved forms do not transfer between engines.
 
-If the current app is on a disk image, translocated, or in an unwritable folder, the native folder picker offers a writable installation folder such as the user's Applications directory. No shell command, Gatekeeper exception, quarantine removal, or privilege helper is required.
+If the current app is on a disk image, translocated, or in an unwritable folder, the native folder picker offers a writable installation folder such as the user's Applications directory. Radius asks you to quit another copy running from the selected destination before replacement. Quitting during a download or copy cancels that operation and waits for its temporary files to be removed. No shell command, Gatekeeper exception, quarantine removal, or privilege helper is required.
 
 ## Trust and activation
 

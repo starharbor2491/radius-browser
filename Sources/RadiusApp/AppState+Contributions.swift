@@ -8,7 +8,7 @@ extension AppState {
         var next = library.preferences.configuration
         for role in [ModuleCapability.layout, .theme, .tabSystem] {
             guard let current = installedModules.first(where: { $0.enabled && $0.manifest.capability == role }),
-                  previous.first(where: { $0.enabled && $0.manifest.capability == role }) != current,
+                  previous.first(where: { $0.enabled && $0.manifest.capability == role })?.id != current.id,
                   let definition = declarativeDefinition(role) else { continue }
             switch role {
             case .theme: if let theme = definition.theme { next.theme = theme }

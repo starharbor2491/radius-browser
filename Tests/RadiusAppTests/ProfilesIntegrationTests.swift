@@ -233,6 +233,83 @@ struct ProfilesIntegrationTests {
         #expect(source.session.profileID == kept.id)
     }
 
+    @Test func closingTheLastWebKitTabKeepsSessionCookiesWhileRadiusIsRunning() async throws {
+        let (app, directory) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let profileID = app.library.profiles[0].id
+        let browser = BrowserModel(app: app, isPrivate: false)
+        defer { browser.closeWindow() }
+        let closedTabID = browser.session.selectedTabID
+        // Seed through an actual tab's store, then retain no page or store in
+        // the fixture. A persistent-cookie fixture would hide this sign-out.
+        weak var originalView = try await seedSessionCookieOnActivePage(browser, value: "signed-in")
+
+        browser.closeTab(closedTabID)
+        let releaseDeadline = ContinuousClock().now.advanced(by: .seconds(10))
+        while originalView != nil && ContinuousClock().now < releaseDeadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try #require(originalView == nil, "The closed tab must release its real WKWebView before checking a new tab's session.")
+        #expect(browser.session.tabs.count == 1)
+        #expect(browser.session.selectedTabID != closedTabID)
+
+        weak var replacementView = try #require(browser.activeWebTab as? WebTab).webView
+        #expect(replacementView?.configuration.websiteDataStore.identifier == profileID)
+        let replacementCookies = try await cookieValues(store: try #require(replacementView).configuration.websiteDataStore)
+        #expect(replacementCookies == ["signed-in"], "Closing the last tab must not sign this profile out while Radius remains running.")
+
+        browser.disposeEngineTabs()
+        let cleanupDeadline = ContinuousClock().now.advanced(by: .seconds(10))
+        while replacementView != nil && ContinuousClock().now < cleanupDeadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try #require(replacementView == nil, "The cookie fixture must release its replacement view before removing website storage.")
+        try await removeStores([profileID])
+    }
+
+    @Test func stagedChromiumRemovalChangesOnlyTheRestartSnapshotAndARefusedQuitRestoresIt() async throws {
+        let (app, directory) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let profileID = app.library.profiles[0].id
+        app.library.profiles[0].engineID = .chromium
+        let website = BrowserTab(title: "Signed-in website", url: URL(string: "https://fixture.invalid/account"), pinned: true, engineID: .chromium)
+        let generated = BrowserTab(title: "Extension options", url: URL(string: "chrome-extension://fixture/options.html"), parentID: website.id, engineID: .chromium)
+        app.library.sessions = [WindowSession(profileID: profileID, tabs: [website, generated])]
+        let browser = BrowserModel(app: app, isPrivate: false)
+        defer {
+            app.saveWithoutChromiumOnQuit = false; app.terminating = false
+            browser.closeWindow()
+        }
+        let cached = try #require(browser.activeWebTab as? UnavailableEngineTab, "This metadata regression must not require a real CEF runtime.")
+        browser.closedTabs = [generated]
+        let originalLibrary = app.library, originalSession = browser.session
+        app.terminating = true
+        app.saveWithoutChromiumOnQuit = true
+        try #require(await app.flush())
+
+        let database = try LibraryDatabase(url: directory.appendingPathComponent("library.sqlite"))
+        let prepared = try await database.load()
+        #expect(prepared.profiles.first { $0.id == profileID }?.engineID == .webkit)
+        let preparedSession = try #require(prepared.sessions.first { $0.id == originalSession.id })
+        #expect(preparedSession.tabs.allSatisfy { $0.engineID == .webkit })
+        #expect(preparedSession.tabs.first { $0.id == website.id }?.url == website.url)
+        #expect(preparedSession.tabs.first { $0.id == website.id }?.pinned == true)
+        #expect(preparedSession.tabs.first { $0.id == generated.id }?.url == nil)
+        #expect(preparedSession.tabs.first { $0.id == generated.id }?.title == "New tab")
+        #expect(app.library == originalLibrary)
+        #expect(browser.session == originalSession)
+        #expect(browser.closedTabs == [generated])
+        #expect(browser.activeWebTab === cached)
+
+        app.saveWithoutChromiumOnQuit = false; app.terminating = false
+        try #require(await app.flush())
+        let restored = try await database.load()
+        #expect(restored.profiles == originalLibrary.profiles)
+        #expect(restored.sessions == originalLibrary.sessions)
+        #expect(browser.session == originalSession)
+        #expect(browser.activeWebTab === cached)
+    }
+
     private func fixture() async throws -> (AppState, URL) {
         _ = NSApplication.shared
         let directory = temporaryDirectory(), app = AppState(directory: directory)
@@ -268,6 +345,19 @@ struct ProfilesIntegrationTests {
             }
         }
         try #require(try await cookieValues(store: store) == [value], "The persistent cookie fixture must be populated before testing deletion.")
+    }
+    private func seedSessionCookieOnActivePage(_ browser: BrowserModel, value: String) async throws -> WKWebView {
+        let page = try #require(browser.activeWebTab as? WebTab)
+        let store = page.webView.configuration.websiteDataStore
+        let cookie = try #require(HTTPCookie(properties: [.domain: "profiles.fixture.invalid", .path: "/", .name: "radius-profile-test", .value: value]))
+        try #require(cookie.isSessionOnly, "This regression must use a session cookie without an expiration date.")
+        try await ProfileCallbackWait<Void>.wait("setting an active tab's session cookie") { request in
+            store.httpCookieStore.setCookie(cookie) {
+                Task { @MainActor in request.finish(.success(())) }
+            }
+        }
+        try #require(try await cookieValues(store: store) == [value], "The original live tab must be signed in before closing it.")
+        return page.webView
     }
     private func cookieValues(profileID: UUID) async throws -> [String] {
         try await cookieValues(store: WKWebsiteDataStore(forIdentifier: profileID))

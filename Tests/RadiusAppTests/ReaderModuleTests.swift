@@ -93,7 +93,7 @@ struct ReaderModuleTests {
             let worker = ReaderWorker()
             defer { worker.cancel() }
             let module = try #require(app.installedModules.first { $0.id == "org.radius.reader" })
-            if !module.enabled { app.toggleModule(module) }
+            if !module.enabled { try app.setModuleEnabledApproved(module.id, enabled: true) }
             let snapshot = SuspendedReaderTab()
             let capture = Task { try await app.readerText(from: snapshot) }
             let task = Task { try await worker.extract(html: String(repeating: "x", count: 500_000), executable: fixture, moduleID: module.id) }
@@ -107,7 +107,7 @@ struct ReaderModuleTests {
                 try await worker.extract(html: "<p>Concurrent request</p>", executable: fixture, moduleID: module.id)
             }
             if removing { try app.removeModule(module.id) }
-            else { app.toggleModule(try #require(app.installedModules.first { $0.id == module.id })) }
+            else { try app.setModuleEnabledApproved(module.id, enabled: false) }
             await #expect(throws: CancellationError.self) { try await task.value }
             await #expect(throws: CancellationError.self) { try await capture.value }
             #expect(!process.isRunning)

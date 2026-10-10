@@ -37,6 +37,7 @@ jobs:
           path: ${{ runner.temp }}/radius-cef-runtime
           key: radius-cef154-chrome-2-${{ matrix.arch }}
       - name: Build pinned optional Chromium package
+        id: chromium-build
         run: python3 scripts/chromium-runtime.py --arch "${{ matrix.arch }}" --work-dir "$RUNNER_TEMP/radius-cef-runtime"
       - name: Cache verified Chromium SDK
         if: steps.cef-cache.outputs.cache-hit != 'true'
@@ -47,10 +48,15 @@ jobs:
       - name: Test native shell
         run: ./scripts/test.sh
       - name: Build universal Radius application
+        id: app-build
+        # Build and smoke are useful diagnostics when an independent native
+        # test fails. That failure still gates restart, packaging and evidence.
+        if: ${{ !cancelled() && steps.chromium-build.outcome == 'success' }}
         env:
           RADIUS_CHROMIUM_PACKAGE: ${{ runner.temp }}/radius-cef-runtime/Chromium-${{ matrix.arch }}.radiusengine
         run: ./scripts/build-app.sh
       - name: Verify installed Chromium renders inside Radius and quits normally
+        if: ${{ !cancelled() && steps.chromium-build.outcome == 'success' && steps.app-build.outcome == 'success' }}
         timeout-minutes: 10
         env:
           RADIUS_CHROMIUM_WEBSTORE_TEST: "1"

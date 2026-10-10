@@ -20,6 +20,8 @@ final class DistributionManager: ObservableObject {
     private var destination: URL?
     private var directory: URL?
     private var operation: Task<Void, Never>?
+    private var cleanupOperation: Task<Void, Never>?
+    private var terminationPending = false
     var canCancel: Bool { operation != nil }
     private var installerStarted = false
     private var installerProcess: Process?
@@ -37,6 +39,13 @@ final class DistributionManager: ObservableObject {
     @Published private(set) var current: DistributionRelease?
     private var publisher: String?
     func cancel() { operation?.cancel() }
+    func cancelAndWaitForOperation() async {
+        terminationPending = true
+        let active = operation
+        active?.cancel()
+        await active?.value
+        await cleanupOperation?.value
+    }
     func configure(dataDirectory: URL) {
         guard directory == nil else { return }
         directory = dataDirectory.resolvingSymlinksInPath().appendingPathComponent("Updates", isDirectory: true)
@@ -106,7 +115,7 @@ final class DistributionManager: ObservableObject {
         }
     }
     func importInstaller(dataDirectory: URL) {
-        guard !busy else { return }
+        guard !busy, !terminationPending else { return }
         let panel = NSOpenPanel()
         panel.title = "Import a Radius installer"
         panel.message = "Choose an official signed Radius.app or offline Radius disk image. Browser data and your chosen modules are kept."
@@ -125,6 +134,7 @@ final class DistributionManager: ObservableObject {
         NSApp.terminate(nil)
     }
     func cancelledQuit() {
+        terminationPending = false
         installOnQuit = false
         if let process = installerProcess, process.isRunning { process.terminate() }
         if let executable = installerHelper,
@@ -135,11 +145,11 @@ final class DistributionManager: ObservableObject {
         installerProcess = nil; installerHelper = nil; installerStarted = false
     }
     func discardPending() {
-        guard !busy, !installerStarted, let directory else { return }
+        guard !busy, !terminationPending, !installerStarted, let directory else { return }
         let stage = candidate?.deletingLastPathComponent() ?? rejectedStage
         busy = true; progress = nil; message = "Removing the staged installer…"
-        Task {
-            defer { self.busy = false }
+        cleanupOperation = Task {
+            defer { self.busy = false; self.cleanupOperation = nil }
             do {
                 try await Self.background {
                     let fm = FileManager.default
@@ -174,10 +184,15 @@ final class DistributionManager: ObservableObject {
         try await Self.background { try Self.verify(candidate, team: team, current: current, floor: floor) }
         let bundledHelper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/Updater/" + Self.architecture + "/RadiusUpdater")
         let helper = directory.appendingPathComponent("RadiusUpdater-\(UUID().uuidString)")
-        try await Self.background {
-            try ReleaseTrust.verifySignature(bundledHelper, team: team, identifier: "org.radius.updater", notarized: false)
-            try FileManager.default.copyItem(at: bundledHelper, to: helper)
-            try ReleaseTrust.verifySignature(helper, team: team, identifier: "org.radius.updater", notarized: false)
+        do {
+            try await Self.background {
+                try ReleaseTrust.verifySignature(bundledHelper, team: team, identifier: "org.radius.updater", notarized: false)
+                try FileManager.default.copyItem(at: bundledHelper, to: helper)
+                try ReleaseTrust.verifySignature(helper, team: team, identifier: "org.radius.updater", notarized: false)
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: helper)
+            throw error
         }
         let process = Process(); process.executableURL = helper
         process.arguments = [String(ProcessInfo.processInfo.processIdentifier), candidate.path, destination.path,
@@ -209,7 +224,7 @@ final class DistributionManager: ObservableObject {
         }
     }
     private func start(dataDirectory: URL, action: @escaping @MainActor () async throws -> Void) {
-        guard !busy, pending == nil, !pendingRecordInvalid else { return }
+        guard !busy, !terminationPending, pending == nil, !pendingRecordInvalid else { return }
         configure(dataDirectory: dataDirectory)
         guard directory != nil else { return }
         generation = UUID(); busy = true; progress = nil; message = nil

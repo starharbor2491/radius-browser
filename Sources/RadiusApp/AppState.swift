@@ -28,6 +28,7 @@ final class AppState: ObservableObject {
     private var revision: UInt64 = 0
     private var claimedSessions = Set<UUID>()
     var terminating = false
+    var saveWithoutChromiumOnQuit = false
     private(set) var windows: [UUID: BrowserReference] = [:]
     var configuration: Configuration { previewConfiguration ?? library.preferences.configuration }
 
@@ -225,12 +226,13 @@ final class AppState: ObservableObject {
         perform {
             guard let repository else { throw ValidationError("Repair module storage before importing packages.") }
             let package = try DeclarativeModulePackage.decode(readModuleFile(url, limit: 192 * 1024))
-            let local = DeclarativeModuleCatalog(formatVersion: 1, name: "Local · " + package.manifest.name, packages: [package])
-            let replacing = try repository.communityCatalogs().contains { $0.name == local.name }
-            try repository.addCommunityCatalog(local, reservedIDs: bundledModuleIDs, replaceExisting: replacing)
+            let catalogs = try repository.communityCatalogs()
+            let previous = catalogs.first { $0.sourceURL == nil && $0.name.hasPrefix("Local · ") && $0.packages.count == 1 && $0.packages[0].manifest.id == package.manifest.id }
+            let name = "Local · " + String(package.manifest.name.prefix(89 - package.manifest.id.count)) + " · " + package.manifest.id
+            let local = DeclarativeModuleCatalog(formatVersion: 1, name: previous?.name ?? name, packages: [package])
+            try repository.addCommunityCatalog(local, reservedIDs: bundledModuleIDs, replaceExisting: previous != nil)
             try loadCommunityCatalogs()
-            let plan = try moduleInstallationPlan(for: [package.manifest.id])
-            if approveModules(plan) { try installApprovedModule(package.manifest.id) }
+            install(package.manifest.id)
         }
     }
     func approveModules(_ manifests: [ModuleManifest], local: Bool = false, activateDependencies: Bool = true, activateRequirements: Bool = false, activationTitle: String? = nil) -> Bool {
@@ -260,7 +262,7 @@ final class AppState: ObservableObject {
         if manifests.contains(where: { $0.runtime?.isNative == true }) {
             alert.informativeText += "\n\nFirst-party native workers run with the same macOS user access as Radius. Reader runs for one extraction; resources run while their panel is open. Native code is not sandboxed by these permission descriptions."
         }
-        alert.informativeText += "\n\nSaved browser data is kept. Installs and updates do not restore modules you removed."
+        alert.informativeText += "\n\nSaved browser data is kept. Application updates preserve removed modules. Missing dependencies listed here install only with your approval."
         let scrollHeight = CGFloat(min(220, max(90, manifests.count * 55)))
         let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 520, height: scrollHeight))
         scroll.hasVerticalScroller = true; scroll.borderType = .bezelBorder
@@ -444,7 +446,8 @@ final class AppState: ObservableObject {
         saveTask?.cancel()
         guard let database else { return false }
         revision += 1
-        var snapshot = library; snapshot.normalize()
+        var snapshot = saveWithoutChromiumOnQuit ? libraryPreparedForChromiumRemoval() : library
+        snapshot.normalize()
         do { try await database.save(snapshot, revision: revision) }
         catch { notice = "Could not save Radius data: \(error.localizedDescription)"; return false }
         // COMMIT is durable with SQLite synchronous=FULL. A maintenance failure
@@ -454,6 +457,7 @@ final class AppState: ObservableObject {
         return true
     }
     private func scheduleSave() {
+        guard !terminating else { return }
         revision += 1; let currentRevision = revision; var snapshot = library; snapshot.normalize()
         saveTask?.cancel()
         saveTask = Task { [weak self] in
@@ -499,13 +503,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DistributionManager.shared.cancelledQuit()
             return .terminateCancel
         }
-        // Include extension manager pages and tabs awaiting cancellation after
-        // their window closed. Their runtime retains the download callbacks.
-        var seenCenters = Set<ObjectIdentifier>()
-        let centers = (state.windows.values.compactMap(\.model).map(\.downloads) + ChromiumRuntime.shared.downloadCenters)
-            .filter { seenCenters.insert(ObjectIdentifier($0)).inserted }
-        let activeCenters = centers.filter(\.hasActive)
-        if !activeCenters.isEmpty {
+        // Active centers outlive closed windows and include manager/auxiliary
+        // pages. The registry also sees arrivals during the modal alert.
+        let downloads = DownloadAdmission.shared
+        if !downloads.activeCenters.isEmpty {
             let alert = NSAlert(); alert.messageText = "Cancel active downloads and quit Radius?"
             alert.informativeText = "There are unfinished downloads. Their temporary files are removed after the engine confirms cancellation."
             alert.addButton(withTitle: "Keep Radius open"); alert.addButton(withTitle: "Cancel downloads and quit")
@@ -514,16 +515,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return .terminateCancel
             }
         }
+        downloads.freeze()
         state.terminating = true
         Task {
             self.smokeTrace("Termination task started; cancelling active downloads")
-            do { for center in activeCenters { try await center.cancelAllAndWait() } }
+            do { try await downloads.cancelAllAndWait() }
             catch {
                 state.notice = error.localizedDescription; state.terminating = false
+                downloads.resume()
                 DistributionManager.shared.cancelledQuit()
                 sender.reply(toApplicationShouldTerminate: false); return
             }
-            if DistributionManager.shared.isRestartRequested && DistributionManager.shared.pending?.chromium == false { state.prepareForChromiumRemoval() }
+            // A download or offline copy may still own a staging directory.
+            // Finish its cancellation cleanup before saving or arming an update.
+            await DistributionManager.shared.cancelAndWaitForOperation()
             self.smokeTrace("Flushing application data before termination")
             let saved = await state.flush()
             self.smokeTrace("Termination flush completed: \(saved)")
@@ -541,6 +546,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 do { try await DistributionManager.shared.launchPendingInstaller() }
                 catch { quit = false; state.notice = error.localizedDescription }
             }
+            if quit, DistributionManager.shared.isRestartRequested,
+               DistributionManager.shared.pending?.chromium == false {
+                // Prepare only the restart's durable metadata after READY.
+                // A refused quit must keep live Chromium pages and choices.
+                state.saveWithoutChromiumOnQuit = true
+                quit = await state.flush()
+            }
             if quit {
                 state.cancelReaderRequests()
                 ResourceWorker.stopAll()
@@ -553,6 +565,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.smokeTrace("Sending termination reply: \(quit)")
             state.terminating = quit
             if !quit {
+                downloads.resume()
+                if state.saveWithoutChromiumOnQuit {
+                    state.saveWithoutChromiumOnQuit = false
+                    _ = await state.flush()
+                }
                 DistributionManager.shared.cancelledQuit()
                 if stoppedWorkersForQuit { state.resumeResourceWorkerAfterCancelledQuit() }
             }

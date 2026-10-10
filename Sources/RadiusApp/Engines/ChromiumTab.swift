@@ -212,7 +212,12 @@ final class ChromiumTab: BrowserEngineTab {
         case Int32(RADIUS_CEF_BROWSER_COMMAND):
             if let command = value["message"] as? String { onBrowserCommand?(command) }
         case Int32(RADIUS_CEF_DOWNLOAD_BEGIN):
-            guard let id = value["id"] as? Int, !disposing else { return }
+            guard let id = value["id"] as? Int else { return }
+            guard !disposing else {
+                command(Int(RADIUS_CEF_DOWNLOAD_CANCEL), value: Double(id))
+                command(Int(RADIUS_CEF_DOWNLOAD_PATH), value: Double(id))
+                return
+            }
             let key = downloadPrefix + ":" + String(id)
             downloadIDs.insert(key)
             let source = (value["url"] as? String).flatMap(URL.init(string:))

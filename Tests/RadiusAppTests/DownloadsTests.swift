@@ -7,8 +7,78 @@ import Testing
 @Suite(.serialized)
 @MainActor
 struct DownloadsTests {
+    @Test func quitFreezeRejectsLateChromiumDestinationWithoutOpeningASavePanel() {
+        let admission = DownloadAdmission()
+        let center = DownloadCenter(admission: admission)
+        admission.freeze()
+        var cancellations = 0
+        var destinations: [URL?] = []
+        center.beginChromium(id: "late", suggestedName: "late.txt", sourceURL: nil,
+                             cancel: { cancellations += 1 }, completion: { destinations.append($0) })
+        #expect(cancellations == 1)
+        #expect(destinations.count == 1 && destinations[0] == nil)
+        #expect(center.items.isEmpty)
+        #expect(admission.activeCenters.isEmpty)
+        admission.resume()
+        #expect(center.acceptingDownloads)
+        #expect(DownloadCenter(admission: admission).acceptingDownloads)
+    }
+
+    @Test func quitRecollectsLateCentersAndRetainsAClosedWindowUntilAcknowledgement() async throws {
+        let admission = DownloadAdmission()
+        let center = DownloadCenter(admission: admission)
+        let first = DownloadItem(chromiumID: "first", sourceURL: nil, cancel: {})
+        center.items = [first]
+        weak var lateCenter: DownloadCenter?
+        var lateCancellations = 0
+        first.cancelChromium = {
+            Task { @MainActor in
+                // A callback arrives while the first cancellation is awaiting
+                // acknowledgement. Its native browser window then disappears.
+                let late = DownloadCenter(admission: admission)
+                lateCenter = late
+                let item = DownloadItem(chromiumID: "late", sourceURL: nil, cancel: { [weak late] in
+                    lateCancellations += 1
+                    late?.updateChromium(id: "late", fraction: 0, complete: false, cancelled: true, interrupted: false)
+                })
+                late.items = [item]
+                center.updateChromium(id: "first", fraction: 0, complete: false, cancelled: true, interrupted: false)
+            }
+        }
+        admission.freeze()
+        try await admission.cancelAllAndWait(timeout: .seconds(1))
+        #expect(first.transferEnded)
+        #expect(lateCancellations == 1)
+        #expect(admission.activeCenters.isEmpty)
+        #expect(lateCenter == nil)
+        #expect(!admission.acceptingDownloads)
+    }
+
+    @Test func refusedQuitRestoresCancellationRetryAndKeepsTheStagingFile() async throws {
+        let admission = DownloadAdmission()
+        let (center, item, directory) = try fixture(admission: admission)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let staging = try #require(item.staging)
+        admission.freeze()
+        do {
+            try await admission.cancelAllAndWait(timeout: .zero)
+            Issue.record("Quit must be refused when a writer has not acknowledged cancellation")
+        } catch is ValidationError {}
+        admission.resume()
+        #expect(center.acceptingDownloads)
+        #expect(item.active)
+        #expect(!item.transferEnded)
+        #expect(FileManager.default.fileExists(atPath: staging.path))
+        item.cancelChromium = { [weak center] in
+            center?.updateChromium(id: "download", fraction: 0, complete: false, cancelled: true, interrupted: false)
+        }
+        try await admission.cancelAllAndWait(timeout: .zero)
+        #expect(admission.activeCenters.isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: staging.path))
+    }
+
     @Test func cancellationBeforeChoosingADestinationHasABoundedWait() async throws {
-        let center = DownloadCenter()
+        let center = DownloadCenter(admission: DownloadAdmission())
         let item = DownloadItem(chromiumID: "no-control-yet", sourceURL: nil, cancel: {})
         center.items = [item]
 
@@ -269,10 +339,10 @@ struct DownloadsTests {
         #expect(metadata[.quarantinePropertiesKey] != nil)
     }
 
-    private func fixture() throws -> (DownloadCenter, DownloadItem, URL) {
+    private func fixture(admission: DownloadAdmission = DownloadAdmission()) throws -> (DownloadCenter, DownloadItem, URL) {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let center = DownloadCenter()
+        let center = DownloadCenter(admission: admission)
         let item = DownloadItem(chromiumID: "download", sourceURL: URL(string: "https://example.com/file"), cancel: {})
         item.destination = directory.appendingPathComponent("download.txt")
         let staging = directory.appendingPathComponent(".radius-download-test.part")

@@ -25,7 +25,7 @@ struct ModulesView: View {
             ScrollView {
                 LazyVStack(spacing: 12) {
                     if listings.isEmpty {
-                        EmptyPanel(title: section == .updates ? "You're up to date" : "No modules found", icon: section == .updates ? "checkmark.circle" : "shippingbox", detail: section == .updates ? "Updates are checked against the bundled and added community catalogs. Refresh a community catalog to discover newer data packages." : "Try another search or discover a feature to install.").frame(height: 220)
+                        EmptyPanel(title: section == .updates ? updates.isEmpty ? "You're up to date" : "No matching updates" : "No modules found", icon: section == .updates && updates.isEmpty ? "checkmark.circle" : "shippingbox", detail: section == .updates && updates.isEmpty ? "Updates are checked against the bundled and added community catalogs. Refresh a community catalog to discover newer data packages." : "Try another search or discover a feature to install.").frame(height: 220)
                     }
                     ForEach(listings) { manifest in
                         ModuleCard(manifest: manifest, installed: app.installedModules.first { $0.id == manifest.id })

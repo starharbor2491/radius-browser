@@ -5,6 +5,43 @@ import RadiusCore
 import SwiftUI
 @preconcurrency import WebKit
 
+/// Owns active transfers independently of browser windows and prevents a new
+/// writer from escaping the asynchronous cancellation pass during Quit.
+@MainActor
+final class DownloadAdmission {
+    static let shared = DownloadAdmission()
+    private(set) var acceptingDownloads = true
+    private var centers: [ObjectIdentifier: DownloadCenter] = [:]
+    var activeCenters: [DownloadCenter] { centers.values.filter(\.hasActive) }
+    func refresh(_ center: DownloadCenter) {
+        let id = ObjectIdentifier(center)
+        if center.hasActive { centers[id] = center }
+        else { centers.removeValue(forKey: id) }
+    }
+    func freeze() { acceptingDownloads = false }
+    func resume() { acceptingDownloads = true }
+    func cancelAllAndWait(timeout: Duration = .seconds(10)) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        do {
+            // Recollect after each suspension: a late WKDownload callback can
+            // arrive after the user approved Quit, even from a closed window.
+            while !activeCenters.isEmpty {
+                activeCenters.forEach { $0.cancelAll() }
+                if activeCenters.isEmpty { return }
+                try Task.checkCancellation()
+                guard clock.now < deadline else {
+                    throw ValidationError("The browser engine has not confirmed that all downloads stopped. Temporary files have been kept. Try cancelling again before closing Radius.")
+                }
+                try await clock.sleep(until: min(deadline, clock.now.advanced(by: .milliseconds(50))))
+            }
+        } catch {
+            activeCenters.forEach { $0.restoreUnconfirmedCancellations() }
+            throw error
+        }
+    }
+}
+
 @MainActor
 final class DownloadItem: ObservableObject, Identifiable {
     let id = UUID()
@@ -34,7 +71,10 @@ final class DownloadItem: ObservableObject, Identifiable {
 }
 @MainActor
 final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
-    @Published var items: [DownloadItem] = []
+    @Published var items: [DownloadItem] = [] { didSet { admission.refresh(self) } }
+    private let admission: DownloadAdmission
+    var acceptingDownloads: Bool { admission.acceptingDownloads }
+    init(admission: DownloadAdmission = .shared) { self.admission = admission; super.init() }
     private var standaloneWindow: DownloadWindowController?
     func showWindow() {
         if standaloneWindow == nil {
@@ -45,6 +85,7 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
     }
     func track(_ download: WKDownload) {
         let item = DownloadItem(download); items.insert(item, at: 0); download.delegate = self
+        guard acceptingDownloads else { cancel(item); return }
         item.progressObservation = download.progress.observe(\.fractionCompleted, options: [.new]) { [weak item] _, change in
             let fraction = change.newValue ?? 0
             Task { @MainActor [weak item] in
@@ -62,6 +103,7 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
     /// IDs must be unique across the runtime, including downloads from different tabs.
     func beginChromium(id: String, suggestedName: String, sourceURL: URL?, cancel: @escaping @MainActor @Sendable () -> Void,
                        completion: @escaping @MainActor @Sendable (URL?) -> Void) {
+        guard acceptingDownloads else { cancel(); completion(nil); return }
         guard !items.contains(where: { $0.chromiumID == id }) else { completion(nil); return }
         let item = DownloadItem(chromiumID: id, sourceURL: sourceURL, cancel: cancel)
         items.insert(item, at: 0)
@@ -99,9 +141,13 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
             item.cancelChromium = nil
             cancel?()
         }
+        admission.refresh(self)
     }
     private func chooseDestination(for item: DownloadItem, suggestedName: String, completion: @MainActor @Sendable (URL?) -> Void) {
-        guard item.active else { completion(nil); return }
+        guard acceptingDownloads, item.active else {
+            if item.active { cancel(item) }
+            completion(nil); return
+        }
         let cleanName = URL(fileURLWithPath: suggestedName).lastPathComponent
         item.name = cleanName.isEmpty ? "Download" : cleanName
         let panel = NSSavePanel(); panel.nameFieldStringValue = item.name
@@ -109,7 +155,7 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
         item.destinationPanel = panel
         let choice = panel.runModal()
         item.destinationPanel = nil
-        guard item.active, choice == .OK, let url = panel.url else {
+        guard acceptingDownloads, item.active, choice == .OK, let url = panel.url else {
             if item.active { cancel(item) }
             completion(nil)
             return
@@ -183,6 +229,7 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
     private func endTransfer(_ item: DownloadItem) {
         item.transferEnded = true; item.progressObservation = nil; item.cancelChromium = nil
         item.acknowledgementUnavailable = false
+        admission.refresh(self)
     }
     func cancel(_ item: DownloadItem) {
         guard item.active else { return }
@@ -201,6 +248,17 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
         }
     }
     func cancelAll() { items.filter(\.active).forEach(cancel) }
+    func restoreUnconfirmedCancellations() {
+        restoreUnconfirmedCancellations(items.filter(\.awaitsTerminalUpdate))
+    }
+    private func restoreUnconfirmedCancellations(_ pending: [DownloadItem]) {
+        for item in pending where item.awaitsTerminalUpdate {
+            item.active = true
+            item.status = item.staging == nil
+                ? "Cancellation not confirmed. Try cancelling again."
+                : "Cancellation not confirmed. Temporary file kept; try cancelling again."
+        }
+    }
     /// Owner-closed downloads cannot acknowledge cancellation. Keep their files
     /// and allow the caller to proceed to Chromium shutdown instead of waiting.
     func cancelAllAndWait(timeout: Duration = .seconds(10)) async throws {
@@ -227,12 +285,7 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
             // Timeout and cancellation of this Swift task both leave the engine
             // request unconfirmed. Preserve its state and file, and make a new
             // attempt resend cancellation. A late callback can still clean up.
-            for item in pending where item.awaitsTerminalUpdate {
-                item.active = true
-                item.status = item.staging == nil
-                    ? "Cancellation not confirmed. Try cancelling again."
-                    : "Cancellation not confirmed. Temporary file kept; try cancelling again."
-            }
+            restoreUnconfirmedCancellations(pending)
             throw error
         }
     }

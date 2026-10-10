@@ -96,17 +96,22 @@ extension AppState {
         notice = "Quit and reopen Radius to clear this profile's website data. Your bookmarks, notes, history, and tab addresses are kept."
     }
 
-    func prepareForChromiumRemoval() {
-        for index in library.profiles.indices where library.profiles[index].engineID == .chromium { library.profiles[index].engineID = .webkit }
-        for index in library.sessions.indices {
-            for tabIndex in library.sessions[index].tabs.indices where library.sessions[index].tabs[tabIndex].engineID == .chromium {
-                library.sessions[index].tabs[tabIndex].engineID = .webkit
-                if let url = library.sessions[index].tabs[tabIndex].url, !AddressResolver.isWebURL(url) {
-                    library.sessions[index].tabs[tabIndex].url = nil
-                    library.sessions[index].tabs[tabIndex].title = "New tab"
+    func libraryPreparedForChromiumRemoval() -> LibraryState {
+        var prepared = library
+        for index in prepared.profiles.indices where prepared.profiles[index].engineID == .chromium { prepared.profiles[index].engineID = .webkit }
+        for index in prepared.sessions.indices {
+            for tabIndex in prepared.sessions[index].tabs.indices where prepared.sessions[index].tabs[tabIndex].engineID == .chromium {
+                prepared.sessions[index].tabs[tabIndex].engineID = .webkit
+                if let url = prepared.sessions[index].tabs[tabIndex].url, !AddressResolver.isWebURL(url) {
+                    prepared.sessions[index].tabs[tabIndex].url = nil
+                    prepared.sessions[index].tabs[tabIndex].title = "New tab"
                 }
             }
         }
+        return prepared
+    }
+    func prepareForChromiumRemoval() {
+        library = libraryPreparedForChromiumRemoval()
         for model in windows.values.compactMap(\.model) {
             for tab in model.session.tabs where tab.engineID == .chromium {
                 if let url = tab.url, !AddressResolver.isWebURL(url), let index = model.session.tabs.firstIndex(where: { $0.id == tab.id }) {

@@ -83,7 +83,7 @@ final class WebTab: BrowserEngineTab, WKNavigationDelegate, WKUIDelegate {
             decisionHandler(.allow); return
         }
         if url.scheme?.lowercased() == "blob" {
-            decisionHandler(navigationAction.shouldPerformDownload ? .download : .allow); return
+            decisionHandler(navigationAction.shouldPerformDownload ? (downloads.acceptingDownloads ? .download : .cancel) : .allow); return
         }
         guard AddressResolver.isWebURL(url) else {
             // Only a deliberate click may hand off common non-web protocols.
@@ -95,11 +95,11 @@ final class WebTab: BrowserEngineTab, WKNavigationDelegate, WKUIDelegate {
             }
             decisionHandler(.cancel); return
         }
-        if navigationAction.shouldPerformDownload { decisionHandler(.download) }
+        if navigationAction.shouldPerformDownload { decisionHandler(downloads.acceptingDownloads ? .download : .cancel) }
         else { decisionHandler(.allow) }
     }
     func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void) {
-        decisionHandler(navigationResponse.canShowMIMEType ? .allow : .download)
+        decisionHandler(navigationResponse.canShowMIMEType ? .allow : (downloads.acceptingDownloads ? .download : .cancel))
     }
     func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) { downloads.track(download) }
     func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) { downloads.track(download) }
