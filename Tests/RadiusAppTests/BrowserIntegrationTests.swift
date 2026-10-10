@@ -310,6 +310,9 @@ struct BrowserIntegrationTests {
         let retainedID = browser.session.selectedTabID
         let retained = browser.activeWebTab
         browser.beginSplit(.sideBySide)
+        let outgoingID = try #require(browser.session.split?.second)
+        try #require(outgoingID != retainedID)
+        browser.selectTab(outgoingID)
         let outgoing = browser.activeWebTab
         let content = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
         window.contentView = content
