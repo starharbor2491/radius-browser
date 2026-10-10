@@ -472,8 +472,12 @@ enum ChromiumAcceptance {
         if transfer.transferEnded {
             guard !exists else { throw ValidationError("A terminally acknowledged native download retained its staging file.") }
         } else {
-            guard transfer.acknowledgementUnavailable, exists, downloads.hasShutdownPendingDownloads else {
-                throw ValidationError("The unconfirmed native writer was not retained (ownerClosed=\(transfer.acknowledgementUnavailable), status=\(transfer.status), stagingExists=\(exists), pendingShutdown=\(downloads.hasShutdownPendingDownloads)).")
+            // Chrome may remove its own cancelled file without delivering
+            // another CEF callback. Radius must retain ownership of that path
+            // and await shutdown, regardless of the engine's file disposition.
+            guard transfer.acknowledgementUnavailable, transfer.staging == staging,
+                  downloads.hasShutdownPendingDownloads else {
+                throw ValidationError("The unconfirmed native writer lost shutdown ownership (ownerClosed=\(transfer.acknowledgementUnavailable), status=\(transfer.status), stagingOwned=\(transfer.staging == staging), pendingShutdown=\(downloads.hasShutdownPendingDownloads)).")
             }
         }
     }
@@ -752,9 +756,15 @@ enum ChromiumAcceptance {
             if approved {
                 let state = try await evaluate(manager, "String(window.radiusFixtureRemoval)")
                 if state.hasPrefix("error:") { throw ValidationError(state) }
-                if state == "removed" {
-                    let remains = try await evaluate(manager, "String((await chrome.developerPrivate.getExtensionsInfo({includeDisabled:true,includeTerminated:true})).some(e => e.id === '\(id)'))")
-                    guard remains == "false" else { throw ValidationError("The confirmed fixture remained in the native extension registry.") }
+                let remains = try await evaluate(manager, "String((await chrome.developerPrivate.getExtensionsInfo({includeDisabled:true,includeTerminated:true})).some(e => e.id === '\(id)'))")
+                let removalState = "callback=\(state), registryContainsFixture=\(remains)"
+                if removalState != lastPromptState {
+                    print("Radius Chromium native removal result: \(removalState)")
+                    lastPromptState = removalState
+                }
+                // The native Remove action and actual profile registry
+                // establish removal. The page-local promise flag is diagnostic.
+                if remains == "false" {
                     print("Radius Chromium acceptance: confirmed the fixture's native Remove dialog and verified registry removal")
                     return
                 }

@@ -487,7 +487,7 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     Page* member=page_; Page* owner=Group(member);
     // CEF stops download notifications when the originating WebContents dies,
     // although its writer may continue. Do not wait for an impossible callback
-    // or report cancellation as confirmed. Swift retains staging until shutdown.
+    // or report cancellation as confirmed. Swift retains cleanup ownership until shutdown.
     FailRequests();
     auto abandoned=std::move(downloads_);
     downloads_.clear();

@@ -165,15 +165,13 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
     }
     /// Call before clearing the closed browser's command target. Mandatory CEF
     /// closes can leave downloads running without any further status callbacks.
-    /// Preserve their files and let runtime shutdown stop the remaining writers.
+    /// Retain cleanup ownership until runtime shutdown stops the remaining writers.
     func chromiumOwnerClosed(ids: Set<String>) {
         for item in items where item.awaitsTerminalUpdate && item.chromiumID.map({ ids.contains($0) }) == true {
             item.acknowledgementUnavailable = true
             item.cancellationRequested = true
             item.active = false
-            item.status = item.staging == nil
-                ? "Source tab closed before cancellation was confirmed."
-                : "Source tab closed before cancellation was confirmed. The incomplete temporary file is retained."
+            item.status = "Source tab closed before cancellation was confirmed. Cleanup will finish when the engine shuts down."
             item.destinationPanel?.cancel(nil)
             // Request cancellation even if an earlier request timed out. Set
             // state first because a callback can deliver a real terminal update

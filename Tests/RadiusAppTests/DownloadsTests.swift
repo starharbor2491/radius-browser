@@ -311,7 +311,7 @@ struct DownloadsTests {
         #expect(item.staging == staging)
         #expect(try String(contentsOf: staging, encoding: .utf8) == "downloaded file")
         #expect(item.status.contains("before cancellation was confirmed"))
-        #expect(item.status.contains("temporary file is retained"))
+        #expect(item.status.contains("Cleanup will finish when the engine shuts down"))
 
         // A cancellation request cannot wait for an impossible callback,
         // delete the file, or turn an unconfirmed close into "Finished".
@@ -321,6 +321,31 @@ struct DownloadsTests {
         #expect(cancelRequests == 1)
         #expect(!item.transferEnded)
         #expect(FileManager.default.fileExists(atPath: staging.path))
+    }
+
+    @Test func engineRemovedClosedDownloadStillAwaitsConfirmedShutdown() async throws {
+        let admission = DownloadAdmission()
+        let (center, item, directory) = try fixture(admission: admission)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let staging = try #require(item.staging)
+        // Chrome can unlink its own cancelled download after losing its CEF
+        // callback owner. Missing bytes do not prove the writer has stopped.
+        try FileManager.default.removeItem(at: staging)
+        center.chromiumOwnerClosed(ids: ["download"])
+
+        #expect(item.acknowledgementUnavailable)
+        #expect(!item.transferEnded)
+        #expect(item.staging == staging)
+        #expect(center.hasShutdownPendingDownloads)
+        #expect(item.status.contains("Cleanup will finish when the engine shuts down"))
+        try await center.cancelAllAndWait(timeout: .zero)
+        #expect(!item.transferEnded && item.staging == staging)
+
+        admission.chromiumDidShutDown()
+        #expect(item.transferEnded)
+        #expect(!item.acknowledgementUnavailable)
+        #expect(item.staging == nil)
+        #expect(!center.hasShutdownPendingDownloads)
     }
 
     @Test func closedOwnerCenterSurvivesUntilConfirmedEngineShutdown() async throws {
