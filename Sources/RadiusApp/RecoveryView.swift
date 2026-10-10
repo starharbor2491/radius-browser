@@ -9,7 +9,7 @@ struct RecoveryView: View {
         VStack(alignment: .leading, spacing: 20) {
             SheetHeader(title: "Recovery", subtitle: "A reliable way back, even when a website or module fails.")
             recoveryAction("Restore the default interface", detail: "Reset appearance and layout. Bookmarks, notes, profiles, and tabs stay in place.", button: "Restore layout") {
-                if confirm("Restore the default layout and theme?", "Your saved setups remain available in Customize.") { app.applyConfiguration(.init()) }
+                app.perform { _ = try app.applySetup(.init(), requirements: [], approvalTitle: "Restore the default interface?") }
             }
             recoveryAction("Stop all optional modules", detail: "Move installed packages into a local backup and stop their features. Saved data is kept.", button: "Reset modules") {
                 if confirm("Reset installed modules?", "All optional features will stop. Reinstall them in Modules when you're ready. A local backup is kept.") { app.resetModules() }

@@ -18,9 +18,15 @@ final class ChromiumTab: BrowserEngineTab {
     private var disposing = false
     private var closeTask: Task<Void, Never>?
     private var chromeFocusObserver: NSObjectProtocol?
+    private var chromeKeyMonitor: Any?
     @Published private(set) var chromeStyle = false
     @Published private(set) var navigationChrome = false
-    override var hasNativeNavigationChrome: Bool { chromeStyle && navigationChrome }
+    @Published private(set) var navigationChromeVisible = false
+    override var hasNativeNavigationChrome: Bool {
+        guard chromeStyle, navigationChrome, navigationChromeVisible,
+              let parent = hostView.window, let chrome = chromeWindow else { return false }
+        return chrome.isVisible && chrome.parent === parent
+    }
     override func focusAddressBar() -> Bool {
         guard hasNativeNavigationChrome else { return false }
         command(Int(RADIUS_CEF_FOCUS_LOCATION)); return true
@@ -29,6 +35,8 @@ final class ChromiumTab: BrowserEngineTab {
     private let hostView: NSView
     private var pageURL: URL?
     private var pageTitle: String?
+    private var showingStartPage = false
+    private let startPageURL = URL(string: "about:blank#radius-start-" + UUID().uuidString)!
     private var nextRequest = 1
     private struct PendingRequest {
         let continuation: CheckedContinuation<Data, any Error>
@@ -38,8 +46,9 @@ final class ChromiumTab: BrowserEngineTab {
     private var readerContexts: [Int: String] = [:]
     override var nativeView: NSView { hostView }
     var chromeWindow: NSWindow? { hostView.value(forKey: "browserWindow") as? NSWindow }
-    override var url: URL? { pageURL }
-    override var title: String? { pageTitle }
+    override var isShowingStartPage: Bool { showingStartPage || pageURL == startPageURL }
+    override var url: URL? { isShowingStartPage ? nil : pageURL }
+    override var title: String? { isShowingStartPage ? nil : pageTitle }
     override var engineID: BrowserEngineID { .chromium }
 
     init(runtime: ChromiumRuntime, page: UnsafeMutableRawPointer, downloads: DownloadCenter, profileID: UUID, privateSessionID: UUID?) {
@@ -95,6 +104,33 @@ final class ChromiumTab: BrowserEngineTab {
                 self.onActivate?()
             }
         }
+        // An intact Chrome child is a separate key window, outside SwiftUI's
+        // focused-scene responder chain. Route Radius's tab shortcuts and the
+        // visible Chrome omnibox before the parent menu can consume them.
+        chromeKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            let windowID = event.window.map(ObjectIdentifier.init)
+            let key = event.charactersIgnoringModifiers?.lowercased()
+            let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control]).rawValue
+            let handled = MainActor.assumeIsolated {
+                guard let self, !self.isAuxiliary, self.hasNativeNavigationChrome,
+                      let chrome = self.chromeWindow, windowID == ObjectIdentifier(chrome), chrome.isKeyWindow else { return false }
+                if modifiers == NSEvent.ModifierFlags.command.rawValue, key == "l" {
+                    self.onActivate?()
+                    return self.focusAddressBar()
+                }
+                let action: String
+                if modifiers == NSEvent.ModifierFlags.command.rawValue, key == "t" { action = "newTab" }
+                else if modifiers == NSEvent.ModifierFlags.command.rawValue, key == "w" { action = "closeTab" }
+                else if modifiers == NSEvent.ModifierFlags.command.union(.shift).rawValue, key == "w" { action = "closeWindow" }
+                else { return false }
+                guard let command = self.onBrowserCommand else { return false }
+                self.onActivate?()
+                self.hostView.window?.makeKeyAndOrderFront(nil)
+                command(action)
+                return true
+            }
+            return handled ? nil : event
+        }
     }
     private static func performApplicationMenuItem(_ title: String) {
         func perform(in menu: NSMenu) -> Bool {
@@ -114,14 +150,23 @@ final class ChromiumTab: BrowserEngineTab {
     }
     override func load(_ url: URL) {
         guard AddressResolver.isWebURL(url) else { errorMessage = "Only HTTP and HTTPS addresses are supported."; return }
+        showingStartPage = false
         errorMessage = nil; pageURL = url; loading = true
         command(Int(RADIUS_CEF_LOAD), text: url.absoluteString)
     }
-    func showExtensions() { command(Int(RADIUS_CEF_EXTENSIONS)) }
+    override func showStartPage() {
+        // Only this native operation can navigate to the internal empty page.
+        // Keep the browser, history, context and active downloads alive.
+        showingStartPage = true; errorMessage = nil; didStartNavigation()
+        pageURL = nil; pageTitle = nil; loading = true
+        command(Int(RADIUS_CEF_STOP))
+        command(Int(RADIUS_CEF_LOAD), text: startPageURL.absoluteString)
+    }
+    func showExtensions() { showingStartPage = false; command(Int(RADIUS_CEF_EXTENSIONS)) }
     override func reload() { errorMessage = nil; command(Int(RADIUS_CEF_RELOAD)) }
     override func stop() { command(Int(RADIUS_CEF_STOP)) }
-    override func goBack() { errorMessage = nil; command(Int(RADIUS_CEF_BACK)) }
-    override func goForward() { errorMessage = nil; command(Int(RADIUS_CEF_FORWARD)) }
+    override func goBack() { showingStartPage = false; errorMessage = nil; command(Int(RADIUS_CEF_BACK)) }
+    override func goForward() { showingStartPage = false; errorMessage = nil; command(Int(RADIUS_CEF_FORWARD)) }
     override func setZoom(_ value: Double) { super.setZoom(value); command(Int(RADIUS_CEF_ZOOM), value: zoom) }
     override func updatePopupPolicy() { command(Int(RADIUS_CEF_POPUPS), value: allowPopups?() == true ? 1 : 0) }
     override func focus() {
@@ -209,6 +254,7 @@ final class ChromiumTab: BrowserEngineTab {
         case Int32(RADIUS_CEF_STATE), Int32(RADIUS_CEF_FINISHED):
             if let chrome = value["chromeStyle"] as? Bool { chromeStyle = chrome }
             if let chrome = value["navigationChrome"] as? Bool { navigationChrome = chrome }
+            if let visible = value["navigationChromeVisible"] as? Bool { navigationChromeVisible = visible }
             if value["navigationStart"] as? Bool == true { didStartNavigation(); return }
             if let address = value["url"] as? String { pageURL = URL(string: address) }
             if let title = value["title"] as? String { pageTitle = title.isEmpty ? nil : title }
@@ -243,7 +289,7 @@ final class ChromiumTab: BrowserEngineTab {
             let key = downloadPrefix + ":" + String(id)
             downloadIDs.insert(key)
             let source = (value["url"] as? String).flatMap(URL.init(string:))
-            downloads.beginChromium(id: key, suggestedName: value["name"] as? String ?? "Download", sourceURL: source, cancel: { [weak self] in
+            downloads.beginChromium(id: key, profileID: profileID, suggestedName: value["name"] as? String ?? "Download", sourceURL: source, cancel: { [weak self] in
                 self?.command(Int(RADIUS_CEF_DOWNLOAD_CANCEL), value: Double(id))
             }, completion: { [weak self] destination in
                 self?.command(Int(RADIUS_CEF_DOWNLOAD_PATH), text: destination?.path ?? "", value: Double(id))
@@ -320,6 +366,8 @@ final class ChromiumTab: BrowserEngineTab {
     private func removeFocusObserver() {
         if let chromeFocusObserver { NotificationCenter.default.removeObserver(chromeFocusObserver) }
         chromeFocusObserver = nil
+        if let chromeKeyMonitor { NSEvent.removeMonitor(chromeKeyMonitor) }
+        chromeKeyMonitor = nil
     }
     private func closePage() {
         if let page { runtime.api?.close_page(page); self.page = nil }

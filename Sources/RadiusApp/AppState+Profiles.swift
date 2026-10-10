@@ -21,15 +21,22 @@ extension AppState {
         var validation = library
         _ = try validation.removeProfile(id, replacingWith: replacement)
         deletingProfileIDs.insert(id)
+        let downloads = DownloadAdmission.shared
+        downloads.blockProfile(id)
         defer {
             deletingProfileIDs.remove(id)
+            if library.profiles.contains(where: { $0.id == id }), !profilesAwaitingWebsiteDataRemoval.contains(id) {
+                downloads.resumeProfile(id)
+            }
             ChromiumRuntime.shared.blockProfilesPendingDeletion(Set((library.pendingProfileDeletions ?? []) + (library.pendingWebsiteDataClears ?? [])))
         }
         let affected = windows.values.compactMap(\.model).filter { $0.session.profileID == id }
         // Stop page callbacks before waiting: a live page must not create a
         // fresh popup or download after the cancellation pass has begun.
         for window in affected { window.disposeEngineTabs() }
-        for window in affected { try await window.downloads.cancelAllAndWait() }
+        // Transfers retain their originating profile even after their window
+        // switches profiles or closes. Never cancel the replacement's transfers.
+        try await downloads.cancelProfileAndWait(id)
         try await ChromiumRuntime.shared.prepareToDeleteProfile(id)
         cancelReaderRequests()
         let removed = try library.removeProfile(id, replacingWith: replacement)
@@ -58,19 +65,25 @@ extension AppState {
         let pending = Array(Set(deleted + clearRequests))
         ChromiumRuntime.shared.blockProfilesPendingDeletion(Set(pending))
         guard !pending.isEmpty else { return }
+        let downloads = DownloadAdmission.shared
+        pending.forEach { downloads.blockProfile($0) }
         // A queued request takes effect when cleanup starts. If either engine's
         // removal fails, do not reopen the profile with its previous cookies.
         profilesAwaitingWebsiteDataRemoval.formUnion(pending)
         for model in windows.values.compactMap(\.model) where profilesAwaitingWebsiteDataRemoval.contains(model.session.profileID) {
             model.disposeEngineTabs()
         }
-        for id in pending { releaseWebKitDataStore(profileID: id) }
         var completed = Set<UUID>()
         // Website-store removal has a deadline. All requests start together so a
         // damaged store cannot add an unbounded delay for each deleted profile.
         let requests = pending.map { id in
             (id, Task { @MainActor in
-                do { try await WebsiteStoreRemoval.remove(id); return true }
+                do {
+                    try await downloads.cancelProfileAndWait(id)
+                    releaseWebKitDataStore(profileID: id)
+                    try await WebsiteStoreRemoval.remove(id)
+                    return true
+                }
                 catch { return false }
             })
         }
@@ -96,6 +109,9 @@ extension AppState {
         }
         ChromiumRuntime.shared.blockProfilesPendingDeletion(Set((library.pendingProfileDeletions ?? []) + (library.pendingWebsiteDataClears ?? [])))
         profilesAwaitingWebsiteDataRemoval = Set((library.pendingProfileDeletions ?? []) + (library.pendingWebsiteDataClears ?? []))
+        for id in pending where library.profiles.contains(where: { $0.id == id }) && !profilesAwaitingWebsiteDataRemoval.contains(id) {
+            downloads.resumeProfile(id)
+        }
     }
 
     func requestWebsiteDataClear(_ id: UUID) async throws {

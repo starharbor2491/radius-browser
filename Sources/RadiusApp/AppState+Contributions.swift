@@ -22,7 +22,7 @@ extension AppState {
         }
         applyConfiguration(next)
     }
-    func applySetup(_ configuration: Configuration, requirements: [String]) throws -> Bool {
+    func applySetup(_ configuration: Configuration, requirements: [String], approvalTitle: String? = nil) throws -> Bool {
         var required = requirements
         // A setup's tab behavior must have a real interchangeable provider.
         let desired = configuration.layout.treeTabs == true ? "org.radius.tree-tabs" : "org.radius.standard-tabs"
@@ -31,6 +31,7 @@ extension AppState {
         }
         if !required.contains(where: { id in moduleManifestCandidate(id)?.capability == .tabSystem }) { required.append(desired) }
         let requirements = try validateModuleRequirements(for: required)
+        let approval = try captureModuleApproval(requirements, rootIDs: required)
         if let tab = requirements.first(where: { $0.capability == .tabSystem }) {
             let definition: ModuleDefinition
             if let existing = installedModules.first(where: { $0.id == tab.id && $0.manifest == tab }) {
@@ -44,11 +45,16 @@ extension AppState {
         }
         // Preview publisher, all dependencies, and permission differences before
         // any installation, role replacement, or configuration mutation.
-        guard approveModules(requirements, activateRequirements: true) else { return false }
-        try applyApprovedSetup(configuration, requirements: requirements)
+        guard approveModules(requirements, activateRequirements: true, activationTitle: approvalTitle) else { return false }
+        try applyApprovedSetup(configuration, requirements: requirements, approval: approval)
         return true
     }
-    func applyApprovedSetup(_ configuration: Configuration, requirements: [ModuleManifest]) throws {
+    func applyApprovedSetup(_ configuration: Configuration, requirements: [ModuleManifest], approval: ModuleApprovalSnapshot? = nil) throws {
+        if let approval {
+            guard requirements == approval.requirements else { throw ValidationError("This setup no longer matches its approved modules. Review its requirements again.") }
+            let current = try validateModuleRequirements(for: approval.rootIDs)
+            try validateModuleApproval(approval, requirements: current)
+        }
         try withAtomicModuleChanges(for: requirements.map(\.id)) {
             // Release every old dependency using the already validated whole
             // setup before replacing any providers; required ID order is inert.

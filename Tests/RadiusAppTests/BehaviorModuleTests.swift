@@ -6,6 +6,94 @@ import RadiusCore
 
 extension NativeIntegrationTests {
 struct BehaviorModuleTests {
+@Test @MainActor func restoringTheDefaultInterfaceReplacesCustomTreeTabsAndExportsAUsableSetup() async throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("radius-default-recovery-" + UUID().uuidString)
+    let previous = AppDelegate.state
+    let app = AppState(directory: directory)
+    defer { app.ready = false; AppDelegate.state = previous; try? FileManager.default.removeItem(at: directory) }
+    await app.load()
+    try #require(app.ready, Comment(rawValue: app.startupError ?? "Recovery fixture did not load"))
+    let repository = try #require(app.repository)
+    let custom = ModuleManifest(id: "org.test.recovery-tree", name: "Custom tree", summary: "A replacement tab system", capability: .tabSystem, runtime: .declarative)
+    try repository.install(custom, enabled: false, payload: Data(#"{"formatVersion":1,"treeTabs":true}"#.utf8))
+    try repository.replaceProvider(role: .tabSystem, with: custom.id)
+    app.installedModules = try repository.installed()
+    try #require(app.library.preferences.configuration.layout.treeTabs == true)
+    let profileID = app.library.profiles[0].id
+    let root = BrowserTab(title: "Pinned root", url: URL(string: "https://recovery.fixture.invalid"), pinned: true)
+    let child = BrowserTab(title: "Kept child", parentID: root.id)
+    app.library.sessions = [WindowSession(profileID: profileID, tabs: [root, child])]
+    app.library.notes = [Note(profileID: profileID, title: "Kept note", text: "Interface recovery preserves browser data")]
+    let sessions = app.library.sessions, notes = app.library.notes
+
+    // Recovery's approved setup transaction replaces the active tab provider,
+    // rather than leaving its tree behavior paired with a flat configuration.
+    let defaults = Configuration()
+    let requirements = try app.validateModuleRequirements(for: ["org.radius.standard-tabs"])
+    try app.applyApprovedSetup(defaults, requirements: requirements)
+    #expect(app.library.preferences.configuration == defaults)
+    #expect(app.installedModules.first(where: { $0.id == custom.id })?.enabled == false)
+    #expect(app.installedModules.first(where: { $0.id == "org.radius.standard-tabs" })?.enabled == true)
+    #expect(app.declarativeDefinition(.tabSystem)?.treeTabs == false)
+    #expect(app.library.sessions == sessions)
+    #expect(app.library.notes == notes)
+
+    let pack = SetupPack(name: "Recovered interface", configuration: app.library.preferences.configuration,
+                         requiredModuleIDs: app.configurationModuleRequirements)
+    let imported = try SetupPack.decode(JSONEncoder().encode(pack))
+    #expect(imported.requiredModuleIDs?.contains("org.radius.standard-tabs") == true)
+    #expect(imported.requiredModuleIDs?.contains(custom.id) == false)
+    try repository.replaceProvider(role: .tabSystem, with: custom.id)
+    app.installedModules = try repository.installed()
+    try #require(app.library.preferences.configuration.layout.treeTabs == true)
+    let importedRequirements = try app.validateModuleRequirements(for: try #require(imported.requiredModuleIDs))
+    try app.applyApprovedSetup(imported.configuration, requirements: importedRequirements)
+    #expect(app.library.preferences.configuration == defaults)
+    #expect(app.declarativeDefinition(.tabSystem)?.treeTabs == false)
+    #expect(app.library.sessions == sessions)
+    #expect(app.library.notes == notes)
+    #expect(await app.flush())
+}
+
+@Test @MainActor func changedCatalogDependenciesOrPayloadsRequireNewApprovalBeforeInstallingOrApplyingASetup() throws {
+    let previous = AppDelegate.state
+    defer { AppDelegate.state = previous }
+    for changingDependencies in [true, false] {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("radius-approval-drift-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let app = AppState(directory: directory)
+        let repo = try ModuleRepository(root: directory.appendingPathComponent("Modules")); app.repository = repo
+        var focus = ModuleManifest(id: "org.test.focus", name: "Focus", summary: "Focus policy", capability: .focusMode, runtime: .behaviorProgram)
+        let oldBytes = try completeBehaviorFixture(Data(#"{"formatVersion":1,"entrypoints":{"enter":{"op":"object","fields":{"active":{"op":"literal","value":true},"hiddenComponents":{"op":"literal","value":["tabs"]}}}}}"#.utf8), capability: .focusMode)
+        app.catalog = [focus]; app.modulePayloads = [focus.id: oldBytes]
+        let reviewed = try app.validateModuleRequirements(for: [focus.id], replacingRootProviders: false)
+        let approval = try app.captureModuleApproval(reviewed, rootIDs: [focus.id])
+        if changingDependencies {
+            let capture = ModuleManifest(id: "org.test.capture", name: "Capture", summary: "New website permission", capability: .screenshot, runtime: .behaviorProgram)
+            focus.version = 2; focus.dependencies = [capture.id]
+            app.catalog = [focus, capture]
+            app.modulePayloads[capture.id] = Data(#"{"formatVersion":1,"entrypoints":{"prepare":{"op":"object","fields":{"filename":{"op":"literal","value":"Capture"},"format":{"op":"literal","value":"png"},"visibleOnly":{"op":"literal","value":true}}}}}"#.utf8)
+        } else {
+            app.modulePayloads[focus.id] = try completeBehaviorFixture(Data(#"{"formatVersion":1,"entrypoints":{"enter":{"op":"object","fields":{"active":{"op":"literal","value":true},"hiddenComponents":{"op":"literal","value":["navigation"]}}}}}"#.utf8), capability: .focusMode)
+        }
+        var configuration = Configuration(); configuration.theme.accent = .orange
+        let before = app.library.preferences.configuration
+        #expect(throws: (any Error).self) { try app.installApprovedModule(focus.id, approval: approval) }
+        #expect(throws: (any Error).self) { try app.applyApprovedSetup(configuration, requirements: reviewed, approval: approval) }
+        #expect(try repo.installed().isEmpty)
+        #expect(app.library.preferences.configuration == before)
+        #expect(!app.enabled(.screenshot))
+
+        let updated = try app.validateModuleRequirements(for: [focus.id], replacingRootProviders: false)
+        let renewed = try app.captureModuleApproval(updated, rootIDs: [focus.id])
+        try app.installApprovedModule(focus.id, approval: renewed)
+        #expect(app.enabled(.focusMode))
+        #expect(app.enabled(.screenshot) == changingDependencies)
+        let expectedHidden: Set<String> = changingDependencies ? ["tabs"] : ["navigation"]
+        #expect(try app.requestedFocusPresentation().hiddenComponents == expectedHidden)
+    }
+}
+
 @Test @MainActor func applicationUpdatesRefreshNativeSignaturesWithoutRestoringRemovedOrDisabledPackages() throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("radius-worker-upgrade-" + UUID().uuidString)
     let previous = AppDelegate.state

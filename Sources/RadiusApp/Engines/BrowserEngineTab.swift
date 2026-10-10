@@ -23,10 +23,12 @@ class BrowserEngineTab: NSObject, ObservableObject {
     var hasNativeNavigationChrome: Bool { false }
     func focusAddressBar() -> Bool { false }
     var nativeView: NSView { preconditionFailure("An engine must provide its native view") }
+    var isShowingStartPage: Bool { false }
     var url: URL? { nil }
     var title: String? { nil }
     var engineID: BrowserEngineID { preconditionFailure("An engine must identify itself") }
     func load(_ url: URL) { preconditionFailure("An engine must implement navigation") }
+    func showStartPage() { preconditionFailure("An engine must implement its native start page transition") }
     func reload() { preconditionFailure("An engine must implement reload") }
     func stop() { preconditionFailure("An engine must implement stop") }
     func goBack() { preconditionFailure("An engine must implement back navigation") }

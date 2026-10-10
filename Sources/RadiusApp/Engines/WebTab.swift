@@ -9,18 +9,23 @@ import RadiusCore
 final class WebTab: BrowserEngineTab, WKNavigationDelegate, WKUIDelegate {
     let webView: WKWebView
     override var nativeView: NSView { webView }
-    override var url: URL? { webView.url }
-    override var title: String? { webView.title }
+    override var isShowingStartPage: Bool { showingStartPage || webView.url == startPageURL }
+    override var url: URL? { isShowingStartPage ? nil : webView.url }
+    override var title: String? { isShowingStartPage ? nil : webView.title }
     override var engineID: BrowserEngineID { .webkit }
     private let downloads: DownloadCenter
+    private let profileID: UUID
     private var observations: [NSKeyValueObservation] = []
     private var imageSnapshots: [UUID: WebImageSnapshotRequest] = [:]
     private var pageSnapshots: [UUID: WebPageSnapshotRequest] = [:]
-    init(dataStore: WKWebsiteDataStore, downloads: DownloadCenter, configuration: WKWebViewConfiguration? = nil) {
+    private var showingStartPage = false
+    private let startPageURL = URL(string: "about:blank#radius-start-" + UUID().uuidString)!
+    init(dataStore: WKWebsiteDataStore, downloads: DownloadCenter, profileID: UUID, configuration: WKWebViewConfiguration? = nil) {
         let config = configuration ?? WKWebViewConfiguration()
         if configuration == nil { config.websiteDataStore = dataStore }
         webView = WKWebView(frame: .zero, configuration: config)
         self.downloads = downloads
+        self.profileID = profileID
         super.init()
         webView.navigationDelegate = self; webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = true
@@ -35,13 +40,22 @@ final class WebTab: BrowserEngineTab, WKNavigationDelegate, WKUIDelegate {
     }
     override func load(_ url: URL) {
         guard AddressResolver.isWebURL(url) else { errorMessage = "This address is not supported."; return }
+        showingStartPage = false
         errorMessage = nil; updatePopupPolicy(); webView.load(URLRequest(url: url))
+    }
+    override func showStartPage() {
+        showingStartPage = true; errorMessage = nil; didStartNavigation()
+        imageSnapshots.values.forEach { $0.cancel() }; imageSnapshots.removeAll()
+        pageSnapshots.values.forEach { $0.cancel() }; pageSnapshots.removeAll()
+        // This trusted local transition stops the old document without closing
+        // the adapter, its back history, website store, or active downloads.
+        webView.load(URLRequest(url: startPageURL))
     }
     override func updatePopupPolicy() { webView.configuration.preferences.javaScriptCanOpenWindowsAutomatically = allowPopups?() == true }
     override func reload() { errorMessage = nil; webView.reload() }
     override func stop() { webView.stopLoading() }
-    override func goBack() { webView.goBack() }
-    override func goForward() { webView.goForward() }
+    override func goBack() { showingStartPage = false; webView.goBack() }
+    override func goForward() { showingStartPage = false; webView.goForward() }
     override func setZoom(_ value: Double) { super.setZoom(value); webView.pageZoom = zoom }
     override func dispose() {
         imageSnapshots.values.forEach { $0.cancel() }; imageSnapshots.removeAll()
@@ -75,7 +89,7 @@ final class WebTab: BrowserEngineTab, WKNavigationDelegate, WKUIDelegate {
     }
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
         guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
-        if url.absoluteString == "about:blank" { decisionHandler(.allow); return }
+        if url == startPageURL || url.absoluteString == "about:blank" { decisionHandler(.allow); return }
         // Websites can generate embedded documents without changing the browser's
         // top-level address or gaining access to local files.
         if navigationAction.targetFrame?.isMainFrame == false,
@@ -83,7 +97,7 @@ final class WebTab: BrowserEngineTab, WKNavigationDelegate, WKUIDelegate {
             decisionHandler(.allow); return
         }
         if url.scheme?.lowercased() == "blob" {
-            decisionHandler(navigationAction.shouldPerformDownload ? (downloads.acceptingDownloads ? .download : .cancel) : .allow); return
+            decisionHandler(navigationAction.shouldPerformDownload ? (downloads.acceptsDownloads(for: profileID) ? .download : .cancel) : .allow); return
         }
         guard AddressResolver.isWebURL(url) else {
             // Only a deliberate click may hand off common non-web protocols.
@@ -95,20 +109,20 @@ final class WebTab: BrowserEngineTab, WKNavigationDelegate, WKUIDelegate {
             }
             decisionHandler(.cancel); return
         }
-        if navigationAction.shouldPerformDownload { decisionHandler(downloads.acceptingDownloads ? .download : .cancel) }
+        if navigationAction.shouldPerformDownload { decisionHandler(downloads.acceptsDownloads(for: profileID) ? .download : .cancel) }
         else { decisionHandler(.allow) }
     }
     func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void) {
-        decisionHandler(navigationResponse.canShowMIMEType ? .allow : (downloads.acceptingDownloads ? .download : .cancel))
+        decisionHandler(navigationResponse.canShowMIMEType ? .allow : (downloads.acceptsDownloads(for: profileID) ? .download : .cancel))
     }
-    func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) { downloads.track(download) }
-    func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) { downloads.track(download) }
+    func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) { downloads.track(download, profileID: profileID) }
+    func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) { downloads.track(download, profileID: profileID) }
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         let url = navigationAction.request.url
         guard url == nil || url?.absoluteString == "about:blank" || url?.scheme == "blob" || url.map(AddressResolver.isWebURL) == true else { return nil }
         // WebKit's javaScriptCanOpenWindowsAutomatically setting blocks unsolicited popups.
         // Return a view using the supplied configuration; WebKit preserves the request and opener.
-        let child = WebTab(dataStore: configuration.websiteDataStore, downloads: downloads, configuration: configuration)
+        let child = WebTab(dataStore: configuration.websiteDataStore, downloads: downloads, profileID: profileID, configuration: configuration)
         guard onCreateWindow?(child, url) == true else { child.dispose(); return nil }
         return child.webView
     }

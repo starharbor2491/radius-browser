@@ -9,6 +9,60 @@ extension NativeIntegrationTests {
 @Suite(.serialized)
 @MainActor
 struct BrowserIntegrationTests {
+    @Test func startPageReplacesOnlyTheCurrentPageAndPreservesItsWorkspaceAndWebsiteStore() async throws {
+        let (app, directory) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = BrowserModel(app: app, isPrivate: false)
+        defer { browser.closeWindow() }
+        let pinned = BrowserTab(title: "Pinned", url: URL(string: "https://pinned.invalid/"), pinned: true, engineID: .chromium)
+        let child = BrowserTab(parentID: pinned.id, engineID: .webkit)
+        browser.session.tabs = [pinned, child]
+        browser.session.selectedTabID = child.id
+        browser.session.split = TabSplit(first: pinned.id, second: child.id)
+        let source = try #require(browser.activeWebTab as? WebTab)
+        source.webView.loadHTMLString("<html><title>Current page</title><body>Current page<script>window.radiusPreviousDocument = true</script></body></html>", baseURL: URL(string: "https://fixture.invalid/"))
+        try await waitUntil { source.webView.title == "Current page" && !source.webView.isLoading && browser.hasPage }
+        let websiteStore = source.webView.configuration.websiteDataStore
+        var expected = browser.session
+        expected.tabs[1].url = nil; expected.tabs[1].title = "New tab"
+        browser.addressEditing = true
+        browser.showStartPage()
+        #expect(browser.session == expected)
+        #expect(!browser.hasPage && browser.address.isEmpty && !browser.addressEditing)
+        try await waitUntil { source.isShowingStartPage && source.webView.url?.scheme == "about" && !source.webView.isLoading }
+        let homeURL = try #require(source.webView.url)
+        #expect(source.webView.navigationDelegate === source && source.onChange != nil)
+        #expect(browser.activeWebTab === source && source.url == nil)
+        #expect(source.webView.configuration.websiteDataStore === websiteStore)
+        #expect((try await source.webView.evaluateJavaScript("typeof window.radiusPreviousDocument")) as? String == "undefined")
+        #expect(source.canGoBack)
+        #expect(app.library.sessions.first(where: { $0.id == expected.id }) == expected)
+        source.goBack()
+        try await waitUntil { source.webView.title == "Current page" && !source.webView.isLoading && browser.hasPage }
+        #expect(browser.session.selectedTabID == child.id && browser.selectedTab.url?.host == "fixture.invalid")
+        #expect(browser.session.tabs.count == 2)
+
+        source.goForward()
+        try await waitUntil { source.webView.url == homeURL && !source.webView.isLoading && !browser.hasPage }
+        #expect(source.isShowingStartPage && source.url == nil && source.title == nil)
+        #expect(browser.activeWebTab === source && browser.address.isEmpty)
+        #expect(browser.session == expected)
+        #expect(app.library.sessions.first(where: { $0.id == expected.id }) == expected)
+        source.goBack()
+        try await waitUntil { source.webView.title == "Current page" && !source.webView.isLoading && browser.hasPage }
+        #expect(!source.isShowingStartPage && browser.selectedTab.url?.host == "fixture.invalid")
+
+        // A pinned tab using a different engine keeps that engine and its place.
+        browser.selectTab(pinned.id)
+        expected = browser.session
+        expected.tabs[0].url = nil; expected.tabs[0].title = "New tab"
+        browser.showStartPage()
+        #expect(browser.session == expected)
+        #expect(browser.selectedTab.engineID == .chromium && browser.selectedTab.pinned)
+        #expect(browser.session.tabs.count == 2)
+        #expect(!browser.hasPage && browser.address.isEmpty)
+        browser.closeWindow(); #expect(await app.flush())
+    }
     @Test func generatedSubframesLoadWithoutBecomingSavedTopLevelPages() async throws {
         let (app, directory) = try await fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -191,6 +245,7 @@ struct BrowserIntegrationTests {
         try await waitUntil { browser.session.tabs.count == 2 }
         let child = try #require(browser.activeWebTab as? WebTab)
         #expect(child !== parent)
+        #expect(!child.isShowingStartPage)
         #expect(!child.webView.configuration.websiteDataStore.isPersistent)
         let hasOpener = try await child.webView.evaluateJavaScript("window.opener !== null") as? Bool
         #expect(hasOpener == true)
@@ -256,7 +311,7 @@ struct BrowserIntegrationTests {
     }
     @Test func javaScriptConfirmationUsesNativeDelegateAndReturnsBothChoices() async throws {
         _ = NSApplication.shared
-        let tab = WebTab(dataStore: .nonPersistent(), downloads: DownloadCenter())
+        let tab = WebTab(dataStore: .nonPersistent(), downloads: DownloadCenter(), profileID: UUID())
         defer { tab.dispose() }
         #expect(tab.responds(to: NSSelectorFromString("webView:runJavaScriptConfirmPanelWithMessage:initiatedByFrame:completionHandler:")))
         tab.webView.loadHTMLString("<html><head><title>Confirmation fixture</title></head><body>Confirmation test</body></html>", baseURL: URL(string: "https://fixture.invalid"))

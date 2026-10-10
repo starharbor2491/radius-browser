@@ -11,6 +11,7 @@ import SwiftUI
 final class DownloadAdmission {
     static let shared = DownloadAdmission()
     private(set) var acceptingDownloads = true
+    private var blockedProfiles: Set<UUID> = []
     private var centers: [ObjectIdentifier: DownloadCenter] = [:]
     var activeCenters: [DownloadCenter] { centers.values.filter(\.hasActive) }
     func refresh(_ center: DownloadCenter) {
@@ -20,23 +21,45 @@ final class DownloadAdmission {
     }
     func freeze() { acceptingDownloads = false }
     func resume() { acceptingDownloads = true }
+    func blockProfile(_ profileID: UUID) { blockedProfiles.insert(profileID) }
+    func resumeProfile(_ profileID: UUID) { blockedProfiles.remove(profileID) }
+    func acceptsDownloads(for profileID: UUID) -> Bool {
+        acceptingDownloads && !blockedProfiles.contains(profileID)
+    }
     func cancelAllAndWait(timeout: Duration = .seconds(10)) async throws {
+        try await cancelAndWait(profileID: nil, timeout: timeout)
+    }
+    /// The deletion transaction blocks admission first and only resumes the
+    /// profile if deletion fails. Other profiles remain available throughout.
+    func cancelProfileAndWait(_ profileID: UUID, timeout: Duration = .seconds(10)) async throws {
+        try await cancelAndWait(profileID: profileID, timeout: timeout)
+    }
+    private func matchingCenters(profileID: UUID?) -> [DownloadCenter] {
+        guard let profileID else { return activeCenters }
+        return activeCenters.filter { $0.hasActive(profileID: profileID) }
+    }
+    private func cancelAndWait(profileID: UUID?, timeout: Duration) async throws {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
         do {
             // Recollect after each suspension: a late WKDownload callback can
             // arrive after the user approved Quit, even from a closed window.
-            while !activeCenters.isEmpty {
-                activeCenters.forEach { $0.cancelAll() }
-                if activeCenters.isEmpty { return }
+            while !matchingCenters(profileID: profileID).isEmpty {
+                matchingCenters(profileID: profileID).forEach { center in
+                    if let profileID { center.cancelProfile(profileID) }
+                    else { center.cancelAll() }
+                }
+                if matchingCenters(profileID: profileID).isEmpty { return }
                 try Task.checkCancellation()
                 guard clock.now < deadline else {
-                    throw ValidationError("The browser engine has not confirmed that all downloads stopped. Temporary files have been kept. Try cancelling again before closing Radius.")
+                    throw ValidationError(profileID == nil
+                        ? "The browser engine has not confirmed that all downloads stopped. Temporary files have been kept. Try cancelling again before closing Radius."
+                        : "The browser engine has not confirmed that this profile's downloads stopped. Temporary files have been kept. Try deleting the profile again.")
                 }
                 try await clock.sleep(until: min(deadline, clock.now.advanced(by: .milliseconds(50))))
             }
         } catch {
-            activeCenters.forEach { $0.restoreUnconfirmedCancellations() }
+            matchingCenters(profileID: profileID).forEach { $0.restoreUnconfirmedCancellations(profileID: profileID) }
             throw error
         }
     }
@@ -45,6 +68,7 @@ final class DownloadAdmission {
 @MainActor
 final class DownloadItem: ObservableObject, Identifiable {
     let id = UUID()
+    let profileID: UUID
     @Published var name = "Preparing download…"
     @Published var status = "Waiting for a destination"
     @Published var destination: URL?
@@ -64,9 +88,10 @@ final class DownloadItem: ObservableObject, Identifiable {
     var acknowledgementUnavailable = false
     var awaitsTerminalUpdate: Bool { !transferEnded && !acknowledgementUnavailable }
     var progressObservation: NSKeyValueObservation?
-    init(_ download: WKDownload) { self.download = download; chromiumID = nil }
-    init(chromiumID: String, sourceURL: URL?, cancel: @escaping @MainActor @Sendable () -> Void) {
-        download = nil; self.chromiumID = chromiumID; self.sourceURL = sourceURL; cancelChromium = cancel
+    init(_ download: WKDownload, profileID: UUID) { self.download = download; chromiumID = nil; self.profileID = profileID }
+    init(chromiumID: String, profileID: UUID, sourceURL: URL?, cancel: @escaping @MainActor @Sendable () -> Void) {
+        download = nil; self.chromiumID = chromiumID; self.profileID = profileID
+        self.sourceURL = sourceURL; cancelChromium = cancel
     }
 }
 @MainActor
@@ -74,6 +99,7 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
     @Published var items: [DownloadItem] = [] { didSet { admission.refresh(self) } }
     private let admission: DownloadAdmission
     var acceptingDownloads: Bool { admission.acceptingDownloads }
+    func acceptsDownloads(for profileID: UUID) -> Bool { admission.acceptsDownloads(for: profileID) }
     init(admission: DownloadAdmission = .shared) { self.admission = admission; super.init() }
     private var standaloneWindow: DownloadWindowController?
     func showWindow() {
@@ -83,9 +109,9 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
         standaloneWindow?.showWindow(nil)
         standaloneWindow?.window?.makeKeyAndOrderFront(nil)
     }
-    func track(_ download: WKDownload) {
-        let item = DownloadItem(download); items.insert(item, at: 0); download.delegate = self
-        guard acceptingDownloads else { cancel(item); return }
+    func track(_ download: WKDownload, profileID: UUID) {
+        let item = DownloadItem(download, profileID: profileID); items.insert(item, at: 0); download.delegate = self
+        guard acceptsDownloads(for: profileID) else { cancel(item); return }
         item.progressObservation = download.progress.observe(\.fractionCompleted, options: [.new]) { [weak item] _, change in
             let fraction = change.newValue ?? 0
             Task { @MainActor [weak item] in
@@ -101,11 +127,11 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
         chooseDestination(for: item, suggestedName: suggestedFilename, completion: completionHandler)
     }
     /// IDs must be unique across the runtime, including downloads from different tabs.
-    func beginChromium(id: String, suggestedName: String, sourceURL: URL?, cancel: @escaping @MainActor @Sendable () -> Void,
+    func beginChromium(id: String, profileID: UUID, suggestedName: String, sourceURL: URL?, cancel: @escaping @MainActor @Sendable () -> Void,
                        completion: @escaping @MainActor @Sendable (URL?) -> Void) {
-        guard acceptingDownloads else { cancel(); completion(nil); return }
+        guard acceptsDownloads(for: profileID) else { cancel(); completion(nil); return }
         guard !items.contains(where: { $0.chromiumID == id }) else { completion(nil); return }
-        let item = DownloadItem(chromiumID: id, sourceURL: sourceURL, cancel: cancel)
+        let item = DownloadItem(chromiumID: id, profileID: profileID, sourceURL: sourceURL, cancel: cancel)
         items.insert(item, at: 0)
         chooseDestination(for: item, suggestedName: suggestedName, completion: completion)
     }
@@ -144,7 +170,7 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
         admission.refresh(self)
     }
     private func chooseDestination(for item: DownloadItem, suggestedName: String, completion: @MainActor @Sendable (URL?) -> Void) {
-        guard acceptingDownloads, item.active else {
+        guard acceptsDownloads(for: item.profileID), item.active else {
             if item.active { cancel(item) }
             completion(nil); return
         }
@@ -155,7 +181,7 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
         item.destinationPanel = panel
         let choice = panel.runModal()
         item.destinationPanel = nil
-        guard acceptingDownloads, item.active, choice == .OK, let url = panel.url else {
+        guard acceptsDownloads(for: item.profileID), item.active, choice == .OK, let url = panel.url else {
             if item.active { cancel(item) }
             completion(nil)
             return
@@ -248,8 +274,11 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
         }
     }
     func cancelAll() { items.filter(\.active).forEach(cancel) }
-    func restoreUnconfirmedCancellations() {
-        restoreUnconfirmedCancellations(items.filter(\.awaitsTerminalUpdate))
+    func cancelProfile(_ profileID: UUID) { items.filter { $0.profileID == profileID && $0.active }.forEach(cancel) }
+    func restoreUnconfirmedCancellations(profileID: UUID? = nil) {
+        restoreUnconfirmedCancellations(items.filter {
+            $0.awaitsTerminalUpdate && (profileID == nil || $0.profileID == profileID)
+        })
     }
     private func restoreUnconfirmedCancellations(_ pending: [DownloadItem]) {
         for item in pending where item.awaitsTerminalUpdate {
@@ -290,6 +319,7 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
         }
     }
     var hasActive: Bool { items.contains(where: \.awaitsTerminalUpdate) }
+    func hasActive(profileID: UUID) -> Bool { items.contains { $0.profileID == profileID && $0.awaitsTerminalUpdate } }
 }
 
 /// Auxiliary Chrome windows can outlive their original Radius tab. Their

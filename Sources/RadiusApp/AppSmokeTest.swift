@@ -34,6 +34,20 @@ enum AppSmokeTest {
             }
             trace("Browser window opened")
             if let view = window.contentView { try capture(view, to: output.appendingPathComponent("Radius-first-launch.png")) }
+            let firstLaunchFrame = window.frame
+            window.setContentSize(NSSize(width: 760, height: 520))
+            try await Task.sleep(for: .milliseconds(400))
+            guard let shortView = window.contentView,
+                  let startViewport = layoutRegion("radius.startPageScroll", in: shortView),
+                  let startContent = layoutRegion("radius.startPageContent", in: shortView),
+                  startViewport.bounds.height > 0, startViewport.bounds.height <= 520,
+                  startContent.bounds.height >= startViewport.bounds.height else {
+                throw ValidationError("The start page did not fit the supported short window with scrollable content.")
+            }
+            trace("Short start page: viewport \(startViewport.bounds.size), content \(startContent.bounds.size)")
+            try capture(shortView, to: output.appendingPathComponent("Radius-first-launch-short.png"))
+            window.setFrame(firstLaunchFrame, display: true)
+            try await Task.sleep(for: .milliseconds(200))
             app.library.preferences.completedOnboarding = true
             browser.panel = .resources
             for design in DesignSystem.allCases {
@@ -137,6 +151,7 @@ enum AppSmokeTest {
                         }
                     }
                     try capture(view, to: output.appendingPathComponent("Radius-customized-\(Int(width)).png"))
+                    await captureWindow(window, to: output.appendingPathComponent("Radius-customized-\(Int(width))-window.png"))
                 }
                 window.setContentSize(NSSize(width: 1240, height: 720))
                 try await Task.sleep(for: .milliseconds(250))
@@ -270,6 +285,11 @@ enum AppSmokeTest {
                     do { try await ChromiumAcceptance.verifyHostAndManagement(chromium, app: app, ownerWindow: window) }
                     catch {
                         let message = "Chrome hosting/extensions: " + error.localizedDescription
+                        acceptanceFailures.append(message); trace(message)
+                    }
+                    do { try await ChromiumAcceptance.verifySessionCookieAfterLastBrowserCloses(app: app) }
+                    catch {
+                        let message = "Session-cookie continuity: " + error.localizedDescription
                         acceptanceFailures.append(message); trace(message)
                     }
                     if !acceptanceFailures.isEmpty { throw ValidationError(acceptanceFailures.joined(separator: "\n")) }

@@ -75,7 +75,7 @@ final class BrowserModel: ObservableObject {
             catch { tab = UnavailableEngineTab(engine: engine, reason: error.localizedDescription) }
         } else {
             let dataStore = privateDataStore ?? app.webKitDataStore(profileID: session.profileID)
-            tab = WebTab(dataStore: dataStore, downloads: downloads)
+            tab = WebTab(dataStore: dataStore, downloads: downloads, profileID: session.profileID)
         }
         attach(tab, id: id)
         if let url = session.tabs.first(where: { $0.id == id })?.url { tab.load(url) }
@@ -84,6 +84,12 @@ final class BrowserModel: ObservableObject {
     private func attach(_ tab: BrowserEngineTab, id: UUID) {
         tab.onChange = { [weak self, weak tab] finished in
             guard let self, !self.isClosed, !self.app.deletingProfileIDs.contains(self.session.profileID), self.app.library.profiles.contains(where: { $0.id == self.session.profileID }), let tab, let index = self.session.tabs.firstIndex(where: { $0.id == id }) else { return }
+            if tab.isShowingStartPage {
+                self.session.tabs[index].url = nil
+                self.session.tabs[index].title = "New tab"
+                if self.session.selectedTabID == id && !self.addressEditing { self.address = "" }
+                return
+            }
             if let url = tab.url, AddressResolver.isWebURL(url) || url.scheme == "blob" || url.absoluteString == "about:blank" ||
                 (tab.engineID == .chromium && ["chrome", "chrome-extension"].contains(url.scheme ?? "")) {
                 self.session.tabs[index].url = url
@@ -116,7 +122,9 @@ final class BrowserModel: ObservableObject {
             guard let self, !self.isClosed, let tab else { return }
             if self.session.selectedTabID != id { self.selectTab(id) }
             switch command {
-            case "newTab": self.newTab()
+            case "newTab":
+                self.newTab()
+                NotificationCenter.default.post(name: .radiusFocusAddress, object: self.session.id)
             case "closeTab": self.closeTab(id)
             case "closeWindow": tab.nativeView.window?.performClose(nil)
             case "newWindow": NotificationCenter.default.post(name: .radiusOpenBrowserWindow, object: self.session.id, userInfo: ["private": false])
@@ -145,6 +153,14 @@ final class BrowserModel: ObservableObject {
         session.tabs[session.tabs.firstIndex(where: { $0.id == session.selectedTabID })!].url = url
         address = url.absoluteString
         tab.load(url)
+    }
+    func showStartPage() {
+        guard !isClosed, let index = session.tabs.firstIndex(where: { $0.id == session.selectedTabID }) else { return }
+        // Stop the old document while retaining its engine, website store,
+        // back history and any transfers already owned by the adapter.
+        activeWebTab.showStartPage()
+        session.tabs[index].url = nil; session.tabs[index].title = "New tab"
+        address = ""; addressEditing = false
     }
     func newTab(url: URL? = nil, parentID: UUID? = nil, engine: BrowserEngineID? = nil) {
         guard !isClosed else { return }

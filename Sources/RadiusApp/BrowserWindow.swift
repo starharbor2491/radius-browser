@@ -63,7 +63,7 @@ struct BrowserWindow: View {
     private var navigationTheme: Theme { theme.component(theme.navigationAppearance) }
     private var sidebarTheme: Theme { theme.component(theme.sidebarAppearance) }
     private var treeTabs: Bool { layout.treeTabs == true && (app.previewConfiguration != nil || app.declarativeDefinition(.tabSystem)?.treeTabs == true) }
-    private var usesChromeNavigation: Bool { navigationEpoch >= 0 && model.activeWebTab.hasNativeNavigationChrome }
+    private var usesChromeNavigation: Bool { navigationEpoch >= 0 && model.hasPage && model.activeWebTab.hasNativeNavigationChrome }
     private func hidden(_ component: String) -> Bool { model.focusMode && model.focusHiddenComponents.contains(component) }
     private var showTabs: Bool { !hidden("tabs") && layout.hideTabStrip != true }
     private var secondaryPanel: BrowserPanel? {
@@ -144,7 +144,7 @@ struct BrowserWindow: View {
     private var windowCommands: some View {
         presentation
         .onReceive(NotificationCenter.default.publisher(for: .radiusFocusAddress)) { notification in
-            if notification.object as? UUID == model.session.id { addressFocused = !model.activeWebTab.focusAddressBar() }
+            if notification.object as? UUID == model.session.id { focusAddress() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .radiusOpenBrowserWindow)) { notification in
             guard notification.object as? UUID == model.session.id else { return }
@@ -367,48 +367,56 @@ struct BrowserWindow: View {
             .accessibilityElement(children: .contain).accessibilityLabel(selected ? "Active browsing pane" : "Browsing pane")
     }
     private var startPage: some View {
-        VStack(alignment: .leading, spacing: 28) {
-            VStack(alignment: .leading, spacing: 10) {
-                Text(model.isPrivate ? "Private window" : "New tab").font(.system(size: 34, weight: .semibold))
-                Text(model.isPrivate ? "This window won't save tabs or history. Downloads you save stay on disk. Websites and your network can still see your activity." : "Enter a website or search in the address bar. Press ⌘L to focus it.")
-                    .font(.body).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-            if !app.library.preferences.completedOnboarding && !model.isPrivate {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Bring your bookmarks").font(.headline)
-                    Text("Export an HTML bookmarks file from your current browser, then import it here.").foregroundStyle(.secondary)
-                    HStack {
-                        Button("Import bookmarks…") { if app.importBookmarks(profileID: model.session.profileID) { app.library.preferences.completedOnboarding = true } }
-                        Button("Start browsing") { app.library.preferences.completedOnboarding = true; focusAddress() }.buttonStyle(.borderedProminent)
-                        Button("Set up Chrome extensions") { model.sheet = ChromiumRuntime.shared.isInstalled(in: app.dataDirectory) ? .extensions : .engines }
+        GeometryReader { viewport in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 28) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(model.isPrivate ? "Private window" : "New tab").font(.system(size: 34, weight: .semibold))
+                        Text(model.isPrivate ? "This window won't save tabs or history. Downloads you save stay on disk. Websites and your network can still see your activity." : "Enter a website or search in the address bar. Press ⌘L to focus it.")
+                            .font(.body).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
-                }.padding(20).background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: theme.cornerRadius))
-            }
-            if !model.bookmarks.isEmpty {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Bookmarks").font(.headline)
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 160))], alignment: .leading, spacing: 12) {
-                        ForEach(Array(model.bookmarks.prefix(12))) { bookmark in
-                            Button { model.navigate(bookmark.url.absoluteString) } label: {
-                                HStack(spacing: 10) { Image(systemName: "bookmark"); Text(bookmark.title).lineLimit(1); Spacer() }.padding(12)
-                            }.buttonStyle(.bordered)
+                    if !app.library.preferences.completedOnboarding && !model.isPrivate {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Bring your bookmarks").font(.headline)
+                            Text("Export an HTML bookmarks file from your current browser, then import it here.").foregroundStyle(.secondary)
+                            ViewThatFits(in: .horizontal) {
+                                HStack { onboardingActions }.fixedSize()
+                                VStack(alignment: .leading, spacing: 8) { onboardingActions }
+                            }
+                        }.padding(20).background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: theme.cornerRadius))
+                    }
+                    if !model.bookmarks.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Bookmarks").font(.headline)
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 160))], alignment: .leading, spacing: 12) {
+                                ForEach(Array(model.bookmarks.prefix(12))) { bookmark in
+                                    Button { model.navigate(bookmark.url.absoluteString) } label: {
+                                        HStack(spacing: 10) { Image(systemName: "bookmark"); Text(bookmark.title).lineLimit(1); Spacer() }.padding(12)
+                                    }.buttonStyle(.bordered)
+                                }
+                            }
                         }
                     }
-                }
-            }
-            ForEach(Array(app.startWidgets.enumerated()), id: \.offset) { _, widget in
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(widget.widgetTitle ?? "").font(theme.interfaceFont(17, weight: .semibold))
-                    Text(widget.widgetBody ?? "").font(theme.interfaceFont()).foregroundStyle(.secondary).textSelection(.enabled)
-                }.padding(16).frame(maxWidth: .infinity, alignment: .leading).background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: theme.cornerRadius))
-            }
-            HStack(spacing: 16) {
-                Button("Modules") { model.sheet = .modules }
-                Button("Customize") { model.sheet = .customize }
-                Button("Settings") { model.sheet = .settings }
-            }.buttonStyle(.plain).foregroundStyle(theme.tint)
-        }.padding(48).frame(maxWidth: 820).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-            .background(Color(nsColor: .textBackgroundColor))
+                    ForEach(Array(app.startWidgets.enumerated()), id: \.offset) { _, widget in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(widget.widgetTitle ?? "").font(theme.interfaceFont(17, weight: .semibold))
+                            Text(widget.widgetBody ?? "").font(theme.interfaceFont()).foregroundStyle(.secondary).textSelection(.enabled)
+                        }.padding(16).frame(maxWidth: .infinity, alignment: .leading).background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: theme.cornerRadius))
+                    }
+                    HStack(spacing: 16) {
+                        Button("Modules") { model.sheet = .modules }
+                        Button("Customize") { model.sheet = .customize }
+                        Button("Settings") { model.sheet = .settings }
+                    }.buttonStyle(.plain).foregroundStyle(theme.tint)
+                }.padding(48).frame(maxWidth: 820).frame(maxWidth: .infinity, minHeight: viewport.size.height, alignment: .center)
+                    .background(BrowserLayoutRegion(identifier: "radius.startPageContent"))
+            }.background(BrowserLayoutRegion(identifier: "radius.startPageScroll"))
+        }.background(Color(nsColor: .textBackgroundColor))
+    }
+    @ViewBuilder private var onboardingActions: some View {
+        Button("Import bookmarks…") { if app.importBookmarks(profileID: model.session.profileID) { app.library.preferences.completedOnboarding = true } }
+        Button("Start browsing") { app.library.preferences.completedOnboarding = true; focusAddress() }.buttonStyle(.borderedProminent)
+        Button("Set up Chrome extensions") { model.sheet = ChromiumRuntime.shared.isInstalled(in: app.dataDirectory) ? .extensions : .engines }
     }
     private var sidebar: some View {
         SidebarView(model: model, panel: visiblePanel ?? .bookmarks).frame(width: min(layout.sidebarWidth, max(180, windowWidth * 0.24)))
@@ -429,7 +437,7 @@ struct BrowserWindow: View {
             if model.hasPage { ZoomControls(tab: model.activeWebTab) }
         }.font(.caption).foregroundStyle(.secondary).padding(.horizontal, 14).padding(.vertical, 6).background(.bar)
     }
-    private func focusAddress() { addressFocused = !model.activeWebTab.focusAddressBar() }
+    private func focusAddress() { addressFocused = !model.hasPage || !model.activeWebTab.focusAddressBar() }
     private func secondarySidebar(_ panel: BrowserPanel) -> some View {
         SidebarView(model: model, panel: panel, onClose: model.closeSecondarySidebar).frame(width: min(layout.sidebarWidth, max(180, windowWidth * 0.24))).modifier(ChromeSurface(theme: sidebarTheme))
             .background(BrowserLayoutRegion(identifier: "radius.secondarySidebar"))
@@ -489,7 +497,8 @@ struct BrowserWindow: View {
         case .back: model.activeWebTab.goBack()
         case .forward: model.activeWebTab.goForward()
         case .reload: if model.activeWebTab.loading { model.activeWebTab.stop() } else { model.activeWebTab.reload() }
-        case .newTab, .home: model.newTab(); focusAddress()
+        case .newTab: model.newTab(); focusAddress()
+        case .home: model.showStartPage(); focusAddress()
         case .bookmark: model.toggleBookmark()
         case .sidebar: model.togglePanel(.bookmarks)
         case .reader: openReader()

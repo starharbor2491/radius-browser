@@ -13,7 +13,7 @@ enum ChromiumAcceptance {
             }), !tab.loading, tab.chromeStyle,
                let sheet = tab.nativeView.window, let chrome = tab.chromeWindow,
                chrome.parent === sheet, chrome.isVisible {
-                let expected = sheet.convertToScreen(tab.nativeView.convert(tab.nativeView.visibleRect, to: nil))
+                let expected = sheet.convertToScreen(tab.nativeView.convert(tab.nativeView.bounds.intersection(tab.nativeView.visibleRect), to: nil))
                 guard abs(chrome.frame.minX - expected.minX) < 2, abs(chrome.frame.minY - expected.minY) < 2,
                       abs(chrome.frame.width - expected.width) < 2, abs(chrome.frame.height - expected.height) < 2 else {
                     throw ValidationError("The extension manager's Chrome child is misaligned inside its native sheet.")
@@ -65,23 +65,82 @@ enum ChromiumAcceptance {
         // Send ordinary AppKit events to our own key window. Do not invoke the
         // browser command callback or grant system accessibility permission.
         try key("l", code: 37, modifiers: .command, window: chrome)
+        try await Task.sleep(for: .milliseconds(150))
         components.fragment = "radius-native-shortcut"
         guard let target = components.url else { throw ValidationError("The shortcut probe address is invalid.") }
         for character in target.absoluteString { try key(String(character), code: 0, window: chrome) }
         try key("\r", code: 36, window: chrome)
         let locationDeadline = ContinuousClock.now.advanced(by: .seconds(10))
         while tab.url != target || tab.loading {
-            guard ContinuousClock.now < locationDeadline else { throw ValidationError("Native Cmd-L did not route typed navigation to Chrome's address bar.") }
+            guard ContinuousClock.now < locationDeadline else {
+                throw ValidationError("Native Cmd-L did not route typed navigation to Chrome's address bar (URL=\(tab.url?.absoluteString ?? "nil"), responder=\(String(describing: chrome.firstResponder)), key=\(chrome.isKeyWindow)).")
+            }
             try await Task.sleep(for: .milliseconds(100))
         }
+        browser.showStartPage()
+        let homeDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while tab.loading || tab.nativeView.window != nil {
+            guard ContinuousClock.now < homeDeadline else { throw ValidationError("Chromium Home did not stop its page and show Radius's start page.") }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        guard browser.activeWebTab === tab, !browser.hasPage, tab.url == nil, tab.canGoBack,
+              try await evaluate(tab, "location.href").hasPrefix("about:blank#radius-start-") else {
+            throw ValidationError("Chromium Home discarded its browser/history or left its previous document running.")
+        }
+        tab.goBack()
+        let backDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while tab.url != target || tab.loading || !tab.hasNativeNavigationChrome {
+            guard ContinuousClock.now < backDeadline else { throw ValidationError("Chromium Back did not restore the page after Home.") }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        tab.goForward()
+        let forwardDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while browser.hasPage || tab.loading || !tab.isShowingStartPage {
+            guard ContinuousClock.now < forwardDeadline else { throw ValidationError("Chromium Forward did not return to Radius's native start page.") }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        guard browser.activeWebTab === tab, tab.url == nil else { throw ValidationError("Chromium Forward replaced the Home browser or exposed its internal address.") }
+        tab.goBack()
+        let restoreDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while tab.url != target || tab.loading || !tab.hasNativeNavigationChrome {
+            guard ContinuousClock.now < restoreDeadline else { throw ValidationError("Chromium Back failed after traversing its Home history entry.") }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        print("Radius Chromium acceptance: Home preserved its browser and Back/Forward restored the previous document and native start page")
         chrome.makeKeyAndOrderFront(nil); tab.focus()
         let beforeNew = Set(browser.session.tabs.map(\.id))
+        guard let profileIndex = browser.app.library.profiles.firstIndex(where: { $0.id == browser.session.profileID }) else {
+            throw ValidationError("The shortcut probe's profile is unavailable.")
+        }
+        let originalEngine = browser.app.library.profiles[profileIndex].engineID
+        browser.app.library.profiles[profileIndex].engineID = .chromium
+        defer { browser.app.library.profiles[profileIndex].engineID = originalEngine }
         try key("t", code: 17, modifiers: .command, window: chrome)
         try await Task.sleep(for: .milliseconds(300))
         let created = Set(browser.session.tabs.map(\.id)).subtracting(beforeNew)
         guard created.count == 1, created.contains(browser.session.selectedTabID) else {
             throw ValidationError("Native Cmd-T from Chrome did not create and select one Radius tab.")
         }
+        guard let blank = browser.activeWebTab as? ChromiumTab, !browser.hasPage,
+              blank.nativeView.window == nil, !blank.hasNativeNavigationChrome, !blank.focusAddressBar() else {
+            throw ValidationError("A blank Chromium tab hid Radius's address field or claimed an unmounted Chrome toolbar.")
+        }
+        ownerWindow.makeKeyAndOrderFront(nil)
+        try key("l", code: 37, modifiers: .command, window: ownerWindow)
+        try await Task.sleep(for: .milliseconds(100))
+        guard ownerWindow.firstResponder is NSTextView else {
+            throw ValidationError("Cmd-L on the Chromium start page did not focus Radius's native address field.")
+        }
+        components.fragment = "radius-native-blank-tab"
+        guard let blankTarget = components.url else { throw ValidationError("The blank tab probe address is invalid.") }
+        for character in blankTarget.absoluteString { try key(String(character), code: 0, window: ownerWindow) }
+        try key("\r", code: 36, window: ownerWindow)
+        let blankDeadline = ContinuousClock.now.advanced(by: .seconds(15))
+        while blank.url != blankTarget || blank.loading || !blank.hasNativeNavigationChrome {
+            guard ContinuousClock.now < blankDeadline else { throw ValidationError("A blank default-Chromium tab could not navigate from Radius's native address field.") }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        print("Radius Chromium acceptance: default Chromium start page accepted native address input and mounted Chrome navigation")
         for id in created { browser.closeTab(id) }
         browser.selectTab(probeID)
         chrome.makeKeyAndOrderFront(nil); tab.focus()
@@ -110,10 +169,30 @@ enum ChromiumAcceptance {
     }
     private static func verifyChromeGeometry(_ tab: ChromiumTab, ownerWindow: NSWindow) async throws {
         guard let chrome = tab.chromeWindow else { throw ValidationError("Chrome has no native window.") }
-        let expected = ownerWindow.convertToScreen(tab.nativeView.convert(tab.nativeView.visibleRect, to: nil))
+        let expected = ownerWindow.convertToScreen(tab.nativeView.convert(tab.nativeView.bounds.intersection(tab.nativeView.visibleRect), to: nil))
+        func region(_ identifier: String, in view: NSView) -> NSView? {
+            guard !view.isHidden else { return nil }
+            if view.identifier?.rawValue == identifier, !view.bounds.isEmpty { return view }
+            for child in view.subviews { if let found = region(identifier, in: child) { return found } }
+            return nil
+        }
+        guard let root = ownerWindow.contentView, let page = region("radius.page", in: root) else {
+            throw ValidationError("Radius's independent native page layout region is unavailable.")
+        }
+        let pageRect = ownerWindow.convertToScreen(page.convert(page.bounds, to: nil))
+        guard pageRect.insetBy(dx: -2, dy: -2).contains(chrome.frame) else {
+            throw ValidationError("Chrome covers controls outside Radius's page region (page=\(pageRect), child=\(chrome.frame)).")
+        }
+        if let tabs = region("radius.verticalTabs", in: root) {
+            let tabRect = ownerWindow.convertToScreen(tabs.convert(tabs.bounds, to: nil))
+            let overlap = chrome.frame.intersection(tabRect)
+            guard overlap.isNull || overlap.width < 2 || overlap.height < 2 else {
+                throw ValidationError("Chrome overlaps Radius's visible native tab strip.")
+            }
+        }
         let nativeState = try await tab.request("Radius.chromeHostState", parameters: [:])
         let state = try JSONSerialization.jsonObject(with: nativeState) as? [String: Any] ?? [:]
-        print("Radius Chromium geometry: owner=\(ownerWindow.windowNumber) \(ownerWindow.frame), child=\(chrome.windowNumber) \(chrome.frame), parent=\(chrome.parent?.windowNumber ?? -1), anchor=\(expected), chrome=\(String(decoding: nativeState, as: UTF8.self))")
+        print("Radius Chromium geometry: owner=\(ownerWindow.windowNumber) \(ownerWindow.frame), child=\(chrome.windowNumber) \(chrome.frame), parent=\(chrome.parent?.windowNumber ?? -1), hostBounds=\(tab.nativeView.bounds), hostFrame=\(tab.nativeView.frame), superBounds=\(String(describing: tab.nativeView.superview?.bounds)), anchor=\(expected), chrome=\(String(decoding: nativeState, as: UTF8.self))")
         guard chrome !== ownerWindow, chrome.parent === ownerWindow,
               abs(chrome.frame.minX - expected.minX) < 2, abs(chrome.frame.minY - expected.minY) < 2,
               abs(chrome.frame.width - expected.width) < 2, abs(chrome.frame.height - expected.height) < 2 else {
@@ -129,6 +208,13 @@ enum ChromiumAcceptance {
               ProcessInfo.processInfo.arguments.contains("--smoke-test") else {
             throw ValidationError("Chromium acceptance requires the isolated smoke-test launch.")
         }
+        // The preceding independent keyboard probe restores the selected tab.
+        // SwiftUI must remount that tab before inspecting its attached child.
+        let mountDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while !tab.hasNativeNavigationChrome || tab.chromeWindow?.parent !== ownerWindow {
+            guard ContinuousClock.now < mountDeadline else { throw ValidationError("The restored Chromium tab did not remount inside its Radius window.") }
+            try await Task.sleep(for: .milliseconds(100))
+        }
         guard tab.chromeStyle, tab.hasNativeNavigationChrome, let child = tab.chromeWindow, child !== ownerWindow,
               child.parent === ownerWindow, child.isVisible else {
             throw ValidationError("Chromium is not an intact Chrome-style child window in Radius.")
@@ -137,7 +223,6 @@ enum ChromiumAcceptance {
         guard tab.focusAddressBar() else { throw ValidationError("Chrome's address control is unavailable.") }
         try await Task.sleep(for: .milliseconds(100))
         guard child.isKeyWindow else { throw ValidationError("The Chrome toolbar cannot receive keyboard focus.") }
-        try await verifySessionCookieAfterLastBrowserCloses(app: app)
         let manager = try ChromiumRuntime.shared.makeTab(profileID: UUID(), privateSessionID: nil, dataDirectory: app.dataDirectory)
         let managerWindow = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 900, height: 680),
                                      styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
@@ -166,8 +251,10 @@ enum ChromiumAcceptance {
         }
         print("Radius Chromium acceptance: Chrome Views, native child geometry/focus, and extension manager passed")
     }
-    private static func verifySessionCookieAfterLastBrowserCloses(app: AppState) async throws {
-        guard let address = ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_URL"],
+    static func verifySessionCookieAfterLastBrowserCloses(app: AppState) async throws {
+        guard ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_DATA"] != nil,
+              CommandLine.arguments.contains("--smoke-test"),
+              let address = ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_URL"],
               let url = URL(string: address), url.host == "127.0.0.1" else {
             throw ValidationError("The Chromium session-cookie probe requires the loopback fixture.")
         }

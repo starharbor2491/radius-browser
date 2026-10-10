@@ -49,12 +49,15 @@ jobs:
         run: ./scripts/test.sh
       - name: Build universal Radius application
         id: app-build
-        # Build and smoke are useful diagnostics when an independent native
-        # test fails. That failure still gates restart, packaging and evidence.
+        # Build, package and smoke provide diagnostics when an independent
+        # native test fails. That failure still gates validated app artifacts.
         if: ${{ !cancelled() && steps.chromium-build.outcome == 'success' }}
         env:
           RADIUS_CHROMIUM_PACKAGE: ${{ runner.temp }}/radius-cef-runtime/Chromium-${{ matrix.arch }}.radiusengine
         run: ./scripts/build-app.sh
+      - name: Package graphical development installer
+        if: ${{ !cancelled() && steps.app-build.outcome == 'success' }}
+        run: python3 scripts/package-release.py --development
       - name: Verify installed Chromium renders inside Radius and quits normally
         if: ${{ !cancelled() && steps.chromium-build.outcome == 'success' && steps.app-build.outcome == 'success' }}
         timeout-minutes: 10
@@ -64,8 +67,6 @@ jobs:
         run: ./scripts/smoke-app.sh
       - name: Verify Chrome Web Store extension survives process restart
         run: python3 scripts/smoke-chromium-restart.py
-      - name: Package graphical development installer
-        run: python3 scripts/package-release.py --development
       - name: Archive development runtime
         run: |
           ditto -c -k --sequesterRsrc --keepParent "$RUNNER_TEMP/radius-cef-runtime/Chromium-${{ matrix.arch }}.radiusengine" "dist/Chromium-${{ matrix.arch }}.radiusengine.zip"
@@ -89,6 +90,7 @@ jobs:
           name: Radius-Chromium-${{ matrix.arch }}-development-runtime
           path: |
             dist/*.dmg
+            dist/*-package.json
             dist/Chromium-*.radiusengine.zip
             dist/Radius-Chromium-*.zip
           if-no-files-found: error
@@ -103,5 +105,6 @@ jobs:
             dist/native-tests*.log
             dist/native-tests*.txt
             dist/smoke-data/Chromium/engine.log
+            dist/*-package.json
             ${{ runner.temp }}/radius-cef-runtime/radius-adapter-*.json
           if-no-files-found: warn

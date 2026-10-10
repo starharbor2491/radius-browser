@@ -17,6 +17,7 @@ final class UnavailableEngineTab: BrowserEngineTab {
         super.init(); errorMessage = reason
     }
     override func load(_ url: URL) { address = url; errorMessage = reason }
+    override func showStartPage() { address = nil; errorMessage = nil }
     override func reload() { errorMessage = reason }
     override func stop() {}
     override func goBack() {}

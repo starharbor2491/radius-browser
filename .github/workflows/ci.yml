@@ -38,6 +38,7 @@ jobs:
           path: |
             dist/Radius-macOS.zip
             dist/*.dmg
+            dist/*-package.json
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
@@ -54,6 +55,7 @@ jobs:
             dist/smoke-sample.txt
             dist/native-tests*.log
             dist/native-tests*.txt
+            dist/*-package.json
           if-no-files-found: warn
   portable-core:
     runs-on: ubuntu-24.04

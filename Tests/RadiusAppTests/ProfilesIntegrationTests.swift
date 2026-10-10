@@ -9,6 +9,39 @@ extension NativeIntegrationTests {
 @Suite(.serialized)
 @MainActor
 struct ProfilesIntegrationTests {
+    @Test func deletingAProfileCancelsItsTransfersAfterTheWindowSwitchesProfiles() async throws {
+        let (app, directory) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let removed = Profile(name: "Download origin"), kept = Profile(name: "Current profile")
+        app.library.profiles = [removed, kept]
+        app.library.sessions = [WindowSession(profileID: removed.id)]
+        let browser = BrowserModel(app: app, isPrivate: false)
+        let center = browser.downloads
+        var removedCancellations = 0, keptCancellations = 0
+        let removedItem = DownloadItem(chromiumID: "removed-profile", profileID: removed.id, sourceURL: nil) { [weak center] in
+            removedCancellations += 1
+            center?.updateChromium(id: "removed-profile", fraction: 0, complete: false, cancelled: true, interrupted: false)
+        }
+        center.items.append(removedItem)
+        browser.changeProfile(kept.id)
+        let keptItem = DownloadItem(chromiumID: "kept-profile", profileID: kept.id, sourceURL: nil) { keptCancellations += 1 }
+        center.items.append(keptItem)
+        defer {
+            center.updateChromium(id: "kept-profile", fraction: 0, complete: false, cancelled: true, interrupted: false)
+            browser.closeWindow()
+        }
+        try await app.deleteProfile(removed.id, replacingWith: kept.id)
+        #expect(browser.session.profileID == kept.id)
+        #expect(removedCancellations == 1)
+        #expect(!removedItem.active)
+        #expect(keptCancellations == 0)
+        #expect(keptItem.active)
+        #expect(!DownloadAdmission.shared.acceptsDownloads(for: removed.id))
+        #expect(DownloadAdmission.shared.acceptsDownloads(for: kept.id))
+        #expect(app.library.profiles == [kept])
+        try await removeStores([removed.id, kept.id], releasing: [app])
+    }
+
     @Test func deletingAProfileResetsItsWindowsAndErasesOnlyItsWebsiteData() async throws {
         let (app, directory) = try await fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -98,6 +131,8 @@ struct ProfilesIntegrationTests {
         catch { failure = error }
 
         #expect(failure != nil)
+        #expect(DownloadAdmission.shared.acceptsDownloads(for: removed.id))
+        #expect(DownloadAdmission.shared.acceptsDownloads(for: kept.id))
         #expect(Set(app.library.profiles.map(\.id)) == Set([removed.id, kept.id]))
         #expect(Set(app.library.bookmarks.map(\.id)) == Set(originalBookmarks.map(\.id)))
         #expect(Set(app.library.notes.map(\.id)) == Set(originalNotes.map(\.id)))
@@ -320,6 +355,63 @@ struct ProfilesIntegrationTests {
         #expect(restored.sessions == expectedDurableLibrary.sessions)
         #expect(browser.session == originalSession)
         #expect(browser.activeWebTab === cached)
+    }
+
+    @Test func refusingQuitSavesEditsMadeWhileTerminationSuspendedAutosave() async throws {
+        let (app, directory) = try await fixture()
+        defer {
+            app.ready = false; app.terminating = false
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try #require(await app.flush())
+        let database = try LibraryDatabase(url: directory.appendingPathComponent("library.sqlite"))
+        let baseline = try await database.load()
+        let bookmark = Bookmark(profileID: app.library.profiles[0].id, title: "Saved during quit", url: try #require(URL(string: "https://quit.fixture.invalid/saved")))
+
+        app.terminating = true
+        app.library.bookmarks.append(bookmark)
+        app.library.preferences.configuration.theme.accent = .orange
+        // Allow the usual debounce to pass. Termination owns persistence until
+        // the quit is accepted or refused; this edit must stay in memory here.
+        try await Task.sleep(for: .milliseconds(350))
+        #expect(try await database.load() == baseline)
+
+        app.terminating = false
+        // No further library mutation or explicit flush may rescue this edit.
+        let deadline = ContinuousClock().now.advanced(by: .seconds(5))
+        var persisted = try await database.load()
+        while !persisted.bookmarks.contains(where: { $0.id == bookmark.id }) && ContinuousClock().now < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+            persisted = try await database.load()
+        }
+        #expect(persisted.bookmarks == baseline.bookmarks + [bookmark])
+        #expect(persisted.preferences.configuration.theme.accent == .orange)
+        #expect(persisted.profiles == baseline.profiles)
+    }
+
+    @Test func finalTerminationSnapshotSavesEditsMadeAfterTheInitialQuitFlush() async throws {
+        let (app, directory) = try await fixture()
+        defer {
+            app.ready = false; app.terminating = false
+            try? FileManager.default.removeItem(at: directory)
+        }
+        app.terminating = true
+        try #require(await app.flush())
+        let database = try LibraryDatabase(url: directory.appendingPathComponent("library.sqlite"))
+        let baseline = try await database.load()
+        let profileID = app.library.profiles[0].id
+        let note = Note(profileID: profileID, title: "Latest edit", text: "Written while engine cleanup was finishing")
+        let bookmark = Bookmark(profileID: profileID, title: "Latest bookmark", url: try #require(URL(string: "https://quit.fixture.invalid/latest")))
+        app.library.notes.append(note)
+        app.library.bookmarks.append(bookmark)
+        #expect(try await database.load() == baseline)
+
+        try #require(await app.flushForTermination())
+        let persisted = try await database.load()
+        #expect(persisted.notes == baseline.notes + [note])
+        #expect(persisted.bookmarks == baseline.bookmarks + [bookmark])
+        #expect(persisted.profiles == baseline.profiles)
+        #expect(app.terminating)
     }
 
     private func fixture() async throws -> (AppState, URL) {

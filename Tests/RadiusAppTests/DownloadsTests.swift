@@ -8,13 +8,127 @@ extension NativeIntegrationTests {
 @Suite(.serialized)
 @MainActor
 struct DownloadsTests {
+    private static let profileA = UUID(uuidString: "00000000-0000-0000-0000-00000000000A")!
+    private static let profileB = UUID(uuidString: "00000000-0000-0000-0000-00000000000B")!
+
+    @Test func deletingAProfileCancelsOnlyItsTransfersAfterTheWindowSwitchesProfiles() async throws {
+        let admission = DownloadAdmission()
+        let (center, profileAItem, directory) = try fixture(admission: admission)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let profileAStaging = try #require(profileAItem.staging)
+        let profileBStaging = directory.appendingPathComponent("profile-b.part")
+        try Data("profile B download".utf8).write(to: profileBStaging)
+        let profileBItem = DownloadItem(chromiumID: "profile-b", profileID: Self.profileB, sourceURL: nil, cancel: {
+            Issue.record("Deleting profile A must not cancel profile B's transfer in the same window")
+        })
+        profileBItem.staging = profileBStaging
+        center.items.append(profileBItem)
+        profileAItem.cancelChromium = { [weak center] in
+            center?.updateChromium(id: "download", fraction: 0, complete: false, cancelled: true, interrupted: false)
+        }
+
+        admission.blockProfile(Self.profileA)
+        try await admission.cancelProfileAndWait(Self.profileA, timeout: .zero)
+
+        #expect(profileAItem.profileID == Self.profileA)
+        #expect(profileAItem.transferEnded)
+        #expect(!FileManager.default.fileExists(atPath: profileAStaging.path))
+        #expect(profileBItem.profileID == Self.profileB)
+        #expect(profileBItem.active)
+        #expect(!profileBItem.cancellationRequested)
+        #expect(try String(contentsOf: profileBStaging, encoding: .utf8) == "profile B download")
+        #expect(admission.activeCenters.count == 1)
+        #expect(!admission.acceptsDownloads(for: Self.profileA))
+        #expect(admission.acceptsDownloads(for: Self.profileB))
+    }
+
+    @Test func deletingAProfileFindsTransfersRetainedAfterTheirWindowClosed() async throws {
+        let admission = DownloadAdmission()
+        weak var closedWindowCenter: DownloadCenter?
+        var cancellationRequests = 0
+        let directory: URL
+        let item: DownloadItem
+        let staging: URL
+        do {
+            let (center, transfer, temporaryDirectory) = try fixture(admission: admission)
+            directory = temporaryDirectory; item = transfer; staging = try #require(transfer.staging)
+            closedWindowCenter = center
+            transfer.cancelChromium = { [weak center] in
+                cancellationRequests += 1
+                center?.updateChromium(id: "download", fraction: 0, complete: false, cancelled: true, interrupted: false)
+            }
+        }
+        defer { try? FileManager.default.removeItem(at: directory) }
+        #expect(closedWindowCenter != nil)
+
+        admission.blockProfile(Self.profileA)
+        try await admission.cancelProfileAndWait(Self.profileA, timeout: .zero)
+
+        #expect(cancellationRequests == 1)
+        #expect(item.transferEnded)
+        #expect(!FileManager.default.fileExists(atPath: staging.path))
+        #expect(admission.activeCenters.isEmpty)
+        #expect(closedWindowCenter == nil)
+    }
+
+    @Test func profileDeletionTimeoutPreservesOnlyThatProfilesRetryState() async throws {
+        let admission = DownloadAdmission()
+        let (center, profileAItem, directory) = try fixture(admission: admission)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let staging = try #require(profileAItem.staging)
+        let profileBItem = DownloadItem(chromiumID: "profile-b", profileID: Self.profileB, sourceURL: nil, cancel: {})
+        center.items.append(profileBItem)
+        center.cancel(profileBItem)
+        let profileBStatus = profileBItem.status
+        admission.blockProfile(Self.profileA)
+
+        do {
+            try await admission.cancelProfileAndWait(Self.profileA, timeout: .zero)
+            Issue.record("Profile deletion must wait for its writers to acknowledge cancellation")
+        } catch is ValidationError {}
+
+        #expect(profileAItem.active)
+        #expect(!profileAItem.transferEnded)
+        #expect(FileManager.default.fileExists(atPath: staging.path))
+        #expect(!profileBItem.active)
+        #expect(profileBItem.status == profileBStatus)
+        #expect(!admission.acceptsDownloads(for: Self.profileA))
+        admission.resumeProfile(Self.profileA)
+        #expect(admission.acceptsDownloads(for: Self.profileA))
+        #expect(admission.acceptsDownloads(for: Self.profileB))
+    }
+
+    @Test func profileDeletionRejectsLateDestinationsWithoutFreezingOtherProfiles() {
+        let admission = DownloadAdmission()
+        let center = DownloadCenter(admission: admission)
+        var cancellationRequests = 0
+        var destinations: [URL?] = []
+        admission.blockProfile(Self.profileA)
+
+        center.beginChromium(id: "late-profile-a", profileID: Self.profileA, suggestedName: "late.txt", sourceURL: nil,
+                             cancel: { cancellationRequests += 1 }, completion: { destinations.append($0) })
+
+        #expect(cancellationRequests == 1)
+        #expect(destinations.count == 1 && destinations[0] == nil)
+        #expect(center.items.isEmpty)
+        #expect(!center.acceptsDownloads(for: Self.profileA))
+        #expect(center.acceptsDownloads(for: Self.profileB))
+        admission.freeze()
+        admission.resumeProfile(Self.profileA)
+        #expect(!center.acceptsDownloads(for: Self.profileA))
+        #expect(!center.acceptsDownloads(for: Self.profileB))
+        admission.resume()
+        #expect(center.acceptsDownloads(for: Self.profileA))
+        #expect(center.acceptsDownloads(for: Self.profileB))
+    }
+
     @Test func quitFreezeRejectsLateChromiumDestinationWithoutOpeningASavePanel() {
         let admission = DownloadAdmission()
         let center = DownloadCenter(admission: admission)
         admission.freeze()
         var cancellations = 0
         var destinations: [URL?] = []
-        center.beginChromium(id: "late", suggestedName: "late.txt", sourceURL: nil,
+        center.beginChromium(id: "late", profileID: Self.profileA, suggestedName: "late.txt", sourceURL: nil,
                              cancel: { cancellations += 1 }, completion: { destinations.append($0) })
         #expect(cancellations == 1)
         #expect(destinations.count == 1 && destinations[0] == nil)
@@ -28,7 +142,7 @@ struct DownloadsTests {
     @Test func quitRecollectsLateCentersAndRetainsAClosedWindowUntilAcknowledgement() async throws {
         let admission = DownloadAdmission()
         let center = DownloadCenter(admission: admission)
-        let first = DownloadItem(chromiumID: "first", sourceURL: nil, cancel: {})
+        let first = DownloadItem(chromiumID: "first", profileID: Self.profileA, sourceURL: nil, cancel: {})
         center.items = [first]
         weak var lateCenter: DownloadCenter?
         var lateCancellations = 0
@@ -38,7 +152,7 @@ struct DownloadsTests {
                 // acknowledgement. Its native browser window then disappears.
                 let late = DownloadCenter(admission: admission)
                 lateCenter = late
-                let item = DownloadItem(chromiumID: "late", sourceURL: nil, cancel: { [weak late] in
+                let item = DownloadItem(chromiumID: "late", profileID: Self.profileA, sourceURL: nil, cancel: { [weak late] in
                     lateCancellations += 1
                     late?.updateChromium(id: "late", fraction: 0, complete: false, cancelled: true, interrupted: false)
                 })
@@ -80,7 +194,7 @@ struct DownloadsTests {
 
     @Test func cancellationBeforeChoosingADestinationHasABoundedWait() async throws {
         let center = DownloadCenter(admission: DownloadAdmission())
-        let item = DownloadItem(chromiumID: "no-control-yet", sourceURL: nil, cancel: {})
+        let item = DownloadItem(chromiumID: "no-control-yet", profileID: Self.profileA, sourceURL: nil, cancel: {})
         center.items = [item]
 
         do {
@@ -254,7 +368,7 @@ struct DownloadsTests {
     @Test func closedOwnerDoesNotAbandonDownloadsFromOtherTabs() async throws {
         let (center, item, directory) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let other = DownloadItem(chromiumID: "other-tab", sourceURL: nil, cancel: {
+        let other = DownloadItem(chromiumID: "other-tab", profileID: Self.profileA, sourceURL: nil, cancel: {
             Issue.record("An unrelated source tab still owns this download")
         })
         center.items.append(other)
@@ -272,7 +386,7 @@ struct DownloadsTests {
     @Test func tabCancellationWaitsForAcknowledgementAndLeavesOtherTabsAlone() async throws {
         let (center, item, directory) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let other = DownloadItem(chromiumID: "other-tab", sourceURL: nil, cancel: {
+        let other = DownloadItem(chromiumID: "other-tab", profileID: Self.profileA, sourceURL: nil, cancel: {
             Issue.record("Closing one tab must not cancel another tab's download")
         })
         center.items.append(other)
@@ -344,7 +458,7 @@ struct DownloadsTests {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let center = DownloadCenter(admission: admission)
-        let item = DownloadItem(chromiumID: "download", sourceURL: URL(string: "https://example.com/file"), cancel: {})
+        let item = DownloadItem(chromiumID: "download", profileID: Self.profileA, sourceURL: URL(string: "https://example.com/file"), cancel: {})
         item.destination = directory.appendingPathComponent("download.txt")
         let staging = directory.appendingPathComponent(".radius-download-test.part")
         item.staging = staging

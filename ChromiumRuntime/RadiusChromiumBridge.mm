@@ -49,7 +49,9 @@
   NSWindow* child = self.browserWindow;
   if (!child) return;
   NSWindow* parent = self.window;
-  NSRect visible = self.visibleRect;
+  // On macOS 14 an unclipped NSView's visibleRect may extend beyond its own
+  // bounds. The Chrome child must never cover Radius's surrounding controls.
+  NSRect visible = NSIntersectionRect(self.bounds, self.visibleRect);
   NSWindow* modal = NSApp.modalWindow;
   BOOL show = !self.contentHidden && parent && parent.visible && !parent.miniaturized &&
       !self.hiddenOrHasHiddenAncestor && !NSIsEmptyRect(visible) &&
@@ -178,6 +180,7 @@ struct Page {
   bool pending_popup = false;
   bool management = false;
   bool fixture_dialog = false;
+  bool navigation_chrome_visible = false;
   void* callback_context = nullptr;
   radius_cef_event_callback event = nullptr;
   radius_cef_popup_callback popup = nullptr;
@@ -686,6 +689,14 @@ void SynchronizeViews() {
       NSView* handle = (NSView*)page->browser->GetHost()->GetWindowHandle();
       page->view.browserWindow = [handle window];
     } else [page->view synchronizeBrowserWindow];
+    NSWindow* child=page->view.browserWindow;
+    const bool available=page->view.navigationChrome && page->view.window && child.visible &&
+        child.parentWindow==page->view.window;
+    if (available!=page->navigation_chrome_visible) {
+      page->navigation_chrome_visible=available;
+      auto value=CefDictionaryValue::Create(); value->SetBool("navigationChromeVisible",available);
+      Emit(page,RADIUS_CEF_STATE,value);
+    }
   }
 }
 void Destroy(Page* page) {

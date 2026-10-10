@@ -27,8 +27,11 @@ final class AppState: ObservableObject {
     var repository: ModuleRepository?
     private var saveTask: Task<Void, Never>?
     private var revision: UInt64 = 0
+    private var libraryChangedDuringTermination = false
     private var claimedSessions = Set<UUID>()
-    var terminating = false
+    var terminating = false {
+        didSet { if oldValue && !terminating && ready { scheduleSave() } }
+    }
     var saveWithoutChromiumOnQuit = false
     var webKitDataStores: [UUID: WKWebsiteDataStore] = [:]
     private(set) var windows: [UUID: BrowserReference] = [:]
@@ -184,18 +187,21 @@ final class AppState: ObservableObject {
     func install(_ id: String) {
         perform {
             guard let repository else { throw ValidationError("Open Recovery to repair module storage first.") }
-            _ = try validateModuleRequirements(for: [id], replacingRootProviders: false, preparingActivation: installedModules.first(where: { $0.id == id })?.enabled ?? true)
+            let activate = installedModules.first(where: { $0.id == id })?.enabled ?? true
+            let requirements = try validateModuleRequirements(for: [id], replacingRootProviders: false, preparingActivation: activate)
+            let approval = try captureModuleApproval(requirements, rootIDs: [id])
             let plan = try repository.installationPlan(for: id, catalog: catalog)
-            if !approveModules(plan, activateDependencies: installedModules.first(where: { $0.id == id })?.enabled ?? true) { return }
-            try installApprovedModule(id)
+            if !approveModules(plan, activateDependencies: activate) { return }
+            try installApprovedModule(id, approval: approval)
         }
     }
     /// Called after the install dialog approves the bundled package and any dependencies.
-    func installApprovedModule(_ id: String, repairing: Bool = false) throws {
+    func installApprovedModule(_ id: String, repairing: Bool = false, approval: ModuleApprovalSnapshot? = nil) throws {
         guard let repository else { throw ValidationError("Open Recovery to repair module storage first.") }
         if repairing { _ = try compatibleReinstallationManifest(for: id) }
         let activate = installedModules.first { $0.id == id }?.enabled ?? true
         let requirements = try validateModuleRequirements(for: [id], replacingRootProviders: false, preparingActivation: activate, repairingIDs: repairing ? [id] : [])
+        if let approval { try validateModuleApproval(approval, requirements: requirements) }
         try withAtomicModuleChanges(for: requirements.map(\.id)) {
             // Install every code candidate before activating dependency roles. An
             // updated dependent must release its old provider before replacement.
@@ -214,12 +220,13 @@ final class AppState: ObservableObject {
         perform {
             _ = try compatibleReinstallationManifest(for: module.id)
             let requirements = try validateModuleRequirements(for: [module.id], replacingRootProviders: false, preparingActivation: module.enabled, repairingIDs: [module.id])
+            let approval = try captureModuleApproval(requirements, rootIDs: [module.id])
             guard approveModules(requirements, activateDependencies: module.enabled) else { return }
-            try reinstallApprovedWorker(module.id)
+            try reinstallApprovedWorker(module.id, approval: approval)
         }
     }
-    func reinstallApprovedWorker(_ id: String) throws {
-        try installApprovedModule(id, repairing: true)
+    func reinstallApprovedWorker(_ id: String, approval: ModuleApprovalSnapshot? = nil) throws {
+        try installApprovedModule(id, repairing: true, approval: approval)
     }
     func importModule() {
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.json]; panel.canChooseDirectories = false
@@ -289,6 +296,7 @@ final class AppState: ObservableObject {
             guard let repository else { throw ValidationError("Repair module storage first.") }
             if !module.enabled {
                 try validateModulePayload(module, requireEnabled: false)
+                let approval = try captureModuleApproval([module.manifest], rootIDs: [module.id])
                 if module.manifest.capability.isExclusive,
                    let active = installedModules.first(where: { $0.enabled && $0.manifest.capability == module.manifest.capability && $0.id != module.id }) {
                     let dependents = installedModules.filter { $0.enabled && $0.manifest.dependencies.contains(active.id) }
@@ -297,6 +305,7 @@ final class AppState: ObservableObject {
                     if let permission = module.manifest.capability.permission { alert.informativeText += "\n\n" + permission }
                     alert.addButton(withTitle: "Replace"); alert.addButton(withTitle: "Cancel")
                     guard alert.runModal() == .alertFirstButtonReturn else { return }
+                    try validateModuleApproval(approval, requirements: [module.manifest])
                     if module.manifest.capability == .resourceMonitor { try replaceResourceProvider(with: module.id) }
                     else { try repository.replaceProvider(role: module.manifest.capability, with: module.id); installedModules = try repository.installed() }
                     return
@@ -305,6 +314,7 @@ final class AppState: ObservableObject {
                     let alert = NSAlert(); alert.messageText = "Enable \(module.manifest.name)?"; alert.informativeText = permission
                     alert.addButton(withTitle: "Approve and enable"); alert.addButton(withTitle: "Cancel")
                     guard alert.runModal() == .alertFirstButtonReturn else { return }
+                    try validateModuleApproval(approval, requirements: [module.manifest])
                 }
             }
             try setModuleEnabledApproved(module.id, enabled: !module.enabled)
@@ -447,6 +457,7 @@ final class AppState: ObservableObject {
     func flush() async -> Bool {
         saveTask?.cancel()
         guard let database else { return false }
+        libraryChangedDuringTermination = false
         revision += 1
         var snapshot = saveWithoutChromiumOnQuit ? libraryPreparedForChromiumRemoval() : library
         snapshot.normalize()
@@ -458,8 +469,23 @@ final class AppState: ObservableObject {
         catch { notice = "Your changes were saved. Database maintenance will retry: \(error.localizedDescription)" }
         return true
     }
+    func flushForTermination() async -> Bool {
+        // Async engine/update cleanup can finish after the first quit snapshot.
+        // Save any intervening edits before replying to AppKit, then stop if the
+        // data keeps changing rather than silently exiting with an older copy.
+        for _ in 0..<3 {
+            guard libraryChangedDuringTermination else { return true }
+            guard await flush() else { return false }
+        }
+        guard !libraryChangedDuringTermination else {
+            notice = "Browser data is still changing. Keep Radius open and retry quitting."
+            return false
+        }
+        return true
+    }
     private func scheduleSave() {
-        guard !terminating else { return }
+        guard !terminating else { libraryChangedDuringTermination = true; return }
+        libraryChangedDuringTermination = false
         revision += 1; let currentRevision = revision; var snapshot = library; snapshot.normalize()
         saveTask?.cancel()
         saveTask = Task { [weak self] in
@@ -537,10 +563,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             var quit = saved
             var stoppedWorkersForQuit = false
             if !saved {
-                let alert = NSAlert(); alert.messageText = "Your latest changes could not be saved."
-                alert.informativeText = state.notice ?? "Retry saving from Recovery."
-                alert.addButton(withTitle: "Keep Radius open"); alert.addButton(withTitle: "Quit without saving")
-                quit = alert.runModal() == .alertSecondButtonReturn
+                quit = self.offerQuitWithoutSaving(state)
             }
             if quit {
                 // The updater waits for this process to exit. Start and validate
@@ -564,6 +587,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if !quit { state.notice = ChromiumRuntime.shared.status }
                 if quit { await state.finishPendingProfileDeletions() }
             }
+            if quit && saved {
+                let savedLatest = await state.flushForTermination()
+                if !savedLatest { quit = self.offerQuitWithoutSaving(state) }
+            }
             self.smokeTrace("Sending termination reply: \(quit)")
             state.terminating = quit
             if !quit {
@@ -579,6 +606,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         smokeTrace("Returning terminateLater")
         return .terminateLater
+    }
+    private func offerQuitWithoutSaving(_ state: AppState) -> Bool {
+        let alert = NSAlert(); alert.messageText = "Your latest changes could not be saved."
+        alert.informativeText = state.notice ?? "Retry saving from Recovery."
+        alert.addButton(withTitle: "Keep Radius open"); alert.addButton(withTitle: "Quit without saving")
+        return alert.runModal() == .alertSecondButtonReturn
     }
     private func smokeTrace(_ message: String) {
         guard CommandLine.arguments.contains("--smoke-test") else { return }

@@ -3,8 +3,31 @@ import AppKit
 import Foundation
 import RadiusCore
 
+struct ModuleApprovalSnapshot: Equatable {
+    let rootIDs: [String]
+    let requirements: [ModuleManifest]
+    let repositoryRoot: URL
+    let installed: [InstalledModule]
+    let catalogPayloadSHA256: [String: String]
+}
+
 @MainActor
 extension AppState {
+    func captureModuleApproval(_ requirements: [ModuleManifest], rootIDs: [String]) throws -> ModuleApprovalSnapshot {
+        guard let repository, requirements.count <= 128, Set(requirements.map(\.id)).count == requirements.count,
+              rootIDs.count <= 64 else { throw ValidationError("This module operation exceeds its package limit.") }
+        var hashes: [String: String] = [:]
+        for manifest in requirements {
+            if let payload = modulePayloads[manifest.id] { hashes[manifest.id] = ModuleDigest.sha256(payload) }
+        }
+        return ModuleApprovalSnapshot(rootIDs: rootIDs, requirements: requirements, repositoryRoot: repository.root,
+                                      installed: try repository.installed(), catalogPayloadSHA256: hashes)
+    }
+    func validateModuleApproval(_ approval: ModuleApprovalSnapshot, requirements: [ModuleManifest]) throws {
+        guard try captureModuleApproval(requirements, rootIDs: approval.rootIDs) == approval else {
+            throw ValidationError("The packages or active providers changed while the approval was open. Review the updated modules and permissions before trying again.")
+        }
+    }
     /// Application updates can change a worker's code signature without changing
     /// its manifest version. Refresh only already installed official native roles;
     /// removed packages and user activation choices survive the application update.
@@ -296,17 +319,19 @@ extension AppState {
         let replacement = replacements[popup.indexOfSelectedItem]
         perform {
             let requirements = try validateModuleRequirements(for: [replacement.id])
+            let approval = try captureModuleApproval(requirements, rootIDs: [replacement.id])
             guard approveModules(requirements, activateRequirements: true, activationTitle: "Activate \(replacement.name)?") else { return }
-            try replaceTabProviderApproved(currentID: current.id, replacementID: replacement.id, removeCurrent: removeAfterReplacement)
+            try replaceTabProviderApproved(currentID: current.id, replacementID: replacement.id, removeCurrent: removeAfterReplacement, approval: approval)
         }
     }
-    func replaceTabProviderApproved(currentID: String, replacementID: String, removeCurrent: Bool) throws {
+    func replaceTabProviderApproved(currentID: String, replacementID: String, removeCurrent: Bool, approval: ModuleApprovalSnapshot? = nil) throws {
         guard let repository, currentID != replacementID,
               let current = installedModules.first(where: { $0.id == currentID && $0.enabled && $0.manifest.capability == .tabSystem }),
               moduleManifestCandidate(replacementID)?.capability == .tabSystem else { throw ValidationError("Choose a compatible replacement for the active tab system.") }
         let dependents = installedModules.filter { $0.manifest.dependencies.contains(current.id) && (removeCurrent || $0.enabled) }
         guard dependents.isEmpty else { throw ValidationError("Resolve these dependent modules before replacing the tab system: " + dependents.map { $0.manifest.name }.joined(separator: ", ")) }
         let requirements = try validateModuleRequirements(for: [replacementID])
+        if let approval { try validateModuleApproval(approval, requirements: requirements) }
         try withAtomicModuleChanges(for: Array(Set(requirements.map(\.id) + [currentID]))) {
             try installApprovedModule(replacementID)
             try repository.replaceProvider(role: .tabSystem, with: replacementID)
