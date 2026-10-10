@@ -1,27 +1,33 @@
 # Radius v1 review and validation
 
-Independent subagents have repeatedly reviewed browser behavior, module transactions, privacy boundaries, native design, Chromium lifecycle and application distribution. GPT-6 Astra at xhigh implemented and reviewed the Chrome-style engine integration. Findings are fixed and reviewed again. Review conclusions apply to inspected behavior; they do not prove that every possible browser or macOS defect has been eliminated.
+Independent subagents repeatedly review browser behavior, module transactions, privacy, native design, Chromium lifecycle and application distribution. GPT-6 Astra at xhigh implements and reviews the Chrome integration. Concrete findings are fixed and checked again; reviews do not prove that every possible browser or macOS defect has been eliminated.
 
 ## Current implementation
 
-The app contains WebKit and optional Chrome-style Chromium, 18 removable module packages, native module settings/catalogs, advanced visual customization, profile cleanup and a verified whole-application installer. The complete scope is described in [RELEASE_STATUS.md](RELEASE_STATUS.md).
+Radius includes WebKit and optional normal Chrome windows with native grouped tabs, 18 removable module packages, native catalogs/settings, graphical theme and layout editing, profiles, recovery, and verified whole-application installation. See [release status](RELEASE_STATUS.md), [Chrome integration](CHROMIUM.md), and [design decisions](DESIGN.md).
 
-Recent review fixes cover worker EOF/shutdown, cancellation retries, profile-deletion callbacks and durable cleanup, dependency and setup activation, transactional package replacement, native toolbar focus, paired custom colors, staged installer cleanup and running-destination protection. Native tests exercise real workers and WebKit stores; packaged checks additionally exercise the actual browser windows and engine services.
+The latest source fixes stable browser-view hosting, active-page readiness before engine switching, pristine panes with extension-created inactive tabs, and native window-control ownership. Module review also covers approved payloads across reentrant worker shutdown and preserving unrelated layout edits during rollback. Those changes require fresh native acceptance before their installers can be delivered.
 
-## Evidence
+## Recorded native evidence
 
-The current local portable suite passes 66 tests: 56 Swift Testing cases and 10 XCTest cases. All 18 factory packages validate. New native regressions cover genuine WebKit Home/Back/Forward history, exclusive tab-provider changes, cross-window customization preview ownership, serialized website-data clear requests, final quit snapshots and startup database recovery. Those native changes are awaiting the next macOS run.
+Source `5dd97aba4da2d73108d7d1ad60cd81f381042dee` is recorded in [native workflow 38052369297](https://github.com/starharbor2491/radius-browser/actions/runs/38052369297) and [Chromium workflow 38052369293](https://github.com/starharbor2491/radius-browser/actions/runs/38052369293). The pull-request test checkout is `d0ff841b99c167d7de928de2aaf3c3e078dbcd28`.
 
-Source `2f80300028abeb3bf7b1d139e6815d91c30c8586` is recorded in [native workflow 38041105298](https://github.com/starharbor2491/radius-browser/actions/runs/38041105298) and [Chromium workflow 38041105366](https://github.com/starharbor2491/radius-browser/actions/runs/38041105366). Its portable suite passes 64 tests. The native run executes 122 Swift Testing cases and 10 XCTest cases; a Home-history fixture using `loadHTMLString` fails to produce the required history entry. The replacement fixture serves a genuine bounded loopback HTTP page.
+| Check | Result for that source |
+| --- | --- |
+| Portable | 59 Swift Testing and 10 XCTest cases pass; all 18 official packages validate |
+| macOS debug | 136 Swift Testing and 10 XCTest cases pass |
+| Selected native release | 77 Swift Testing cases pass with real workers, WebKit storage, downloads, profile cleanup, save refusal and installation staging |
+| Installed WebKit | Read-only DMG mount, all-architecture sealed copy and package checks, detach before launch, normal quit, owned process exit, copy removal and unchanged external library pass |
+| Chromium ARM and Intel | Bridge, native tests, universal shell and DMG build pass; both installed tests fail the browser-view attachment check before extension acceptance |
 
-Both Chromium architectures build the bridge, universal native app and graphical development installer; all ten native files meet the macOS 14.0 deployment minimum. Packaged checks pass HTTP/HTTPS, isolated Reader, PNG capture, normal/private profile isolation, popup policy/opener behavior and actual Chrome child-window geometry. A regular profile's expiry-free session cookie survives its last Chromium browser closing. Native screenshots confirm the Chrome toolbar stays within its page region, the second panel collapses at 800 points, and short-window onboarding remains reachable.
+The accepted WebKit DMG for that source is `Radius-1.0.0-WebKit-universal-development.dmg`, 10,162,478 bytes, SHA-256 `3fb6b4f87870373e287e73c23e6f6d7f909c1f910c94424fa4adcfca6e18de84`. Its receipt records all 18 actual module payloads and both host/worker architectures. This earlier candidate does not certify subsequent changes. Failed Chromium diagnostics are not delivery artifacts.
 
-The current packaged shortcut and local extension-fixture acceptance still fail. The fixes enter AppKit's real event queue and use Chromium's supported browser-level extension loader. Genuine Web Store installation, whole-process restart and ordinary shutdown remain required. An Intel signal termination lacks a captured cause; the next run collects launch-scoped macOS crash reports. Failed diagnostic installers are not accepted delivery artifacts.
+Actual screenshots include Modules Discover/Updates, General/Engine settings, light/dark appearance presets, customization at wide/narrow sizes, split panes and recovery. Independent visual review checks spacing, alignment, contrast, action hierarchy and responsive geometry.
 
-The previously accepted universal WebKit installer is from source `8ba318f104a8bab72222ea122a762da54df76794`, [workflow 38039455130](https://github.com/starharbor2491/radius-browser/actions/runs/38039455130). Its native suites and actual packaged launch pass. It is historical evidence, not an installer for the newer source. Fresh installer checksums and complete acceptance will replace this interim record after the new runs pass.
+## Distribution and measurement boundary
 
-## Distribution and interactive checks
+Developer ID and notarization credentials are not configured. Development artifacts use ad-hoc signatures; trusted network installation remains disabled. The production pipeline requires an authenticated publisher and notarization.
 
-Developer ID and notarization credentials are not configured. Development artifacts use ad-hoc signatures. The production pipeline requires a real publisher identity and notarization; trusted updates remain disabled in development builds.
+Installed smoke uses an isolated data directory and bounded loopback fixtures. Its optional performance record labels warmed-file window readiness, title/load navigation readiness and five-second process-tree CPU/RSS samples. These are diagnostic observations, not cold-start, paint/input latency, energy, physical-footprint or comparative browser benchmarks.
 
-Automated native acceptance is complemented by the interactive checks in [TESTING.md](TESTING.md), particularly VoiceOver, IME, media permissions, multiple displays and broader website behavior. Chromium's defined MV3 target and download boundaries are documented in [CHROMIUM.md](CHROMIUM.md). No universal extension compatibility or performance benchmark is claimed.
+The interactive checks in [TESTING.md](TESTING.md) remain relevant for VoiceOver, IME, media permissions, multiple displays and representative websites. The defined MV3 target does not promise universal extension compatibility. No weekly usage-limit reset was used.

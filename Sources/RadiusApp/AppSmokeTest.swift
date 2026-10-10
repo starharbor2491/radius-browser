@@ -212,10 +212,15 @@ enum AppSmokeTest {
                         if Date() > chromiumDeadline { throw ValidationError("Embedded Chromium did not render the HTTP fixture.") }
                         try await Task.sleep(for: .milliseconds(100))
                     }
-                    guard browser.webTab(id).nativeView.window === window, browser.webTab(id).engineID == .chromium else {
-                        throw ValidationError("Chromium was not hosted inside the actual Radius window.")
-                    }
                     guard let chromium = browser.webTab(id) as? ChromiumTab else { throw ValidationError("Chromium adapter is unavailable.") }
+                    let hostDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+                    while chromium.nativeView.window !== window || !chromium.hasNativeNavigationChrome {
+                        guard ContinuousClock.now < hostDeadline else {
+                            throw ValidationError("Chromium was not hosted inside the actual Radius window (anchorWindow=\(chromium.nativeView.window?.windowNumber ?? -1), expected=\(window.windowNumber), chromeWindow=\(chromium.chromeWindow?.windowNumber ?? -1), parent=\(chromium.chromeWindow?.parent?.windowNumber ?? -1), visible=\(chromium.chromeWindow?.isVisible == true), bounds=\(chromium.nativeView.bounds)).")
+                        }
+                        try await Task.sleep(for: .milliseconds(100))
+                    }
+                    try await ChromiumAcceptance.verifyChromeGeometry(chromium, ownerWindow: window)
                     try await measureIdle("loaded-chromium-with-webkit-pane")
                     trace("Verifying Reader captures in an isolated Chromium world")
                     _ = try await evaluate(chromium, "(() => { window.radiusOriginalSerializer = window.XMLSerializer; window.radiusSnapshotTouched = false; window.XMLSerializer = class { constructor() { window.radiusSnapshotTouched = true; } serializeToString() { return '<html><body>Wrong page-world snapshot</body></html>'; } }; return 'ready'; })()")

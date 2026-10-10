@@ -15,6 +15,19 @@ struct ModuleApprovalSnapshot: Equatable {
 extension AppState {
     func requireModuleMutationAllowed() throws {
         guard !finalQuitDataFrozen else { throw ValidationError("Radius is saving data before quitting. Try again if the quit is canceled.") }
+        guard !stoppingModuleWorkers else { throw ValidationError("Another module operation is stopping its workers. Try again when it finishes.") }
+    }
+    /// Foundation's synchronous process wait services the main run loop. Keep
+    /// other package operations out of that wait, before resuming this mutation.
+    func stopWorkersForModuleMutation(moduleID: String? = nil, stoppingReader: Bool = true) throws {
+        try requireModuleMutationAllowed()
+        stoppingModuleWorkers = true
+        do {
+            defer { stoppingModuleWorkers = false }
+            ResourceWorker.stopAll(moduleID: moduleID)
+            if stoppingReader { cancelReaderRequests(moduleID: moduleID) }
+        }
+        try requireModuleMutationAllowed()
     }
     func captureModuleApproval(_ requirements: [ModuleManifest], rootIDs: [String]) throws -> ModuleApprovalSnapshot {
         guard let repository, requirements.count <= 128, Set(requirements.map(\.id)).count == requirements.count,
@@ -51,8 +64,7 @@ extension AppState {
                 existing = try? readModuleFile(url, limit: 8 * 1024 * 1024)
             } else { existing = nil }
             if current.manifest != factory || existing != trusted {
-                ResourceWorker.stopAll(moduleID: current.id); cancelReaderRequests(moduleID: current.id)
-                try requireModuleMutationAllowed()
+                try stopWorkersForModuleMutation(moduleID: current.id)
                 try repository.install(factory, enabled: current.enabled, payload: trusted)
             }
         }
@@ -217,12 +229,17 @@ extension AppState {
     func installApprovedModuleCode(_ requirements: [ModuleManifest], repairingIDs: Set<String> = []) throws {
         try requireModuleMutationAllowed()
         guard let repository else { throw ValidationError("Repair module storage first.") }
-        for manifest in requirements {
-            if !repairingIDs.contains(manifest.id), installedModules.contains(where: { $0.id == manifest.id && $0.manifest == manifest }) { continue }
-            ResourceWorker.stopAll(moduleID: manifest.id); cancelReaderRequests(moduleID: manifest.id)
-            try requireModuleMutationAllowed()
-            let previous = installedModules.first(where: { $0.id == manifest.id })?.enabled ?? false
-            try repository.install(manifest, enabled: previous, payload: modulePayloads[manifest.id])
+        // Capture the reviewed code and activation choices before any process
+        // wait can service another main-run-loop callback.
+        let candidates = requirements.filter { manifest in
+            repairingIDs.contains(manifest.id) || !installedModules.contains(where: { $0.id == manifest.id && $0.manifest == manifest })
+        }.map { manifest in
+            (manifest: manifest, enabled: installedModules.first(where: { $0.id == manifest.id })?.enabled ?? false,
+             payload: modulePayloads[manifest.id])
+        }
+        for candidate in candidates {
+            try stopWorkersForModuleMutation(moduleID: candidate.manifest.id)
+            try repository.install(candidate.manifest, enabled: candidate.enabled, payload: candidate.payload)
         }
         installedModules = try repository.installed()
     }
@@ -244,9 +261,10 @@ extension AppState {
         try requireModuleMutationAllowed()
         guard let repository else { throw ValidationError("Repair module storage first.") }
         if suspendingModuleContributions { return try operation() }
-        let previous = installedModules, configuration = library.preferences.configuration
+        let previous = installedModules
+        moduleConfigurationBeforeMutation = nil
         suspendingModuleContributions = true
-        defer { suspendingModuleContributions = false; invalidateModuleExecution() }
+        defer { suspendingModuleContributions = false; moduleConfigurationBeforeMutation = nil; invalidateModuleExecution() }
         do {
             let result = try repository.withAtomicChanges(for: ids, operation)
             installedModules = try repository.installed()
@@ -255,7 +273,9 @@ extension AppState {
             return result
         } catch {
             installedModules = (try? repository.installed()) ?? previous
-            applyConfiguration(configuration)
+            // A layout edit arriving while a worker was reaped belongs to its
+            // editor. Roll back only configuration this transaction applied.
+            if let configuration = moduleConfigurationBeforeMutation { applyConfiguration(configuration) }
             throw error
         }
     }

@@ -103,7 +103,7 @@ final class BrowserModel: ObservableObject {
         tab.onChange = { [weak self, weak tab] finished in
             guard let self, !self.isClosed, !self.app.finalQuitDataFrozen, !self.app.deletingProfileIDs.contains(self.session.profileID), self.app.library.profiles.contains(where: { $0.id == self.session.profileID }), let tab, let index = self.session.tabs.firstIndex(where: { $0.id == id }) else { return }
             if let pages = tab.chromiumSessionPages {
-                let saved = ChromiumSessionPage.normalized(pages)
+                let saved: [ChromiumSessionPage]? = tab.isShowingStartPage && pages.count == 1 ? nil : ChromiumSessionPage.normalized(pages)
                 if self.session.tabs[index].chromiumPages != saved { self.session.tabs[index].chromiumPages = saved }
             }
             if tab.isShowingStartPage {
@@ -343,6 +343,10 @@ final class BrowserModel: ObservableObject {
         let profileID = session.profileID
         webTabs[id]?.refreshActiveContent()
         captureChromiumSessions()
+        if let chromium = webTabs[id] as? ChromiumTab, !chromium.isReadyForEngineSwitch {
+            app.notice = "Wait for this Chrome pane to finish restoring its tabs and active page before switching engines."
+            return
+        }
         guard let descriptor = session.tabs.first(where: { $0.id == id }), descriptor.engineID != engine else { return }
         if descriptor.engineID != .chromium, let url = descriptor.url, !AddressResolver.isWebURL(url) {
             app.notice = "Generated pages cannot be reopened in another engine. Open the original website instead."; return
@@ -372,6 +376,10 @@ final class BrowserModel: ObservableObject {
             // Apply only to the profile and pages whose loss was just reviewed.
             webTabs[id]?.refreshActiveContent()
             captureChromiumSessions()
+            if let chromium = webTabs[id] as? ChromiumTab, !chromium.isReadyForEngineSwitch {
+                app.notice = "The active Chrome page is not ready. Review the pane and try switching engines again."
+                return
+            }
             guard session.profileID == profileID, !app.deletingProfileIDs.contains(profileID),
                   let current = session.tabs.first(where: { $0.id == id }),
                   current.engineID == descriptor.engineID, safeReopeningURL(current) == safeURL,
@@ -429,7 +437,7 @@ final class BrowserModel: ObservableObject {
             tab.refreshActiveContent()
             guard let index = session.tabs.firstIndex(where: { $0.id == id }),
                   let pages = tab.chromiumSessionPages else { continue }
-            let saved = ChromiumSessionPage.normalized(pages)
+            let saved: [ChromiumSessionPage]? = tab.isShowingStartPage && pages.count == 1 ? nil : ChromiumSessionPage.normalized(pages)
             if session.tabs[index].chromiumPages != saved { session.tabs[index].chromiumPages = saved }
         }
     }

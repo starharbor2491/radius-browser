@@ -47,6 +47,19 @@
   if (self.auxiliary) return;
   NSWindow* child = self.browserWindow;
   if (!child) return;
+  // Radius owns this pane's outer window. Preserve Chrome's titled frame and
+  // standard-button objects: its native frame expects all three to exist.
+  child.hasShadow=NO;
+  child.excludedFromWindowsMenu=YES;
+  child.movable=NO;
+  child.movableByWindowBackground=NO;
+  child.collectionBehavior=NSWindowCollectionBehaviorFullScreenAuxiliary |
+      NSWindowCollectionBehaviorFullScreenDisallowsTiling;
+  for (NSWindowButton button : {NSWindowCloseButton,NSWindowMiniaturizeButton,NSWindowZoomButton}) {
+    NSButton* control=[child standardWindowButton:button];
+    if (!control.hidden) control.hidden=YES;
+    if (control.enabled) control.enabled=NO;
+  }
   NSWindow* parent = self.window;
   // On macOS 14 an unclipped NSView's visibleRect may extend beyond its own
   // bounds. The Chrome child must never cover Radius's surrounding controls.
@@ -257,17 +270,22 @@ void Message(Page* page, int event, const std::string& message) {
 }
 void State(Page* page, bool finished = false) {
   if (page!=Active(Group(page))) { if (auto active=Active(Group(page))) State(active); return; }
-  if (!page->browser || !page->navigated) return;
+  if (!page->browser) return;
   auto value = CefDictionaryValue::Create();
-  value->SetString("url", page->browser->GetMainFrame()->GetURL());
-  value->SetString("title",page->title);
   value->SetBool("chromeStyle",page->browser->GetHost()->GetRuntimeStyle()==CEF_RUNTIME_STYLE_CHROME);
   value->SetBool("navigationChrome",Group(page)->view.navigationChrome);
+  value->SetBool("pristine",!page->navigated && page->failed_url.empty());
+  page->published_zoom_level=page->browser->GetHost()->GetZoomLevel(); page->zoom_published=true;
+  if (page->navigated) {
+    value->SetString("url", page->browser->GetMainFrame()->GetURL());
+    value->SetString("title",page->title);
+  }
   value->SetBool("loading", page->browser->IsLoading());
   value->SetBool("canGoBack", page->browser->CanGoBack());
   value->SetBool("canGoForward", page->browser->CanGoForward());
-  page->published_zoom_level=page->browser->GetHost()->GetZoomLevel(); page->zoom_published=true;
   value->SetDouble("zoom",std::pow(1.2,page->published_zoom_level));
+  // A pristine active page may acquire an inactive extension-created sibling.
+  // Publish that inventory without turning the untouched blank page into a URL.
   auto inner=CefListValue::Create();
   auto group=Group(page);
   for (Page* member : Members(group)) {
@@ -439,12 +457,7 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     owner->view.navigationChrome=YES;
     NSView* handle=(NSView*)browser->GetHost()->GetWindowHandle();
     if (page_==owner) owner->view.browserWindow=[handle window];
-    if (!owner->view.auxiliary) {
-      owner->view.browserWindow.hasShadow=NO;
-      owner->view.browserWindow.excludedFromWindowsMenu=YES;
-      owner->view.browserWindow.collectionBehavior=NSWindowCollectionBehaviorFullScreenAuxiliary;
-      [owner->view synchronizeBrowserWindow];
-    }
+    [owner->view synchronizeBrowserWindow];
     if (!owner->active) owner->active=page_;
     auto capabilities = CefDictionaryValue::Create();
     capabilities->SetBool("chromeStyle",owner->view.chromeStyle);
@@ -751,6 +764,7 @@ void SetActive(Page* page) {
   owner->active=page;
   auto value=CefDictionaryValue::Create();
   value->SetBool("activeContentChanged",true);
+  value->SetBool("pristine",!page->navigated && page->failed_url.empty());
   if (page->browser && page->navigated)
     value->SetString("committedURL",page->browser->GetMainFrame()->GetURL());
   Emit(page,RADIUS_CEF_STATE,value);
@@ -932,7 +946,7 @@ void ReconcileWindows() {
     }
     if (!old_owner->view.browserWindow && member==old_owner) {
       old_owner->view.browserWindow=window;
-      if (!old_owner->view.auxiliary) { window.hasShadow=NO; window.excludedFromWindowsMenu=YES; window.collectionBehavior=NSWindowCollectionBehaviorFullScreenAuxiliary; }
+      [old_owner->view synchronizeBrowserWindow];
     }
     if (old_owner->view.browserWindow==window) {
       if (member->awaiting_window) {
@@ -1009,9 +1023,6 @@ void CreateReadyPage(Page* page) {
   if (browser) {
     NSView* handle=(NSView*)browser->GetHost()->GetWindowHandle();
     page->view.browserWindow=[handle window];
-    page->view.browserWindow.hasShadow=NO;
-    page->view.browserWindow.excludedFromWindowsMenu=YES;
-    page->view.browserWindow.collectionBehavior=NSWindowCollectionBehaviorFullScreenAuxiliary;
     [page->view synchronizeBrowserWindow];
   }
   if (!browser) {

@@ -100,7 +100,7 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("System WebKit").font(.headline)
                         Text("Available with macOS · No additional download").font(.caption).foregroundStyle(.secondary)
-                        Text("Safari's platform web engine. Security updates arrive through macOS updates. Chrome extensions are not supported by this Radius build.").font(.callout).foregroundStyle(.secondary)
+                        Text("Safari's platform web engine. Security updates arrive through macOS updates. Chrome extensions are not supported by WebKit.").font(.callout).foregroundStyle(.secondary)
                     }
                 }.padding(8)
             }

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 import Foundation
+import AppKit
+import Darwin
 import Testing
 import RadiusCore
 @testable import RadiusApp
@@ -8,6 +10,73 @@ extension NativeIntegrationTests {
 @Suite(.serialized)
 @MainActor
 struct ResourceModuleTests {
+
+    @Test func realWorkerReapingRejectsNestedApprovedUpdatesAndPreservesUnrelatedLayoutEdits() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("radius-worker-reentry-" + UUID().uuidString)
+        let previous = AppDelegate.state
+        let app = AppState(directory: directory), worker = ResourceWorker()
+        defer { worker.stop(); app.ready = false; AppDelegate.state = previous; try? FileManager.default.removeItem(at: directory) }
+        await app.load()
+        try #require(app.ready, Comment(rawValue: app.startupError ?? "Native worker fixture did not load"))
+        let repository = try #require(app.repository)
+        var widget = ModuleManifest(id: "org.test.reentry-widget", name: "Reentry widget", summary: "Reviewed update", capability: .startWidget, runtime: .declarative)
+        let originalBytes = Data(#"{"formatVersion":1,"widgetTitle":"Original","widgetBody":"Before the reviewed update"}"#.utf8)
+        let updatedBytes = Data(#"{"formatVersion":1,"widgetTitle":"Updated","widgetBody":"After the reviewed update"}"#.utf8)
+        try repository.install(widget, payload: originalBytes)
+        app.installedModules = try repository.installed()
+        widget.version = 2; app.catalog.append(widget); app.modulePayloads[widget.id] = updatedBytes
+        let package = try app.resourceWorkerPackage()
+        let trustedBytes = try Data(contentsOf: package.url)
+
+        for rollback in [false, true] {
+            let requirements = try app.validateModuleRequirements(for: [widget.id])
+            let approval = try app.captureModuleApproval(requirements, rootIDs: [widget.id])
+            let inventory = try repository.installed()
+            try worker.start(executable: package.url, moduleID: package.id)
+            try await waitForFrame(worker)
+            let process = try #require(worker.process)
+            // Pause only this owned real worker. Its existing bounded SIGKILL
+            // deadline makes the native wait service the run loop for 250 ms.
+            try #require(kill(process.processIdentifier, SIGSTOP) == 0)
+            var edited = app.library.preferences.configuration
+            edited.layout.navigation = rollback ? .top : .bottom
+            let probe = WorkerReentryProbe(app: app, id: widget.id, approval: approval, configuration: edited)
+            let timer = Timer(timeInterval: 0.02, repeats: false) { _ in
+                MainActor.assumeIsolated { probe.attemptUpdate() }
+            }
+            RunLoop.main.add(timer, forMode: .default)
+            defer { timer.invalidate() }
+
+            if rollback {
+                #expect(throws: (any Error).self) {
+                    try app.withAtomicModuleChanges(for: [package.id]) {
+                        try app.reinstallApprovedWorker(package.id)
+                        throw ValidationError("Reject this fixture transaction after its real repair.")
+                    }
+                }
+            } else { try app.reinstallApprovedWorker(package.id) }
+            timer.invalidate()
+            #expect(probe.fired && probe.duringWorkerStop)
+            #expect(probe.rejection != nil)
+            #expect(probe.launchRejection != nil && !probe.launchPackageReturned && probe.newWorker.process == nil)
+            #expect(probe.terminationReply == .terminateCancel)
+            #expect(!app.terminating && !app.finalQuitDataFrozen && app.ready)
+            #expect(!process.isRunning)
+            #expect(try repository.installed() == inventory)
+            #expect(try repository.dataPayload(for: widget.id, runtime: .declarative) == originalBytes)
+            #expect(try Data(contentsOf: package.url) == trustedBytes)
+            #expect(app.library.preferences.configuration == edited)
+        }
+
+        // The same reviewed update remains usable after the wait has finished.
+        let requirements = try app.validateModuleRequirements(for: [widget.id])
+        let approval = try app.captureModuleApproval(requirements, rootIDs: [widget.id])
+        try app.installApprovedModule(widget.id, approval: approval)
+        #expect(try repository.dataPayload(for: widget.id, runtime: .declarative) == updatedBytes)
+        #expect(app.startWidgets.contains { $0.widgetTitle == "Updated" })
+        #expect(await app.flush())
+    }
+
     @Test func nativeWorkerReplacementDisableAndUninstallStopExecutionAndKeepData() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("radius-resource-native-" + UUID().uuidString)
         let app = AppState(directory: directory)
@@ -144,4 +213,36 @@ struct ResourceModuleTests {
     }
 }
 
+}
+
+@MainActor
+private final class WorkerReentryProbe {
+    let app: AppState
+    let id: String
+    let approval: ModuleApprovalSnapshot
+    let configuration: Configuration
+    var fired = false
+    var duringWorkerStop = false
+    var rejection: String?
+    let newWorker = ResourceWorker()
+    var launchRejection: String?
+    var launchPackageReturned = false
+    var terminationReply: NSApplication.TerminateReply?
+    init(app: AppState, id: String, approval: ModuleApprovalSnapshot, configuration: Configuration) {
+        self.app = app; self.id = id; self.approval = approval; self.configuration = configuration
+    }
+    func attemptUpdate() {
+        fired = true; duringWorkerStop = app.stoppingModuleWorkers
+        do { try app.installApprovedModule(id, approval: approval) }
+        catch { rejection = error.localizedDescription }
+        do {
+            let package = try app.resourceWorkerPackage()
+            launchPackageReturned = true
+            try newWorker.start(executable: package.url, moduleID: package.id)
+        } catch { launchRejection = error.localizedDescription }
+        terminationReply = AppDelegate().applicationShouldTerminate(NSApplication.shared)
+        newWorker.stop()
+        // A separate editor's interface change remains valid during reaping.
+        app.applyConfiguration(configuration)
+    }
 }

@@ -68,7 +68,9 @@ struct BrowserWindow: View {
     private var navigationTheme: Theme { theme.component(theme.navigationAppearance) }
     private var sidebarTheme: Theme { theme.component(theme.sidebarAppearance) }
     private var treeTabs: Bool { layout.treeTabs == true && (app.previewConfiguration != nil || app.declarativeDefinition(.tabSystem)?.treeTabs == true) }
-    private var usesChromeNavigation: Bool { navigationEpoch >= 0 && model.hasPage && model.activeWebTab.hasNativeNavigationChrome }
+    private var usesChromeNavigation: Bool {
+        navigationEpoch >= 0 && (model.hasPage || (model.selectedTab.chromiumPages?.count ?? 0) > 1) && model.activeWebTab.hasNativeNavigationChrome
+    }
     private func hidden(_ component: String) -> Bool { model.focusMode && model.focusHiddenComponents.contains(component) }
     private var showTabs: Bool { !hidden("tabs") && layout.hideTabStrip != true }
     private var hasChromePanes: Bool { model.session.tabs.contains { $0.engineID == .chromium } }
@@ -449,7 +451,7 @@ struct BrowserWindow: View {
             if model.hasPage { ZoomControls(tab: model.activeWebTab) }
         }.font(.caption).foregroundStyle(.secondary).padding(.horizontal, 14).padding(.vertical, 6).background(.bar)
     }
-    private func focusAddress() { addressFocused = !model.hasPage || !model.activeWebTab.focusAddressBar() }
+    private func focusAddress() { addressFocused = !model.activeWebTab.focusAddressBar() }
     private func secondarySidebar(_ panel: BrowserPanel) -> some View {
         SidebarView(model: model, panel: panel, onClose: model.closeSecondarySidebar).frame(width: min(layout.sidebarWidth, max(180, windowWidth * 0.24))).modifier(ChromeSurface(theme: sidebarTheme))
             .background(BrowserLayoutRegion(identifier: "radius.secondarySidebar"))
@@ -587,33 +589,37 @@ struct BrowserTabContent<Placeholder: View>: View {
     var onUseWebKit: () -> Void
     @ViewBuilder var placeholder: () -> Placeholder
     var body: some View {
-        if hasPage || tab.errorMessage != nil { BrowserPage(tab: tab, onUseWebKit: onUseWebKit) }
+        if hasPage || (tab.chromiumSessionPages?.count ?? 0) > 1 || tab.errorMessage != nil { BrowserPage(tab: tab, onUseWebKit: onUseWebKit) }
         else { placeholder() }
     }
 }
 struct BrowserPage: View {
     @ObservedObject var tab: BrowserEngineTab
     var onUseWebKit: (() -> Void)?
+    private var showPage: Bool { tab.errorMessage == nil || tab is ChromiumTab }
     var body: some View {
         VStack(spacing: 0) {
             if tab.loading { ProgressView(value: tab.progress).progressViewStyle(.linear).frame(height: 2) }
-            if tab.hasNativeNavigationChrome {
-                if let error = tab.errorMessage {
+            if let error = tab.errorMessage {
+                if tab is ChromiumTab {
                     HStack(spacing: 12) {
                         Text(error).font(.callout).lineLimit(3).help(error).frame(maxWidth: .infinity, alignment: .leading)
                         Button("Reload page") { tab.reload() }.buttonStyle(.bordered)
                         if let onUseWebKit { Button("Reopen in WebKit") { onUseWebKit() }.buttonStyle(.bordered) }
                     }.padding(.horizontal, 16).padding(.vertical, 10)
+                } else {
+                    VStack(spacing: 16) {
+                        EmptyPanel(title: "This page needs attention", icon: "exclamationmark.circle", detail: error)
+                        Button("Reload page") { tab.reload() }.buttonStyle(.borderedProminent).padding(.bottom, 32)
+                        if tab.engineID == .chromium, let onUseWebKit { Button("Reopen in WebKit") { onUseWebKit() }.padding(.bottom, 24) }
+                    }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                // Keep Chrome's tab strip and sibling pages accessible on error.
-                WebViewHost(tab: tab)
-            } else if let error = tab.errorMessage {
-                VStack(spacing: 16) {
-                    EmptyPanel(title: "This page needs attention", icon: "exclamationmark.circle", detail: error)
-                    Button("Reload page") { tab.reload() }.buttonStyle(.borderedProminent).padding(.bottom, 32)
-                    if tab.engineID == .chromium, let onUseWebKit { Button("Reopen in WebKit") { onUseWebKit() }.padding(.bottom, 24) }
-                }
-            } else { WebViewHost(tab: tab) }
+            }
+            // Mounting Chrome changes its navigation capability. Keep the
+            // representable's identity stable across that callback and errors.
+            WebViewHost(tab: tab)
+                .frame(maxWidth: .infinity, maxHeight: showPage ? .infinity : 0)
+                .opacity(showPage ? 1 : 0).allowsHitTesting(showPage).accessibilityHidden(!showPage).clipped()
         }
     }
 }

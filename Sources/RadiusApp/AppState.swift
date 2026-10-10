@@ -33,6 +33,8 @@ final class AppState: ObservableObject {
     @Published var communityCatalogNames: [String] = []
     var bundledModuleIDs = Set<String>()
     var suspendingModuleContributions = false
+    var stoppingModuleWorkers = false
+    var moduleConfigurationBeforeMutation: Configuration?
     var modulePayloads: [String: Data] = [:]
     private var readerRequests: [UUID: (moduleID: String, task: Task<String, any Error>)] = [:]
     private var startupTask: Task<Void, Never>?
@@ -162,6 +164,7 @@ final class AppState: ObservableObject {
         return try validatedWorkerPackage(id: module.id)
     }
     func validatedWorkerPackage(id: String, requireEnabled: Bool = true) throws -> (id: String, url: URL) {
+        try requireModuleMutationAllowed()
         guard let module = installedModules.first(where: { $0.id == id }), module.manifest.runtime?.isNative == true,
               let repository, let trusted = modulePayloads[id],
               catalog.contains(module.manifest) else { throw ValidationError("This worker is not a trusted package from this Radius build. Update it in Modules.") }
@@ -358,8 +361,7 @@ final class AppState: ObservableObject {
         guard let repository, let module = installedModules.first(where: { $0.id == id }) else { throw ValidationError("This module is not installed.") }
         if enabled { try validateModulePayload(module, requireEnabled: false) }
         defer { resourceWorkerGeneration = UUID() }
-        ResourceWorker.stopAll(moduleID: id); cancelReaderRequests(moduleID: id)
-        try requireModuleMutationAllowed()
+        try stopWorkersForModuleMutation(moduleID: id)
         try repository.setEnabled(id, enabled); installedModules = try repository.installed()
     }
     func replaceResourceProvider(with id: String) throws {
@@ -368,8 +370,7 @@ final class AppState: ObservableObject {
         guard installedModules.contains(where: { $0.id == id && $0.manifest.runtime == .nativeResourceWorker }) else { throw ValidationError("Choose an installed resource provider.") }
         _ = try validatedWorkerPackage(id: id, requireEnabled: false)
         defer { resourceWorkerGeneration = UUID() }
-        ResourceWorker.stopAll()
-        try requireModuleMutationAllowed()
+        try stopWorkersForModuleMutation(stoppingReader: false)
         try repository.replaceResourceProvider(with: id)
         installedModules = try repository.installed()
     }
@@ -377,9 +378,7 @@ final class AppState: ObservableObject {
         try requireModuleMutationAllowed()
         guard let repository else { throw ValidationError("Repair module storage first.") }
         defer { resourceWorkerGeneration = UUID() }
-        ResourceWorker.stopAll(moduleID: id)
-        cancelReaderRequests(moduleID: id)
-        try requireModuleMutationAllowed()
+        try stopWorkersForModuleMutation(moduleID: id)
         try repository.uninstall(id)
         installedModules = try repository.installed()
     }
@@ -464,6 +463,9 @@ final class AppState: ObservableObject {
     }
     func applyConfiguration(_ configuration: Configuration) {
         var checked = configuration; checked.normalize()
+        if suspendingModuleContributions && !stoppingModuleWorkers && moduleConfigurationBeforeMutation == nil {
+            moduleConfigurationBeforeMutation = library.preferences.configuration
+        }
         let splitChanged = checked.layout.split != library.preferences.configuration.layout.split
         library.preferences.configuration = checked; previewConfiguration = nil
         windows.values.compactMap(\.model).forEach { $0.synchronizeSplit(force: splitChanged) }
@@ -472,9 +474,7 @@ final class AppState: ObservableObject {
         perform {
             try requireModuleMutationAllowed()
             defer { resourceWorkerGeneration = UUID() }
-            ResourceWorker.stopAll()
-            cancelReaderRequests()
-            try requireModuleMutationAllowed()
+            try stopWorkersForModuleMutation()
             let old = dataDirectory.appendingPathComponent("Modules", isDirectory: true)
             if FileManager.default.fileExists(atPath: old.path) {
                 try FileManager.default.moveItem(at: old, to: dataDirectory.appendingPathComponent("Modules-backup-" + UUID().uuidString))
@@ -590,6 +590,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             smokeTrace("No application state; returning terminateNow")
             return .terminateNow
         }
+        guard !state.stoppingModuleWorkers, !state.suspendingModuleContributions else {
+            state.notice = "Wait for the current module operation to finish before quitting."
+            DistributionManager.shared.cancelledQuit()
+            return .terminateCancel
+        }
         guard state.deletingProfileIDs.isEmpty, !state.savingWebsiteDataClearRequest else {
             state.notice = "Wait for the current privacy operation to finish before quitting."
             DistributionManager.shared.cancelledQuit()
@@ -608,6 +613,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         // Modal download confirmation can run already queued privacy work.
+        guard !state.stoppingModuleWorkers, !state.suspendingModuleContributions else {
+            state.notice = "Wait for the current module operation to finish before quitting."
+            DistributionManager.shared.cancelledQuit()
+            return .terminateCancel
+        }
         guard state.deletingProfileIDs.isEmpty, !state.savingWebsiteDataClearRequest else {
             state.notice = "Wait for the current privacy operation to finish before quitting."
             DistributionManager.shared.cancelledQuit()
@@ -627,6 +637,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // A download or offline copy may still own a staging directory.
             // Finish its cancellation cleanup before saving or arming an update.
             await DistributionManager.shared.cancelAndWaitForOperation()
+            guard !state.stoppingModuleWorkers, !state.suspendingModuleContributions else {
+                state.notice = "Wait for the current module operation to finish before quitting."
+                state.terminating = false; downloads.resume()
+                DistributionManager.shared.cancelledQuit()
+                sender.reply(toApplicationShouldTerminate: false); return
+            }
             self.smokeTrace("Flushing application data before termination")
             let saved = await state.flush()
             self.smokeTrace("Termination flush completed: \(saved)")
@@ -647,6 +663,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // A refused quit must keep live Chromium pages and choices.
                 state.saveWithoutChromiumOnQuit = true
                 quit = await state.flush()
+            }
+            if quit && (state.stoppingModuleWorkers || state.suspendingModuleContributions) {
+                quit = false
+                state.notice = "Wait for the current module operation to finish before quitting."
             }
             if quit {
                 state.freezeQuitData()
@@ -685,6 +705,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .terminateLater
     }
     private func offerQuitWithoutSaving(_ state: AppState) -> Bool {
+        guard !state.stoppingModuleWorkers, !state.suspendingModuleContributions else {
+            state.notice = "Wait for the current module operation to finish before quitting."
+            return false
+        }
         let alert = NSAlert(); alert.messageText = "Your latest changes could not be saved."
         alert.informativeText = state.notice ?? "Retry saving from Recovery."
         alert.addButton(withTitle: "Keep Radius open"); alert.addButton(withTitle: "Quit without saving")
