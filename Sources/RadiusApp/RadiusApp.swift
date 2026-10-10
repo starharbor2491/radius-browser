@@ -27,23 +27,15 @@ struct BrowserCommands: Commands {
         if nativeTab != nil { return nil }
         return focusedBrowser
     }
-    private var canHandleTabCommands: Bool { nativeTab != nil || browser != nil }
     private var bookmarkTitle: String {
         browser?.bookmarks.contains(where: { $0.url == browser?.selectedTab.url }) == true
             ? "Remove Radius bookmark" : "Save in Radius bookmarks"
-    }
-    private func performTabCommand(_ command: NativeTabCommand) {
-        guard !app.finalQuitDataFrozen else { return }
-        if let nativeTab { _ = nativeTab.performNativeTabCommand(command); return }
-        browser?.performTabCommand(command)
     }
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
             Group {
                 Button("New window") { openWindow(id: "browser") }.keyboardShortcut("n")
                 Button("New private window") { openWindow(id: "private") }.keyboardShortcut("n", modifiers: [.command, .shift])
-                Button("New tab") { performTabCommand(.new) }.keyboardShortcut("t").disabled(!canHandleTabCommands)
-                Button("Reopen closed tab") { performTabCommand(.reopen) }.keyboardShortcut("t", modifiers: [.command, .shift]).disabled(!canHandleTabCommands || (nativeTab == nil && browser?.hasNativeTabs != true && browser?.closedTabs.isEmpty != false))
                 if browser?.hasNativeTabs == true {
                     Button("New browsing pane") { browser?.newTab(engine: .chromium) }
                     Button("Reopen closed browsing pane") { browser?.reopenClosedTab() }.disabled(browser?.closedTabs.isEmpty != false)
@@ -66,7 +58,6 @@ struct BrowserCommands: Commands {
         }
         CommandGroup(after: .newItem) {
             Group {
-                Button("Close tab") { performTabCommand(.close) }.keyboardShortcut("w").disabled(!canHandleTabCommands)
                 if browser?.hasNativeTabs == true {
                     Button("Close browsing pane") { if let browser { browser.closeTab(browser.session.selectedTabID) } }
                 }
@@ -83,8 +74,6 @@ struct BrowserCommands: Commands {
                 Button("Reload page") { browser?.activeWebTab.reload() }.keyboardShortcut("r").disabled(browser?.hasPage != true)
                 Button("Find in page…") { NotificationCenter.default.post(name: .radiusFind, object: browser?.session.id) }.keyboardShortcut("f").disabled(browser?.hasPage != true)
                 Divider()
-                Button("Previous tab") { performTabCommand(.previous) }.keyboardShortcut("[", modifiers: [.command, .shift]).disabled(!canHandleTabCommands)
-                Button("Next tab") { performTabCommand(.next) }.keyboardShortcut("]", modifiers: [.command, .shift]).disabled(!canHandleTabCommands)
                 Button("Switch browsing pane") { browser?.selectOtherPane() }
                     .keyboardShortcut("`", modifiers: [.command, .option]).disabled(browser?.session.split == nil)
                 Button(browser?.session.split == nil ? "Split side by side" : "Return to one pane") {

@@ -576,7 +576,12 @@ import UniformTypeIdentifiers
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static weak var state: AppState?
+    private let nativeTabCommands = NativeTabCommands()
+    func applicationDidUpdate(_ notification: Notification) {
+        nativeTabCommands.install(in: NSApp.mainMenu)
+    }
     func applicationDidFinishLaunching(_ notification: Notification) {
+        nativeTabCommands.install(in: NSApp.mainMenu)
         smokeTrace("applicationDidFinishLaunching: setting activation policy")
         NSApp.setActivationPolicy(.regular)
         smokeTrace("applicationDidFinishLaunching: activating application")

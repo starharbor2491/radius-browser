@@ -298,7 +298,9 @@ enum ChromiumAcceptance {
     private static func verifyNavigationRetry(browser: BrowserModel, tab: ChromiumTab, fixtureURL: URL) async throws {
         browser.showStartPage()
         try await waitForStartPage(tab)
-        let target = fixtureURL.deletingLastPathComponent().appendingPathComponent("navigation-retry")
+        var targetComponents = URLComponents(url: fixtureURL, resolvingAgainstBaseURL: false)
+        targetComponents?.path = "/navigation-retry"
+        guard let target = targetComponents?.url else { throw ValidationError("The navigation recovery fixture URL is invalid.") }
         // Bypass the adapter's load method, as an extension can. The fixture
         // closes the connection without a response until recovery is enabled.
         _ = try await tab.request("Page.navigate", parameters: ["url": target.absoluteString])
@@ -417,9 +419,11 @@ enum ChromiumAcceptance {
             throw ValidationError("Chromium session recovery discarded an inactive tab or selected the wrong WebContents.")
         }
         guard let address = ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_URL"],
-              let source = URL(string: address)?.deletingLastPathComponent().appendingPathComponent("slow-download") else {
+              var sourceComponents = URLComponents(string: address) else {
             throw ValidationError("The isolated slow download fixture is unavailable.")
         }
+        sourceComponents.path = "/slow-download"
+        guard let source = sourceComponents.url else { throw ValidationError("The isolated slow download fixture URL is invalid.") }
         let sourceJSON = String(decoding: try JSONSerialization.data(withJSONObject: source.absoluteString, options: [.fragmentsAllowed]), as: UTF8.self)
         _ = try await evaluate(restored, "(function(){ const a=document.createElement('a'); a.href=\(sourceJSON); a.download='radius-download-fixture.bin'; document.body.append(a); a.click(); return 'started'; })()")
         let transferDeadline = ContinuousClock.now.advanced(by: .seconds(8))
@@ -894,7 +898,16 @@ enum ChromiumAcceptance {
         }
         manifest["version"] = "1.0.1"
         try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys]).write(to: manifestURL, options: .atomic)
-        _ = try await evaluate(manager, "String(await chrome.developerPrivate.reload('\(id)',{failQuietly:true}))")
+        // For unpacked extensions, this option waits for the real reload's
+        // OnExtensionLoaded callback; failQuietly alone returns immediately.
+        let reloadError = try await evaluate(manager, "JSON.stringify((await chrome.developerPrivate.reload('\(id)',{failQuietly:true,populateErrorForUnpacked:true})) ?? null)")
+        guard reloadError == "null" else { throw ValidationError("The fixture update failed: \(reloadError)") }
+        let updated = try await evaluate(manager, "JSON.stringify((await chrome.developerPrivate.getExtensionsInfo({includeDisabled:true,includeTerminated:true})).filter(e => e.id === '\(id)').map(e => ({state:e.state,version:e.version})))")
+        guard let updatedData = updated.data(using: .utf8),
+              let updatedInfo = try JSONSerialization.jsonObject(with: updatedData) as? [[String: String]],
+              updatedInfo.count == 1, updatedInfo[0]["state"] == "ENABLED", updatedInfo[0]["version"] == "1.0.1" else {
+            throw ValidationError("The extension manager did not finish loading fixture version 1.0.1: \(updated)")
+        }
         page.reload()
         _ = try await waitForFixture(page, key: "radiusFixtureVersion", value: "1.0.1")
         _ = try await waitForFixture(page, key: "radiusFixtureTheme", value: "dark")
@@ -1077,13 +1090,14 @@ enum ChromiumAcceptance {
     }
     private static func waitForFixture(_ tab: ChromiumTab, key: String, value: String) async throws -> [String: String] {
         let deadline = ContinuousClock.now.advanced(by: .seconds(15))
+        var state: [String: String] = [:]
         while ContinuousClock.now < deadline {
             if let error = tab.errorMessage { throw ValidationError(error) }
-            let state = try await fixtureState(tab)
+            state = try await fixtureState(tab)
             if state[key] == value { return state }
             try await Task.sleep(for: .milliseconds(100))
         }
-        throw ValidationError("Extension API fixture did not reach \(key)=\(value).")
+        throw ValidationError("Extension API fixture did not reach \(key)=\(value) (state=\(state), loading=\(tab.loading), url=\(tab.url?.absoluteString ?? "nil")).")
     }
     private static func click(_ tab: ChromiumTab, selector: String) async throws {
         try await focusPage(tab)
