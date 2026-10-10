@@ -411,7 +411,7 @@ enum ChromiumAcceptance {
         restored.restoreChromiumSessionPages(pages)
         let deadline = ContinuousClock.now.advanced(by: .seconds(30))
         while restored.chromiumSessionPages?.count != pages.count || restored.url != pages.first?.url || restored.loading {
-            guard ContinuousClock.now < deadline else { throw ValidationError("A saved Chromium pane did not restore all inner tabs and its selected page.") }
+            guard ContinuousClock.now < deadline else { throw ValidationError("A saved Chromium pane did not restore all inner tabs and its selected page (expected=\(pages.map { $0.url?.absoluteString ?? "Start" }), actual=\(restored.chromiumSessionPages?.map { $0.url?.absoluteString ?? "Start" } ?? []), selected=\(restored.url?.absoluteString ?? "nil"), loading=\(restored.loading), ready=\(restored.isReadyForEngineSwitch), error=\(restored.errorMessage ?? "nil")).") }
             try await Task.sleep(for: .milliseconds(100))
         }
         guard Set(restored.chromiumSessionPages?.compactMap(\.url) ?? []) == Set(pages.compactMap(\.url)),
@@ -1109,10 +1109,12 @@ enum ChromiumAcceptance {
         _ = try await tab.request("Input.dispatchMouseEvent", parameters: ["type":"mouseReleased", "x":x, "y":y, "button":"left", "clickCount":1])
     }
     private static func focusPage(_ tab: ChromiumTab) async throws {
-        tab.chromeWindow?.makeKeyAndOrderFront(nil)
-        tab.focus()
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
         while ContinuousClock.now < deadline {
+            NSApp.activate(ignoringOtherApps: true)
+            tab.nativeView.window?.makeKeyAndOrderFront(nil)
+            tab.chromeWindow?.makeKeyAndOrderFront(nil)
+            tab.focus()
             if tab.chromeWindow?.isKeyWindow == true {
                 if tab.isAuxiliary { return }
                 let data = try await tab.request("Radius.chromeHostState", parameters: [:])
@@ -1120,7 +1122,7 @@ enum ChromiumAcceptance {
             }
             try await Task.sleep(for: .milliseconds(100))
         }
-        throw ValidationError("The native Chromium acceptance window did not become key and active before input.")
+        throw ValidationError("The native Chromium acceptance window did not become key and active before input (appActive=\(NSApp.isActive), child=\(tab.chromeWindow?.windowNumber ?? -1), childVisible=\(tab.chromeWindow?.isVisible == true), childKey=\(tab.chromeWindow?.isKeyWindow == true), actualKey=\(NSApp.keyWindow?.windowNumber ?? -1), parent=\(tab.nativeView.window?.windowNumber ?? -1), modal=\(NSApp.modalWindow?.windowNumber ?? -1)).")
     }
     private static func waitForLoad(_ tab: ChromiumTab, host: String) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(25))

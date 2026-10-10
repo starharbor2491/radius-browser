@@ -841,6 +841,7 @@ void RestoreInnerPages(Page* owner) {
     error->SetString("message","Chromium could not restore every saved tab. Reopen this pane to retry; its saved tabs have been retained.");
     EmitOwned(owner,RADIUS_CEF_ERROR,error); return;
   }
+  if (!RefreshActive(owner)) return;
   auto member=Active(owner);
   if (!member || !member->browser) return;
   if (!owner->restore_selection) {
@@ -858,9 +859,16 @@ void RestoreInnerPages(Page* owner) {
     member->browser->GetHost()->ExecuteChromeCommand(command,CEF_WOD_CURRENT_TAB);
     return;
   }
-  owner->restore_selection->GetHost()->SetFocus(true);
+  // Focusing an inactive WebContents does not select its native Chrome tab.
+  // Use Chrome's real tab command and finish only after its public active
+  // browser query confirms the saved selection. Do not steal window focus.
+  if (!member->browser->IsSame(owner->restore_selection)) {
+    const int command=cef_id_for_command_id_name("IDC_SELECT_PREVIOUS_TAB");
+    if (member->browser->GetHost()->CanExecuteChromeCommand(command))
+      member->browser->GetHost()->ExecuteChromeCommand(command,CEF_WOD_CURRENT_TAB);
+    return;
+  }
   owner->restore_selection=nullptr; owner->restoring=false;
-  RefreshActive(owner);
   if (auto active=Active(owner)) State(active);
 }
 void SynchronizeViews() {

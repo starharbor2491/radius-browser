@@ -8,6 +8,7 @@ extension NativeIntegrationTests.BrowserIntegrationTests {
         _ = NSApplication.shared
         let previousPolicy = NSApp.activationPolicy()
         NSApp.setActivationPolicy(.regular)
+        NSApp.finishLaunching()
         NSApp.activate(ignoringOtherApps: true)
         let previousState = AppDelegate.state
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("radius-menu-test-" + UUID().uuidString)
@@ -138,6 +139,14 @@ extension NativeIntegrationTests.BrowserIntegrationTests {
         window.makeKeyAndOrderFront(nil)
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
         while NSApp.keyWindow !== window, ContinuousClock.now < deadline {
+            // swift test has no NSApplication.run() event loop. Dispatch real
+            // AppKit events so activation and window focus can finish.
+            for _ in 0..<16 {
+                guard let event = NSApp.nextEvent(matching: .any, until: Date(),
+                                                  inMode: .default, dequeue: true) else { break }
+                NSApp.sendEvent(event)
+            }
+            NSApp.updateWindows()
             try await Task.sleep(for: .milliseconds(20))
         }
         try #require(NSApp.keyWindow === window)
