@@ -93,7 +93,9 @@ extension AppState {
         perform {
             guard let repository else { throw ValidationError("Repair module storage first.") }
             try repository.setSetting(schema.id, value: value, for: moduleID)
-            installedModules = try repository.installed()
+            // Preferences are separate data, so publishing an edit must not
+            // invalidate running workers or unrelated in-flight page actions.
+            objectWillChange.send()
         }
     }
     func validateModulePayload(_ module: InstalledModule, requireEnabled: Bool) throws {
@@ -227,27 +229,34 @@ extension AppState {
         guard let repository else { return }
         let communities = try repository.communityCatalogs()
         var manifests = catalog.filter { bundledModuleIDs.contains($0.id) }
+        var payloads = modulePayloads.filter { bundledModuleIDs.contains($0.key) }
         var seen = bundledModuleIDs
         for community in communities {
             for package in community.packages {
                 guard seen.insert(package.manifest.id).inserted else { throw ValidationError("A community catalog conflicts with another installed catalog.") }
-                manifests.append(package.manifest); modulePayloads[package.manifest.id] = try package.payload()
+                manifests.append(package.manifest); payloads[package.manifest.id] = try package.payload()
             }
         }
         communityCatalogNames = communities.map(\.name).sorted()
+        modulePayloads = payloads
         catalog = manifests.sorted { $0.name < $1.name }
     }
     func importCatalog() {
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.json]; panel.canChooseDirectories = false
         panel.message = "Choose a community catalog containing bounded declarative or behavior packages. Adding a catalog does not install its modules."
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        perform { try addCatalog(DeclarativeModuleCatalog.decode(readModuleFile(url, limit: 2 * 1024 * 1024))) }
+        perform {
+            guard let repository else { throw ValidationError("Repair module storage first.") }
+            let catalog = try DeclarativeModuleCatalog.decode(readModuleFile(url, limit: 2 * 1024 * 1024))
+            let replacing = try repository.communityCatalogs().contains { $0.name == catalog.name }
+            try addCatalog(catalog, replaceExisting: replacing)
+        }
     }
     func addCatalog(_ catalog: DeclarativeModuleCatalog, replaceExisting: Bool = false) throws {
         guard let repository else { throw ValidationError("Repair module storage first.") }
         let alert = NSAlert(); alert.messageText = replaceExisting ? "Refresh \(catalog.name)?" : "Add \(catalog.name)?"
         alert.informativeText = "\(catalog.packages.count) data packages will appear in Discover. Publishers are self-reported. No modules will be installed or granted permissions until you approve their installation."
-        alert.addButton(withTitle: "Add catalog"); alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: replaceExisting ? "Refresh catalog" : "Add catalog"); alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         try repository.addCommunityCatalog(catalog, reservedIDs: bundledModuleIDs, replaceExisting: replaceExisting); try loadCommunityCatalogs()
     }

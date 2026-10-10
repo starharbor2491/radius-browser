@@ -21,7 +21,7 @@ struct DistributionSettingsView: View {
                 HStack {
                     Button("Check for updates") { distribution.checkForUpdates(dataDirectory: dataDirectory) }
                     Button("Import offline installer…") { distribution.importInstaller(dataDirectory: dataDirectory) }
-                }.disabled(distribution.busy || distribution.pending != nil || !distribution.publisherAvailable)
+                }.disabled(distribution.busy || distribution.pending != nil || distribution.pendingRecordInvalid || !distribution.publisherAvailable)
                 ForEach(Array(distribution.available.enumerated()), id: \.offset) { _, asset in
                     HStack(alignment: .center) {
                         VStack(alignment: .leading, spacing: 3) {
@@ -32,27 +32,27 @@ struct DistributionSettingsView: View {
                         Spacer()
                         Button(asset.release.chromium ? "Install Chromium…" : "Use WebKit only…") {
                             confirmInstall(asset)
-                        }.disabled(distribution.busy || distribution.pending != nil)
+                        }.disabled(distribution.busy || distribution.pending != nil || distribution.pendingRecordInvalid)
                     }
                 }
                 if distribution.busy {
                     HStack {
                         if let progress = distribution.progress { ProgressView(value: progress).frame(maxWidth: 240) }
                         else { ProgressView().controlSize(.small) }
-                        Button("Cancel") { distribution.cancel() }
+                        if distribution.canCancel { Button("Cancel") { distribution.cancel() } }
                     }
                 }
                 if let message = distribution.message {
                     Text(message).font(.caption).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                 }
                 if distribution.pendingRecordInvalid {
-                    Button("Discard invalid installer record") { distribution.discardPending() }
+                    Button("Discard unfinished installer") { distribution.discardPending() }.disabled(distribution.busy)
                 }
                 if distribution.pending != nil {
                     HStack {
                         Button("Restart and install") { distribution.requestRestart() }.buttonStyle(.borderedProminent)
                         Button("Discard installer") { distribution.discardPending() }
-                    }
+                    }.disabled(distribution.busy)
                 }
             }.padding(8)
         }.onAppear { distribution.configure(dataDirectory: dataDirectory) }

@@ -16,9 +16,11 @@ final class DistributionManager: ObservableObject {
     @Published private(set) var message: String?
     @Published private(set) var pending: DistributionRelease?
     private var candidate: URL?
+    private var rejectedStage: URL?
     private var destination: URL?
     private var directory: URL?
     private var operation: Task<Void, Never>?
+    var canCancel: Bool { operation != nil }
     private var installerStarted = false
     private var installerProcess: Process?
     private var installerHelper: URL?
@@ -133,11 +135,33 @@ final class DistributionManager: ObservableObject {
         installerProcess = nil; installerHelper = nil; installerStarted = false
     }
     func discardPending() {
-        guard !busy, !installerStarted else { return }
-        if let candidate { try? FileManager.default.removeItem(at: candidate.deletingLastPathComponent()) }
-        if let directory { try? FileManager.default.removeItem(at: directory.appendingPathComponent("pending-install.json")) }
-        candidate = nil; destination = nil; pending = nil; installOnQuit = false; pendingRecordInvalid = false
-        message = "The staged installer was removed. Your installed application is unchanged."
+        guard !busy, !installerStarted, let directory else { return }
+        let stage = candidate?.deletingLastPathComponent() ?? rejectedStage
+        busy = true; progress = nil; message = "Removing the staged installer…"
+        Task {
+            defer { self.busy = false }
+            do {
+                try await Self.background {
+                    let fm = FileManager.default
+                    if let stage, fm.fileExists(atPath: stage.path) {
+                        let name = stage.lastPathComponent
+                        guard stage.isFileURL, directory.resolvingSymlinksInPath().standardizedFileURL == directory.standardizedFileURL,
+                              stage.deletingLastPathComponent().standardizedFileURL == directory.standardizedFileURL,
+                              name.hasPrefix("stage-"), UUID(uuidString: String(name.dropFirst(6)))?.uuidString == String(name.dropFirst(6)),
+                              (try stage.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])).isDirectory == true,
+                              (try stage.resourceValues(forKeys: [.isSymbolicLinkKey])).isSymbolicLink != true else {
+                            throw ValidationError("The staged installer location changed. Its files were kept.")
+                        }
+                        try fm.removeItem(at: stage)
+                    }
+                    let record = directory.appendingPathComponent("pending-install.json")
+                    if fm.fileExists(atPath: record.path) { try fm.removeItem(at: record) }
+                }
+                self.candidate = nil; self.rejectedStage = nil; self.destination = nil; self.pending = nil
+                self.installOnQuit = false; self.pendingRecordInvalid = false
+                self.message = "The staged installer was removed. Your installed application is unchanged."
+            } catch { self.message = error.localizedDescription }
+        }
     }
     /// Start after data flush/quit approval and before irreversible engine
     /// shutdown. The helper only activates after this PID exits. If quit is
@@ -145,6 +169,7 @@ final class DistributionManager: ObservableObject {
     func launchPendingInstaller() async throws {
         guard let candidate, let destination, let directory, pending != nil, installOnQuit, !installerStarted else { return }
         guard let team = publisher else { throw ValidationError("The Radius publisher identity is unavailable.") }
+        try ReleaseTrust.verifyDestinationIsNotRunning(destination, excludingPID: ProcessInfo.processInfo.processIdentifier)
         let current = try ReleaseTrust.metadata(of: Bundle.main.bundleURL, requireCompatibleArchitecture: false), floor = try securityFloor()
         try await Self.background { try Self.verify(candidate, team: team, current: current, floor: floor) }
         let bundledHelper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/Updater/" + Self.architecture + "/RadiusUpdater")
@@ -184,7 +209,7 @@ final class DistributionManager: ObservableObject {
         }
     }
     private func start(dataDirectory: URL, action: @escaping @MainActor () async throws -> Void) {
-        guard !busy, pending == nil else { return }
+        guard !busy, pending == nil, !pendingRecordInvalid else { return }
         configure(dataDirectory: dataDirectory)
         guard directory != nil else { return }
         generation = UUID(); busy = true; progress = nil; message = nil
@@ -201,61 +226,76 @@ final class DistributionManager: ObservableObject {
         let stage = directory!.appendingPathComponent("stage-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         let imported = stage.appendingPathComponent("Radius.app", isDirectory: true)
-        var committed = false
-        defer { if !committed { try? FileManager.default.removeItem(at: stage) } }
-        message = "Verifying the installer…"
-        let floor = try securityFloor()
-        if installer.pathExtension.lowercased() == "dmg" {
-            let values = try installer.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
-            guard values.isRegularFile == true, values.isSymbolicLink != true,
-                  let bytes = values.fileSize, bytes > 0, bytes <= 4_000_000_000 else {
-                throw ValidationError("Choose a regular Radius disk image smaller than 4 GB.")
-            }
-            let mount = directory!.appendingPathComponent("mount-\(UUID().uuidString)", isDirectory: true)
-            try FileManager.default.createDirectory(at: mount, withIntermediateDirectories: false)
-            do {
-                try await Self.runTool("/usr/bin/hdiutil", ["attach", "-readonly", "-nobrowse", "-mountpoint", mount.path, installer.path], timeout: 120)
-                let source = mount.appendingPathComponent("Radius.app", isDirectory: true)
-                try await Self.background {
-                    try Self.verify(source, team: team, current: current, floor: floor)
-                    try Task.checkCancellation()
-                    try FileManager.default.copyItem(at: source, to: imported)
+        do {
+            message = "Verifying the installer…"
+            let floor = try securityFloor()
+            if installer.pathExtension.lowercased() == "dmg" {
+                let values = try installer.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+                guard values.isRegularFile == true, values.isSymbolicLink != true,
+                      let bytes = values.fileSize, bytes > 0, bytes <= 4_000_000_000 else {
+                    throw ValidationError("Choose a regular Radius disk image smaller than 4 GB.")
                 }
-                try await Self.runTool("/usr/bin/hdiutil", ["detach", mount.path], timeout: 30)
-                try? FileManager.default.removeItem(at: mount)
-            } catch {
-                // Detach even on cancellation. Do not force an in-use volume.
-                _ = try? await Self.runTool("/usr/bin/hdiutil", ["detach", mount.path], timeout: 30, ignoreCancellation: true)
-                try? FileManager.default.removeItem(at: mount)
-                throw error
+                let mount = directory!.appendingPathComponent("mount-\(UUID().uuidString)", isDirectory: true)
+                try FileManager.default.createDirectory(at: mount, withIntermediateDirectories: false)
+                do {
+                    try await Self.runTool("/usr/bin/hdiutil", ["attach", "-readonly", "-nobrowse", "-mountpoint", mount.path, installer.path], timeout: 120)
+                    let source = mount.appendingPathComponent("Radius.app", isDirectory: true)
+                    guard FileManager.default.fileExists(atPath: source.path) else {
+                        throw ValidationError("This mounted image does not contain Radius.app. If the installer is already open in Finder, import Radius.app inside it instead.")
+                    }
+                    try await Self.background {
+                        try Self.verify(source, team: team, current: current, floor: floor)
+                        try Task.checkCancellation()
+                        try FileManager.default.copyItem(at: source, to: imported)
+                    }
+                    try await Self.runTool("/usr/bin/hdiutil", ["detach", mount.path], timeout: 30)
+                    try? FileManager.default.removeItem(at: mount)
+                } catch {
+                    // Detach even on cancellation. Do not force an in-use volume.
+                    _ = try? await Self.runTool("/usr/bin/hdiutil", ["detach", mount.path], timeout: 30, ignoreCancellation: true)
+                    try? FileManager.default.removeItem(at: mount)
+                    throw error
+                }
+            } else {
+                try await Self.background {
+                    try Self.verify(installer, team: team, current: current, floor: floor)
+                    try Task.checkCancellation()
+                    try FileManager.default.copyItem(at: installer, to: imported)
+                }
             }
-        } else {
-            try await Self.background {
-                try Self.verify(installer, team: team, current: current, floor: floor)
-                try Task.checkCancellation()
-                try FileManager.default.copyItem(at: installer, to: imported)
+            try Task.checkCancellation()
+            let release = try await Self.background {
+                try Self.verify(imported, team: team, current: current, floor: floor)
+                return try ReleaseTrust.metadata(of: imported)
             }
-        }
-        try Task.checkCancellation()
-        let release = try await Self.background {
-            try Self.verify(imported, team: team, current: current, floor: floor)
-            return try ReleaseTrust.metadata(of: imported)
-        }
-        if let expected, release != expected { throw ValidationError("The signed installer does not match the advertised release.") }
-        guard let installDestination = chooseDestination() else { throw CancellationError() }
-        if FileManager.default.fileExists(atPath: installDestination.path) {
-            try await Self.background {
-                try ReleaseTrust.verifyBundleTree(installDestination)
-                try ReleaseTrust.verifySignature(installDestination, team: team, identifier: "org.radius.browser", notarized: true)
-                let installed = try ReleaseTrust.metadata(of: installDestination, requireCompatibleArchitecture: false)
-                try release.validate(current: installed, minimumEpoch: floor, architecture: Self.architecture)
+            if let expected, release != expected { throw ValidationError("The signed installer does not match the advertised release.") }
+            guard let installDestination = chooseDestination() else { throw CancellationError() }
+            try ReleaseTrust.verifyDestinationIsNotRunning(installDestination, excludingPID: ProcessInfo.processInfo.processIdentifier)
+            if FileManager.default.fileExists(atPath: installDestination.path) {
+                try await Self.background {
+                    try ReleaseTrust.verifyBundleTree(installDestination)
+                    try ReleaseTrust.verifySignature(installDestination, team: team, identifier: "org.radius.browser", notarized: true)
+                    let installed = try ReleaseTrust.metadata(of: installDestination, requireCompatibleArchitecture: false)
+                    try release.validate(current: installed, minimumEpoch: floor, architecture: Self.architecture)
+                }
             }
+            try Task.checkCancellation()
+            let saved = PendingInstall(candidate: imported, destination: installDestination, release: release)
+            try JSONEncoder().encode(saved).write(to: directory!.appendingPathComponent("pending-install.json"), options: [.atomic])
+            candidate = imported; rejectedStage = nil; destination = installDestination; pending = release
+            message = "Radius \(release.version) is ready. Restart to \(release.chromium ? "install Chromium" : "use WebKit and remove Chromium"). Website addresses reload; cookies and unsaved forms do not transfer between engines. Your modules, layout, and browser data are kept."
+        } catch {
+            // Cancellation must still finish removing this owned disposable
+            // stage. A detached cleanup keeps filesystem work off the UI actor.
+            let cleanupError = await Task.detached(priority: .utility) {
+                do { try FileManager.default.removeItem(at: stage); return nil as String? }
+                catch { return error.localizedDescription }
+            }.value
+            if cleanupError != nil {
+                rejectedStage = stage; pendingRecordInvalid = true
+            }
+            throw error
         }
-        try Task.checkCancellation()
-        let saved = PendingInstall(candidate: imported, destination: installDestination, release: release)
-        try JSONEncoder().encode(saved).write(to: directory!.appendingPathComponent("pending-install.json"), options: [.atomic])
-        candidate = imported; destination = installDestination; pending = release; committed = true
-        message = "Radius \(release.version) is ready. Restart to \(release.chromium ? "install Chromium" : "use WebKit and remove Chromium"). Website addresses reload; cookies and unsaved forms do not transfer between engines. Your modules, layout, and browser data are kept."
     }
     private func restorePending(team: String) async throws {
         guard let directory else { return }
@@ -284,13 +324,16 @@ final class DistributionManager: ObservableObject {
             try FileManager.default.removeItem(at: file)
             return
         }
-        guard (try stage.resourceValues(forKeys: [.isSymbolicLinkKey])).isSymbolicLink != true else { throw ValidationError("The staged installer location is a symbolic link.") }
+        let stageValues = try stage.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        guard stageValues.isDirectory == true, stageValues.isSymbolicLink != true else { throw ValidationError("The staged installer location is not a real directory.") }
+        rejectedStage = stage
         let current = try ReleaseTrust.metadata(of: Bundle.main.bundleURL, requireCompatibleArchitecture: false), floor = try securityFloor()
         try await Self.background {
             try Self.verify(saved.candidate, team: team, current: current, floor: floor)
             guard try ReleaseTrust.metadata(of: saved.candidate) == saved.release else { throw ValidationError("The staged installer version changed.") }
         }
         candidate = saved.candidate; destination = saved.destination; pending = saved.release
+        rejectedStage = nil
         message = "A verified installer is ready. Choose Restart and install, or discard it."
     }
     private func chooseDestination() -> URL? {

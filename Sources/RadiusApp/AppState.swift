@@ -226,7 +226,8 @@ final class AppState: ObservableObject {
             guard let repository else { throw ValidationError("Repair module storage before importing packages.") }
             let package = try DeclarativeModulePackage.decode(readModuleFile(url, limit: 192 * 1024))
             let local = DeclarativeModuleCatalog(formatVersion: 1, name: "Local · " + package.manifest.name, packages: [package])
-            try repository.addCommunityCatalog(local, reservedIDs: bundledModuleIDs)
+            let replacing = try repository.communityCatalogs().contains { $0.name == local.name }
+            try repository.addCommunityCatalog(local, reservedIDs: bundledModuleIDs, replaceExisting: replacing)
             try loadCommunityCatalogs()
             let plan = try moduleInstallationPlan(for: [package.manifest.id])
             if approveModules(plan) { try installApprovedModule(package.manifest.id) }

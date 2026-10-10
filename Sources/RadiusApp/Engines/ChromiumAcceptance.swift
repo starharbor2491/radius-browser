@@ -5,6 +5,26 @@ import RadiusCore
 /// Executed only by the packaged application's isolated native smoke test.
 @MainActor
 enum ChromiumAcceptance {
+    static func verifyExtensionSheet(ownerWindow: NSWindow) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(15))
+        while ContinuousClock.now < deadline {
+            if let tab = ChromiumRuntime.shared.extensionManagementTabs.first(where: {
+                $0.nativeView.window?.sheetParent === ownerWindow
+            }), !tab.loading, tab.chromeStyle,
+               let sheet = tab.nativeView.window, let chrome = tab.chromeWindow,
+               chrome.parent === sheet, chrome.isVisible {
+                let expected = sheet.convertToScreen(tab.nativeView.convert(tab.nativeView.visibleRect, to: nil))
+                guard abs(chrome.frame.minX - expected.minX) < 2, abs(chrome.frame.minY - expected.minY) < 2,
+                      abs(chrome.frame.width - expected.width) < 2, abs(chrome.frame.height - expected.height) < 2 else {
+                    throw ValidationError("The extension manager's Chrome child is misaligned inside its native sheet.")
+                }
+                print("Radius Chromium acceptance: native extension sheet visibility and child geometry passed")
+                return
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw ValidationError("The extension manager did not become visible inside its native Radius sheet.")
+    }
     static func verifyKeyboardRouting(browser: BrowserModel, ownerWindow: NSWindow) async throws {
         guard ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_DATA"] != nil,
               ProcessInfo.processInfo.arguments.contains("--smoke-test"),

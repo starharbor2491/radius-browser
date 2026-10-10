@@ -220,8 +220,8 @@ struct LayoutPreview: View {
             .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius).stroke(.primary.opacity(0.15)))
             .environment(\.browserTheme, theme).font(theme.interfaceFont()).preferredColorScheme(theme.scheme).accessibilityLabel("Preview of \(theme.design.label) with tabs at \(layout.tabs.rawValue)")
     }
-    private var miniTabs: some View { HStack { Text("New tab").padding(5).background(.background, in: RoundedRectangle(cornerRadius: 4)); Text("+"); Spacer() }.font(.system(size: 8)).padding(5).background(theme.tint.opacity(0.08)) }
-    private var miniNavigation: some View { HStack { Text("‹  ›"); Text("Search or enter website").frame(maxWidth: .infinity).padding(5).background(.background, in: RoundedRectangle(cornerRadius: 4)); Text("···") }.font(.system(size: 8)).padding(5) }
+    private var miniTabs: some View { HStack { Text("New tab").foregroundStyle(Color(nsColor: .labelColor)).padding(5).background(.background, in: RoundedRectangle(cornerRadius: 4)); Text("+"); Spacer() }.font(.system(size: 8)).padding(5).background(theme.tint.opacity(0.08)) }
+    private var miniNavigation: some View { HStack { Text("‹  ›"); Text("Search or enter website").foregroundStyle(Color(nsColor: .labelColor)).frame(maxWidth: .infinity).padding(5).background(.background, in: RoundedRectangle(cornerRadius: 4)); Text("···") }.font(.system(size: 8)).padding(5) }
     private var miniSidebar: some View { VStack(alignment: .leading, spacing: 10) { Text("Bookmarks").bold(); Text("A good find"); Spacer() }.font(.system(size: 8)).padding(8).frame(width: 70).background(.quaternary) }
     private var miniDocument: some View {
         VStack(alignment: .leading, spacing: 7) {

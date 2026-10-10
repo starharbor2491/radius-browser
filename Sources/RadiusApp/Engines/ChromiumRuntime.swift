@@ -34,6 +34,9 @@ final class ChromiumRuntime: ObservableObject {
         }
     }
     var auxiliaryTabs: [ChromiumTab] { tabs.values.filter(\.isAuxiliary) }
+    var extensionManagementTabs: [ChromiumTab] {
+        tabs.values.filter { $0.url?.scheme == "chrome" && $0.url?.host == "extensions" }
+    }
     func reportCloseFailure(_ message: String) { status = message }
     var downloadCenters: [DownloadCenter] {
         var seen = Set<ObjectIdentifier>()

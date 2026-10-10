@@ -33,6 +33,7 @@ final class ResourceWorker: ObservableObject {
         process.standardInput = input; process.standardOutput = output; process.standardError = FileHandle.nullDevice
         output.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
+            guard !data.isEmpty else { handle.readabilityHandler = nil; return }
             Task { @MainActor in self?.receive(data, generation: generation) }
         }
         process.terminationHandler = { [weak self] _ in
@@ -72,8 +73,6 @@ final class ResourceWorker: ObservableObject {
     /// exit immediately; a separate dispatch timer bounds a stuck worker's shutdown to 250 ms.
     func stop() {
         generation = UUID(); watchdog?.cancel(); watchdog = nil; frame = nil
-        output?.fileHandleForReading.readabilityHandler = nil
-        process?.terminationHandler = nil
         try? input?.fileHandleForWriting.close()
         if let process, process.isRunning {
             process.terminate()
@@ -82,6 +81,10 @@ final class ResourceWorker: ObservableObject {
             process.waitUntilExit()
             deadline.cancel()
         }
+        // Reap the child before detaching a handler that may still be reading
+        // its pipe. The invalidated generation rejects any queued old frame.
+        output?.fileHandleForReading.readabilityHandler = nil
+        process?.terminationHandler = nil
         try? output?.fileHandleForReading.close()
         process = nil; input = nil; output = nil; moduleID = nil; buffer.removeAll()
     }
@@ -98,6 +101,7 @@ private final class WeakResourceWorker {
 
 struct ResourcePanel: View {
     @EnvironmentObject private var app: AppState
+    @Environment(\.browserTheme) private var theme
     @StateObject private var worker = ResourceWorker()
     var body: some View {
         ScrollView {
@@ -109,7 +113,7 @@ struct ResourcePanel: View {
                             Text(metric.name).font(.caption).foregroundStyle(.secondary)
                             Text(metric.value).font(.system(size: 25, weight: .medium, design: .rounded)).monospacedDigit()
                             if metric.samples.count > 1 {
-                                Sparkline(values: metric.samples).stroke(Color.accentColor, lineWidth: 2).frame(height: 52)
+                                Sparkline(values: metric.samples).stroke(theme.tint, lineWidth: 2).frame(height: 52)
                                     .accessibilityLabel("Recent " + metric.name + " samples")
                             }
                             if let fraction = metric.fraction { ProgressView(value: fraction) }

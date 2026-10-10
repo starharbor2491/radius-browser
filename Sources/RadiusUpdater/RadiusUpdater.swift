@@ -57,6 +57,7 @@ struct RadiusUpdater {
                 try sourceRelease.validate(current: installed, minimumEpoch: epoch, architecture: architecture)
             }
             if FileManager.default.fileExists(atPath: destination.path) { try verifyInstalledForUpdate(destination) }
+            try ReleaseTrust.verifyDestinationIsNotRunning(destination, excludingPID: parent)
             let ready = helper.appendingPathExtension("ready")
             guard helper.deletingLastPathComponent() == journal.deletingLastPathComponent(),
                   helper.lastPathComponent.hasPrefix("RadiusUpdater-"),
@@ -71,8 +72,11 @@ struct RadiusUpdater {
                 try await Task.sleep(for: .milliseconds(100))
             }
             guard errno == ESRCH else { throw ValidationError("Could not confirm that Radius has quit. The update was left staged.") }
+            try ReleaseTrust.verifyDestinationIsNotRunning(destination, excludingPID: parent)
             try AppReplacementTransaction.recover(journalURL: journal, expectedDestination: destination, verify: verify, verifyExisting: verifyExisting)
-            try AppReplacementTransaction.install(source: source, destination: destination, journalURL: journal, verify: verify, verifyExisting: verifyInstalledForUpdate)
+            try AppReplacementTransaction.install(source: source, destination: destination, journalURL: journal, verify: verify, verifyExisting: verifyInstalledForUpdate, checkpoint: { phase in
+                if phase == "copied" { try ReleaseTrust.verifyDestinationIsNotRunning(destination, excludingPID: parent) }
+            })
             activated = true
             // Keep the security floor beside browser data. Removing Chromium must
             // not enable a subsequent older Chromium installation.

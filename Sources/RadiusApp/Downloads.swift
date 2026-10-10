@@ -215,21 +215,25 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
         pending.forEach(cancel)
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
-        while pending.contains(where: \.awaitsTerminalUpdate) {
-            try Task.checkCancellation()
-            if clock.now >= deadline {
-                // An engine failure may prevent the final callback. Keep both the
-                // item and staging file intact so a late update can still clean
-                // up safely, and allow the user to retry cancellation.
-                for item in pending where item.awaitsTerminalUpdate {
-                    item.active = true
-                    item.status = item.staging == nil
-                        ? "Cancellation not confirmed. Try cancelling again."
-                        : "Cancellation not confirmed. Temporary file kept; try cancelling again."
+        do {
+            while pending.contains(where: \.awaitsTerminalUpdate) {
+                try Task.checkCancellation()
+                if clock.now >= deadline {
+                    throw ValidationError("The browser engine has not confirmed that all downloads stopped. Any temporary files have been kept. Try cancelling again before closing Radius.")
                 }
-                throw ValidationError("The browser engine has not confirmed that all downloads stopped. Any temporary files have been kept. Try cancelling again before closing Radius.")
+                try await clock.sleep(until: min(deadline, clock.now.advanced(by: .milliseconds(50))))
             }
-            try await clock.sleep(until: min(deadline, clock.now.advanced(by: .milliseconds(50))))
+        } catch {
+            // Timeout and cancellation of this Swift task both leave the engine
+            // request unconfirmed. Preserve its state and file, and make a new
+            // attempt resend cancellation. A late callback can still clean up.
+            for item in pending where item.awaitsTerminalUpdate {
+                item.active = true
+                item.status = item.staging == nil
+                    ? "Cancellation not confirmed. Try cancelling again."
+                    : "Cancellation not confirmed. Temporary file kept; try cancelling again."
+            }
+            throw error
         }
     }
     var hasActive: Bool { items.contains(where: \.awaitsTerminalUpdate) }

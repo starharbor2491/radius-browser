@@ -67,6 +67,46 @@ struct DownloadsTests {
         #expect(item.staging == nil)
     }
 
+    @Test func cancelledSwiftWaitAllowsImmediateCancellationRetry() async throws {
+        let (center, item, directory) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let staging = try #require(item.staging)
+        var cancelRequests = 0
+        var waitingTask: Task<Void, any Error>?
+        item.cancelChromium = {
+            cancelRequests += 1
+            // Run after the waiting task suspends, exercising cancellation of
+            // its clock sleep without relying on a scheduling delay.
+            Task { @MainActor in waitingTask?.cancel() }
+        }
+        let wait = Task { try await center.cancelAllAndWait(timeout: .seconds(1)) }
+        waitingTask = wait
+        do {
+            try await wait.value
+            Issue.record("Cancelling the Swift wait must propagate CancellationError")
+        } catch is CancellationError {}
+
+        #expect(cancelRequests == 1)
+        #expect(item.active)
+        #expect(item.cancellationRequested)
+        #expect(!item.transferEnded)
+        #expect(!item.acknowledgementUnavailable)
+        #expect(center.hasActive)
+        #expect(try String(contentsOf: staging, encoding: .utf8) == "downloaded file")
+
+        item.cancelChromium = {
+            cancelRequests += 1
+            center.updateChromium(id: "download", fraction: 0, complete: false, cancelled: true, interrupted: false)
+        }
+        // No extra timeout may be needed to re-enable the cancellation command.
+        try await center.cancelChromiumAndWait(ids: ["download"], timeout: .zero)
+        #expect(cancelRequests == 2)
+        #expect(item.transferEnded)
+        #expect(item.status == "Cancelled")
+        #expect(!center.hasActive)
+        #expect(!FileManager.default.fileExists(atPath: staging.path))
+    }
+
     @Test func closedDownloadOwnerPreservesFileWithoutClaimingTheWriterStopped() async throws {
         let (center, item, directory) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }

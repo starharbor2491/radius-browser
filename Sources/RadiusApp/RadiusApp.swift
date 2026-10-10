@@ -34,7 +34,7 @@ struct BrowserCommands: Commands {
             Button("Close window") { NSApp.keyWindow?.performClose(nil) }.keyboardShortcut("w", modifiers: [.command, .shift])
         }
         CommandMenu("Browse") {
-            Button("Open location…") { NotificationCenter.default.post(name: .radiusFocusAddress, object: browser?.session.id) }.keyboardShortcut("l")
+            Button("Open location…") { NotificationCenter.default.post(name: .radiusFocusAddress, object: browser?.session.id) }.keyboardShortcut("l").disabled(browser == nil)
             Button("Reload page") { browser?.activeWebTab.reload() }.keyboardShortcut("r").disabled(browser?.hasPage != true)
             Button("Find in page…") { NotificationCenter.default.post(name: .radiusFind, object: browser?.session.id) }.keyboardShortcut("f").disabled(browser?.hasPage != true)
             Divider()

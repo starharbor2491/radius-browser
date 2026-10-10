@@ -12,7 +12,7 @@ output = Path("dist")
 output.mkdir(exist_ok=True)
 log_path = output / "native-tests.log"
 process = subprocess.Popen(["swift", "test", *sys.argv[1:]], stdout=subprocess.PIPE,
-                           stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
+                           stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1, start_new_session=True)
 
 
 def forward():
@@ -36,7 +36,7 @@ def sample_owned_processes():
     (output / "native-tests-processes.txt").write_text("\n".join(
         " ".join(row) for row in rows if len(row) == 3 and int(row[0]) in owned) + "\n")
     targets = [row for row in rows if len(row) == 3 and int(row[0]) in owned
-               and (int(row[0]) == process.pid or "PackageTests" in row[2])]
+               and (int(row[0]) == process.pid or "PackageTests" in row[2] or "swiftpm-testing" in row[2])]
     for row in targets[:4]:
         try:
             subprocess.run(["/usr/bin/sample", row[0], "3", "-file",

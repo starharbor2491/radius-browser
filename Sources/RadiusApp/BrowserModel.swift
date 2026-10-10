@@ -87,7 +87,11 @@ final class BrowserModel: ObservableObject {
             }
         }
         tab.onCreateWindow = { [weak self] child, url in
-            guard let self, self.session.tabs.count < 200 else { return false }
+            guard let self, !self.isClosed, !self.app.terminating,
+                  !self.app.deletingProfileIDs.contains(self.session.profileID),
+                  !self.app.profilesAwaitingWebsiteDataRemoval.contains(self.session.profileID),
+                  self.app.library.profiles.contains(where: { $0.id == self.session.profileID }),
+                  self.session.tabs.count < 200 else { return false }
             let descriptor = BrowserTab(url: url ?? URL(string: "about:blank"), engineID: child.engineID)
             self.attach(child, id: descriptor.id)
             self.session.tabs.append(descriptor); self.selectTab(descriptor.id)

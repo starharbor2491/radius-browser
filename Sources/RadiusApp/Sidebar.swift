@@ -98,8 +98,8 @@ struct NotesPanel: View {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Menu {
-                        ForEach(app.library.notes.filter { $0.profileID == profileID }) { note in Button(note.title) { selection = note.id } }
-                    } label: { Text(selectedNote?.title ?? "Select a note").lineLimit(1) }
+                        ForEach(app.library.notes.filter { $0.profileID == profileID }) { note in Button(displayTitle(note)) { selection = note.id } }
+                    } label: { Text(selectedNote.map(displayTitle) ?? "Select a note").lineLimit(1) }
                     Spacer()
                     IconButton(title: "New note", icon: "plus") {
                         app.perform { selection = try app.createModuleNote(profileID: profileID) }
@@ -110,7 +110,7 @@ struct NotesPanel: View {
                     TextEditor(text: noteBinding(id, field: \.text)).font(.body)
                         .overlay(RoundedRectangle(cornerRadius: 5).stroke(.primary.opacity(0.12)))
                     HStack {
-                        Button("Export…") { if let note = selectedNote { app.saveFile(Data(note.text.utf8), name: "\(note.title).txt", type: .plainText) } }
+                        Button("Export…") { if let note = selectedNote { app.saveFile(Data(note.text.utf8), name: "\(displayTitle(note)).txt", type: .plainText) } }
                         Spacer()
                         Button("Delete", role: .destructive) {
                             let alert = NSAlert(); alert.messageText = "Delete this note?"; alert.informativeText = "This cannot be undone."
@@ -123,6 +123,10 @@ struct NotesPanel: View {
         }
     }
     private var selectedNote: Note? { app.library.notes.first { $0.id == selection && $0.profileID == profileID } }
+    private func displayTitle(_ note: Note) -> String {
+        let title = note.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return title.isEmpty ? "Untitled note" : title
+    }
     private func noteBinding(_ id: UUID, field: WritableKeyPath<Note, String>) -> Binding<String> {
         Binding(get: { app.library.notes.first { $0.id == id }?[keyPath: field] ?? "" }, set: { value in
             app.perform { try app.updateModuleNote(id: id, profileID: profileID, field: field == \.title ? "title" : "text", value: value) }

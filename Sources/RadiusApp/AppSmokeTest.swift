@@ -33,6 +33,7 @@ enum AppSmokeTest {
                 return
             }
             trace("Browser window opened")
+            if let view = window.contentView { try capture(view, to: output.appendingPathComponent("Radius-first-launch.png")) }
             app.library.preferences.completedOnboarding = true
             browser.panel = .resources
             for design in DesignSystem.allCases {
@@ -239,11 +240,7 @@ enum AppSmokeTest {
                     guard window.isVisible, browser.activeWebTab.engineID == .webkit else { throw ValidationError("Closing Chromium also closed the native window or WebKit pane.") }
                     trace("Leaving the native extension manager open to verify quit ownership")
                     browser.sheet = .extensions
-                    let managerDeadline = ContinuousClock.now.advanced(by: .seconds(15))
-                    while ChromiumRuntime.shared.api?.live_pages() == 0 {
-                        guard ContinuousClock.now < managerDeadline else { throw ValidationError("The native extension sheet did not create its managed page.") }
-                        try await Task.sleep(for: .milliseconds(100))
-                    }
+                    try await ChromiumAcceptance.verifyExtensionSheet(ownerWindow: window)
                     trace("Embedded Chromium runtime check passed")
                 }
             }

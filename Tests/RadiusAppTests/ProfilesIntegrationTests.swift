@@ -259,17 +259,23 @@ struct ProfilesIntegrationTests {
         return file
     }
     private func setCookie(profileID: UUID, value: String) async throws {
-        let cookie = try #require(HTTPCookie(properties: [.domain: "profiles.fixture.invalid", .path: "/", .name: "radius-profile-test", .value: value]))
+        let cookie = try #require(HTTPCookie(properties: [.domain: "profiles.fixture.invalid", .path: "/", .name: "radius-profile-test", .value: value,
+                                                        .expires: Date().addingTimeInterval(3600)]))
+        let store = WKWebsiteDataStore(forIdentifier: profileID)
         try await ProfileCallbackWait<Void>.wait("setting profile cookie") { request in
-            WKWebsiteDataStore(forIdentifier: profileID).httpCookieStore.setCookie(cookie) {
+            store.httpCookieStore.setCookie(cookie) {
                 Task { @MainActor in request.finish(.success(())) }
             }
         }
-        #expect(try await cookieValues(profileID: profileID) == [value])
+        try #require(try await cookieValues(store: store) == [value], "The persistent cookie fixture must be populated before testing deletion.")
     }
     private func cookieValues(profileID: UUID) async throws -> [String] {
-        try await ProfileCallbackWait<[String]>.wait("reading profile cookies") { request in
-            WKWebsiteDataStore(forIdentifier: profileID).httpCookieStore.getAllCookies { cookies in
+        try await cookieValues(store: WKWebsiteDataStore(forIdentifier: profileID))
+    }
+    private func cookieValues(store: WKWebsiteDataStore) async throws -> [String] {
+        defer { withExtendedLifetime(store) {} }
+        return try await ProfileCallbackWait<[String]>.wait("reading profile cookies") { request in
+            store.httpCookieStore.getAllCookies { cookies in
                 let values = cookies.filter { $0.name == "radius-profile-test" }.map(\.value).sorted()
                 Task { @MainActor in request.finish(.success(values)) }
             }

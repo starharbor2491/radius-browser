@@ -1,10 +1,21 @@
 // SPDX-License-Identifier: MPL-2.0
 import Foundation
+import AppKit
 import Security
 import Darwin
 import RadiusCore
 
 public enum ReleaseTrust {
+    @MainActor public static func verifyDestinationIsNotRunning(_ destination: URL, excludingPID: Int32) throws {
+        let target = destination.resolvingSymlinksInPath().standardizedFileURL
+        let otherCopy = NSRunningApplication.runningApplications(withBundleIdentifier: "org.radius.browser").contains {
+            !$0.isTerminated && $0.processIdentifier != excludingPID &&
+                $0.bundleURL?.resolvingSymlinksInPath().standardizedFileURL == target
+        }
+        guard !otherCopy else {
+            throw ValidationError("Quit the other Radius copy in this installation folder, then retry the installation. Its running application has been kept.")
+        }
+    }
     /// A universal replacement launches natively, including when its current
     /// browser process runs under Rosetta. Choose the target Mac's CPU rather
     /// than sealing an Intel engine into a future Apple silicon host.

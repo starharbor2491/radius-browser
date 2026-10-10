@@ -15,6 +15,9 @@ extension AppState {
             ChromiumRuntime.shared.blockProfilesPendingDeletion(Set((library.pendingProfileDeletions ?? []) + (library.pendingWebsiteDataClears ?? [])))
         }
         let affected = windows.values.compactMap(\.model).filter { $0.session.profileID == id }
+        // Stop page callbacks before waiting: a live page must not create a
+        // fresh popup or download after the cancellation pass has begun.
+        for window in affected { window.disposeEngineTabs() }
         for window in affected { try await window.downloads.cancelAllAndWait() }
         try await ChromiumRuntime.shared.prepareToDeleteProfile(id)
         cancelReaderRequests()
