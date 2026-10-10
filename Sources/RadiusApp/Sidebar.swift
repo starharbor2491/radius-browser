@@ -24,7 +24,13 @@ struct SidebarView: View {
     private var bookmarks: some View {
         VStack(spacing: 10) {
             TextField("Search bookmarks", text: $search).textFieldStyle(.roundedBorder).padding(.horizontal, 12).padding(.top, 10)
-            if model.bookmarks.isEmpty { EmptyPanel(title: "Keep a good find", icon: "bookmark", detail: "Use the star beside an address to save a bookmark.") }
+            if model.bookmarks.isEmpty {
+                EmptyPanel(title: "Keep a good find", icon: "bookmark", detail: model.isPrivate
+                    ? "Use a regular window to save bookmarks in this profile."
+                    : model.selectedTab.engineID == .chromium
+                        ? "Choose File → Save in Radius bookmarks. Chrome’s star saves to its separate bookmarks."
+                        : "Use the star beside the address, or choose File → Save in Radius bookmarks.")
+            }
             else {
                 List {
                     ForEach(model.bookmarks.filter { search.isEmpty || $0.title.localizedCaseInsensitiveContains(search) || $0.url.absoluteString.localizedCaseInsensitiveContains(search) }) { bookmark in
@@ -47,7 +53,9 @@ struct SidebarView: View {
         }
         return VStack(spacing: 10) {
             TextField("Search history", text: $search).textFieldStyle(.roundedBorder).padding(.horizontal, 12).padding(.top, 10)
-            if entries.isEmpty { EmptyPanel(title: "Nothing here yet", icon: "clock", detail: "Pages you visit in this profile appear here.") }
+            if entries.isEmpty { EmptyPanel(title: "Nothing here yet", icon: "clock", detail: model.isPrivate
+                ? "Private browsing is not saved. History from regular windows in this profile appears here."
+                : "Pages you visit in this profile appear here.") }
             else {
                 List(Array(entries)) { entry in
                     Button { model.navigate(entry.url.absoluteString) } label: {

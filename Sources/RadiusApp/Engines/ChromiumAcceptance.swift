@@ -457,15 +457,21 @@ enum ChromiumAcceptance {
     }
     static func verifyChromeGeometry(_ tab: ChromiumTab, ownerWindow: NSWindow) async throws {
         guard let chrome = tab.chromeWindow else { throw ValidationError("Chrome has no native window.") }
+        let buttonKinds = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton]
+        let controls = buttonKinds.map { kind -> String in
+            guard let button = chrome.standardWindowButton(kind) else { return "\(kind.rawValue):missing" }
+            return "\(kind.rawValue):hidden=\(button.isHidden),enabled=\(button.isEnabled),window=\(button.window?.windowNumber ?? -1),super=\(button.superview.map { String(describing: type(of: $0)) } ?? "nil")"
+        }.joined(separator: "; ")
+        let frameState = "style=\(chrome.styleMask.rawValue),behavior=\(chrome.collectionBehavior.rawValue),movable=\(chrome.isMovable),backgroundMovable=\(chrome.isMovableByWindowBackground),buttons=[\(controls)]"
         guard !chrome.isMovable, !chrome.isMovableByWindowBackground,
               chrome.collectionBehavior.contains(.fullScreenAuxiliary),
               chrome.collectionBehavior.contains(.fullScreenDisallowsTiling),
               chrome.styleMask.contains([.titled, .closable, .miniaturizable, .resizable]) else {
-            throw ValidationError("The embedded Chrome window can move independently or lost its required native frame.")
+            throw ValidationError("The embedded Chrome window can move independently or lost its required native frame (\(frameState)).")
         }
-        for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+        for kind in buttonKinds {
             guard let button = chrome.standardWindowButton(kind), button.isHidden, !button.isEnabled else {
-                throw ValidationError("An embedded Chrome window exposes a second set of native window controls.")
+                throw ValidationError("An embedded Chrome window exposes a second set of native window controls (\(frameState)).")
             }
         }
         let expected = ownerWindow.convertToScreen(tab.nativeView.convert(tab.nativeView.bounds.intersection(tab.nativeView.visibleRect), to: nil))
@@ -507,21 +513,24 @@ enum ChromiumAcceptance {
               ProcessInfo.processInfo.arguments.contains("--smoke-test") else {
             throw ValidationError("Chromium acceptance requires the isolated smoke-test launch.")
         }
-        // The preceding independent keyboard probe restores the selected tab.
-        // SwiftUI must remount that tab before inspecting its attached child.
-        let mountDeadline = ContinuousClock.now.advanced(by: .seconds(10))
-        while !tab.hasNativeNavigationChrome || tab.chromeWindow?.parent !== ownerWindow {
-            guard ContinuousClock.now < mountDeadline else { throw ValidationError("The restored Chromium tab did not remount inside its Radius window.") }
+        var failures: [String] = []
+        do {
+            // The preceding independent keyboard probe restores the selected tab.
+            // SwiftUI must remount that tab before inspecting its attached child.
+            let mountDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+            while !tab.hasNativeNavigationChrome || tab.chromeWindow?.parent !== ownerWindow {
+                guard ContinuousClock.now < mountDeadline else { throw ValidationError("The restored Chromium tab did not remount inside its Radius window.") }
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            guard tab.chromeStyle, tab.hasNativeNavigationChrome, let child = tab.chromeWindow, child !== ownerWindow,
+                  child.parent === ownerWindow, child.isVisible else {
+                throw ValidationError("Chromium is not an intact Chrome-style child window in Radius.")
+            }
+            try await verifyChromeGeometry(tab, ownerWindow: ownerWindow)
+            guard tab.focusAddressBar() else { throw ValidationError("Chrome's address control is unavailable.") }
             try await Task.sleep(for: .milliseconds(100))
-        }
-        guard tab.chromeStyle, tab.hasNativeNavigationChrome, let child = tab.chromeWindow, child !== ownerWindow,
-              child.parent === ownerWindow, child.isVisible else {
-            throw ValidationError("Chromium is not an intact Chrome-style child window in Radius.")
-        }
-        try await verifyChromeGeometry(tab, ownerWindow: ownerWindow)
-        guard tab.focusAddressBar() else { throw ValidationError("Chrome's address control is unavailable.") }
-        try await Task.sleep(for: .milliseconds(100))
-        guard child.isKeyWindow else { throw ValidationError("The Chrome toolbar cannot receive keyboard focus.") }
+            guard child.isKeyWindow else { throw ValidationError("The Chrome toolbar cannot receive keyboard focus.") }
+        } catch { failures.append("Native hosting: " + error.localizedDescription) }
         let manager = try ChromiumRuntime.shared.makeTab(profileID: UUID(), privateSessionID: nil, dataDirectory: app.dataDirectory)
         let managerWindow = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 900, height: 680),
                                      styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
@@ -539,7 +548,6 @@ enum ChromiumAcceptance {
         guard manager.chromeStyle, manager.chromeWindow?.parent === managerWindow else {
             throw ValidationError("Extension management escaped its native Radius window.")
         }
-        var failures: [String] = []
         do { try await verifyFixture(manager, app: app) }
         catch { failures.append("Local MV3 fixture: " + error.localizedDescription) }
         manager.dispose(); managerWindow.close()

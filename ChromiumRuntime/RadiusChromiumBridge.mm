@@ -55,11 +55,6 @@
   child.movableByWindowBackground=NO;
   child.collectionBehavior=NSWindowCollectionBehaviorFullScreenAuxiliary |
       NSWindowCollectionBehaviorFullScreenDisallowsTiling;
-  for (NSWindowButton button : {NSWindowCloseButton,NSWindowMiniaturizeButton,NSWindowZoomButton}) {
-    NSButton* control=[child standardWindowButton:button];
-    if (!control.hidden) control.hidden=YES;
-    if (control.enabled) control.enabled=NO;
-  }
   NSWindow* parent = self.window;
   // On macOS 14 an unclipped NSView's visibleRect may extend beyond its own
   // bounds. The Chrome child must never cover Radius's surrounding controls.
@@ -80,6 +75,13 @@
   NSRect bounds = [parent convertRectToScreen:[self convertRect:visible toView:nil]];
   if (!NSEqualRects(child.frame,bounds)) [child setFrame:bounds display:YES];
   if (!child.visible) [child orderFront:nil];
+  // Chrome's size-constraint/layout work can re-enable the zoom button.
+  // Apply pane-owned controls after native attachment, layout and ordering.
+  for (NSWindowButton button : {NSWindowCloseButton,NSWindowMiniaturizeButton,NSWindowZoomButton}) {
+    NSButton* control=[child standardWindowButton:button];
+    if (!control.hidden) control.hidden=YES;
+    if (control.enabled) control.enabled=NO;
+  }
 }
 - (void)viewDidMoveToWindow { [super viewDidMoveToWindow]; [self synchronizeBrowserWindow]; }
 - (void)setFrame:(NSRect)frame { [super setFrame:frame]; [self synchronizeBrowserWindow]; }

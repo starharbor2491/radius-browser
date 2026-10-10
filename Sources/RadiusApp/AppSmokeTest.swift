@@ -220,7 +220,16 @@ enum AppSmokeTest {
                         }
                         try await Task.sleep(for: .milliseconds(100))
                     }
-                    try await ChromiumAcceptance.verifyChromeGeometry(chromium, ownerWindow: window)
+                    await captureWindow(window, to: output.appendingPathComponent("Radius-chromium-initial-window.png"))
+                    if let chromeWindow = chromium.chromeWindow {
+                        await captureWindow(chromeWindow, to: output.appendingPathComponent("Radius-chromium-initial-toolbar-window.png"))
+                    }
+                    var acceptanceFailures: [String] = []
+                    do { try await ChromiumAcceptance.verifyChromeGeometry(chromium, ownerWindow: window) }
+                    catch {
+                        let message = "Initial Chrome hosting: " + error.localizedDescription
+                        acceptanceFailures.append(message); trace(message)
+                    }
                     try await measureIdle("loaded-chromium-with-webkit-pane")
                     trace("Verifying Reader captures in an isolated Chromium world")
                     _ = try await evaluate(chromium, "(() => { window.radiusOriginalSerializer = window.XMLSerializer; window.radiusSnapshotTouched = false; window.XMLSerializer = class { constructor() { window.radiusSnapshotTouched = true; } serializeToString() { return '<html><body>Wrong page-world snapshot</body></html>'; } }; return 'ready'; })()")
@@ -302,7 +311,6 @@ enum AppSmokeTest {
                     // These checks restore their own windows/session state. Collect
                     // independent failures so a shortcut defect does not conceal
                     // extension incompatibility; every failure still rejects the run.
-                    var acceptanceFailures: [String] = []
                     do { try await ChromiumAcceptance.verifyKeyboardRouting(browser: browser, ownerWindow: window) }
                     catch {
                         let message = "Keyboard routing: " + error.localizedDescription
