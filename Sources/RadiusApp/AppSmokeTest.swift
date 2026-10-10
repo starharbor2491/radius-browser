@@ -427,16 +427,18 @@ enum AppSmokeTest {
         }
         return state
     }
-    private static func verifyPopupDocument(_ tab: ChromiumTab, property: String, token: String, title: String, submittedBody: String? = nil) async throws {
+    private static func verifyPopupDocument(_ tab: ChromiumTab, property: String?, token: String, title: String, submittedBody: String? = nil) async throws {
+        let popupExpression = property.map { "source && source.\($0)" } ?? "window"
         let expression = """
         (() => {
           const source = window.radiusPopupToken === '\(token)' ? window : window.opener;
-          const popup = source && source.\(property);
+          const popup = \(popupExpression);
           if (!popup || popup.closed) return '';
           const doc = popup.document;
           return JSON.stringify({
             title: doc.title, body: doc.body ? doc.body.innerText : '',
-            exactOpener: popup.opener === source && source.\(property) === popup,
+            exactOpener: popup === window && popup.opener === source,
+            openerAbsent: popup.opener === null,
             openerToken: popup.opener && popup.opener.radiusPopupToken,
             cookie: doc.cookie,
             method: doc.getElementById('request-method')?.textContent,
@@ -452,9 +454,11 @@ enum AppSmokeTest {
                 if let data = value.data(using: .utf8),
                    let document = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    document["title"] as? String == title,
-                   document["exactOpener"] as? Bool == true,
-                   document["openerToken"] as? String == token,
                    (document["cookie"] as? String)?.contains("radiusPopupProof=\(token)") == true {
+                    let openerMatches = property == nil
+                        ? document["openerAbsent"] as? Bool == true
+                        : document["exactOpener"] as? Bool == true && document["openerToken"] as? String == token
+                    guard openerMatches else { throw ValidationError("The popup's opener policy changed: \(value).") }
                     if let submittedBody {
                         if document["method"] as? String == "POST", document["submittedBody"] as? String == submittedBody { return }
                     } else if document["body"] as? String == "Popup" { return }
@@ -462,7 +466,7 @@ enum AppSmokeTest {
             }
             try await Task.sleep(for: .milliseconds(100))
         }
-        throw ValidationError("The actual Chromium popup did not preserve its document, exact opener, profile cookie, or POST body: \(lastDocument).")
+        throw ValidationError("The actual Chromium popup did not preserve its document, opener policy, profile cookie, or POST body: \(lastDocument).")
     }
     private static func verifyPopups(in browser: BrowserModel, app: AppState) async throws {
         let parentID = browser.session.selectedTabID
@@ -515,13 +519,19 @@ enum AppSmokeTest {
             }
             throw ValidationError("The \(stage) popup did not become an owned native Chrome window (observed: \(observed)).")
         }
-        func closePopup(_ popup: ChromiumTab, property: String) async throws {
+        func closePopup(_ popup: ChromiumTab, property: String?) async throws {
             let windowID = popup.chromeWindow?.windowNumber ?? -1
-            _ = try await evaluate(parent, "window.\(property).close(); 'closing'", timeout: .seconds(3))
+            if let property {
+                _ = try await evaluate(parent, "window.\(property).close(); 'closing'", timeout: .seconds(3))
+            } else {
+                // A target=_blank form defaults to noopener. Close its actual
+                // script-created window; destruction can cancel this response.
+                _ = try? await evaluate(popup, "window.close(); 'closing'", timeout: .seconds(3))
+            }
             let deadline = ContinuousClock.now.advanced(by: .seconds(10))
             while runtime.auxiliaryTabs.contains(where: { $0 === popup }) || popup.chromeWindow != nil {
                 guard ContinuousClock.now < deadline else {
-                    throw ValidationError("Popup window \(windowID) did not deliver its native CLOSED callback after WindowProxy.close().")
+                    throw ValidationError("Popup window \(windowID) did not deliver its native CLOSED callback after its JavaScript close request.")
                 }
                 try await Task.sleep(for: .milliseconds(100))
             }
@@ -552,16 +562,16 @@ enum AppSmokeTest {
         let blank = try await waitForPopup("blank")
         try await verifyPopupDocument(blank, property: "radiusPopupHandle", token: token, title: "Radius Chromium popup")
         try await closePopup(blank, property: "radiusPopupHandle")
-        // The server echoes the actual target=_blank POST method/body and
-        // registers its WindowProxy with the opener; URL recreation cannot pass.
+        // A target=_blank form defaults to noopener. Verify the submitted
+        // document directly, including that isolation and its real POST/cookie.
         trace("Popup acceptance: submitting the original target=_blank POST")
         _ = try? await evaluate(parent, "(() => { delete window.radiusPostPopup; const form = document.querySelector('form[action=\"/submitted\"]'); if (!form) return 'missing form'; form.submit(); return 'submitted'; })()", timeout: .seconds(3))
         let submitted = try await waitForPopup("POST")
-        try await verifyPopupDocument(submitted, property: "radiusPostPopup", token: token, title: "Radius POST fixture", submittedBody: "test=preserved")
+        try await verifyPopupDocument(submitted, property: nil, token: token, title: "Radius POST fixture", submittedBody: "test=preserved")
         guard (try await chromeContents(submitted)).browsers.contains(where: { URL(string: $0.url)?.path == "/submitted" }) else {
             throw ValidationError("The submitted document was not the newly created native Chrome browser.")
         }
-        try await closePopup(submitted, property: "radiusPostPopup")
+        try await closePopup(submitted, property: nil)
         _ = try await evaluate(parent, "document.cookie = 'radiusPopupProof=; path=/; max-age=0'; delete window.radiusPopupToken; delete window.radiusPopupHandle; delete window.radiusPostPopup; 'cleaned'")
     }
     private static func openProbe(app: AppState, privateBrowsing: Bool, profileID: UUID?, address: String) async throws -> (BrowserModel, NSWindow) {

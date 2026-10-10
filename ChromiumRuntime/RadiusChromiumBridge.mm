@@ -781,6 +781,7 @@ void SetActive(Page* page) {
 }
 bool RefreshActive(Page* owner) {
   if (!pages.count(owner) || Group(owner)!=owner || owner->closing || querying_group) return false;
+  const bool was_known=owner->view.activeContentKnown;
   owner->view.activeContentKnown=NO;
   Page* member=Active(owner);
   if (!member) { owner->active=nullptr; return false; }
@@ -799,6 +800,17 @@ bool RefreshActive(Page* owner) {
   querying_group=nullptr; queried_page=nullptr; query_command=0;
   if (!selected || !pages.count(selected) || Group(selected)!=owner || !selected->browser) return false;
   owner->view.activeContentKnown=YES;
+  if (!was_known && owner->active==selected) {
+    // Events received while selection was unknown cannot update native shell
+    // metadata. Replay that browser's state without announcing a tab switch.
+    if (!selected->failure_message.empty()) {
+      auto error=CefDictionaryValue::Create();
+      error->SetString("message",selected->failure_message); error->SetString("failedURL",selected->failed_url);
+      Emit(selected,RADIUS_CEF_ERROR,error);
+    }
+    State(selected);
+    return true;
+  }
   SetActive(selected); return true;
 }
 void FinishEmptyGroup(Page* owner) {

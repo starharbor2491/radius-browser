@@ -307,7 +307,7 @@ enum ChromiumAcceptance {
         }
         guard !tab.isShowingStartPage, tab.url == target, browser.hasPage, browser.activeWebTab === tab,
               browser.selectedTab.url == target, browser.address == target.absoluteString else {
-            throw ValidationError("A failed Chromium navigation lost its requested address behind the native start page.")
+            throw ValidationError("A failed Chromium navigation lost its requested address behind the native start page (target=\(target), engineURL=\(tab.url?.absoluteString ?? "nil"), selectedURL=\(browser.selectedTab.url?.absoluteString ?? "nil"), address=\(browser.address), editing=\(browser.addressEditing), hasPage=\(browser.hasPage), sameAdapter=\(browser.activeWebTab === tab), startPage=\(tab.isShowingStartPage), ready=\(tab.isReadyForEngineSwitch), loading=\(tab.loading), error=\(tab.errorMessage ?? "nil")).")
         }
         let session = URLSession(configuration: .ephemeral)
         defer { session.invalidateAndCancel() }
@@ -757,7 +757,10 @@ enum ChromiumAcceptance {
 
         // Exercise the real management command. Chrome may open an inner tab or
         // an auxiliary window; preserve its actual browser and window identity.
-        _ = try await evaluate(manager, "String(await chrome.developerPrivate.showOptions('\(id)'))")
+        print("Radius Chromium acceptance: opening the native extension settings")
+        // Selecting the real options tab can cancel the issuing active-target
+        // request. The owned visible document and granted APIs below prove it.
+        _ = try? await evaluate(manager, "String(await chrome.developerPrivate.showOptions('\(id)'))")
         let optionsDeadline = ContinuousClock.now.advanced(by: .seconds(15))
         var options: ChromiumTab?
         while ContinuousClock.now < optionsDeadline {
@@ -1084,37 +1087,77 @@ enum ChromiumAcceptance {
         let extensionID = "ddkjiahejlhfcafbddmgiahcphecmpfh"
         tab.load(URL(string: "https://chromewebstore.google.com/detail/ublock-origin-lite/\(extensionID)?hl=en")!)
         try await waitForLoad(tab, host: "chromewebstore.google.com")
+        let storeEnvironment = (try? await evaluate(tab, """
+        JSON.stringify({origin:location.origin,userAgent:navigator.userAgent,
+            brands:navigator.userAgentData?.brands,serverChrome:window.IJ_values?.[24] === true,
+            featureFlags:String(window._F_toggles_default_ChromeWebStoreConsumerFeUi?.[0]).slice(0,64),
+            chrome:typeof window.chrome,management:typeof window.chrome?.management,
+            webstorePrivate:typeof window.chrome?.webstorePrivate,
+            beginInstall:typeof window.chrome?.webstorePrivate?.beginInstallWithManifest3,
+            completeInstall:typeof window.chrome?.webstorePrivate?.completeInstall,
+            extensionStatus:typeof window.chrome?.webstorePrivate?.getExtensionStatus,
+            incognito:window.chrome?.extension?.inIncognitoContext})
+        """)) ?? "unavailable"
+        print("Radius Chromium Web Store environment: \(storeEnvironment)")
         let deadline = ContinuousClock.now.advanced(by: .seconds(45))
-        var target: [String: Double]?
+        var clickedInstall = false
         while ContinuousClock.now < deadline {
             if let error = tab.errorMessage { throw ValidationError(error) }
+            // Focusing and scrolling can move the page. Compute the real hit
+            // target afterward, including the site's optional Chrome promotion.
+            try await focusPage(tab)
             let value = try await evaluate(tab, """
             (() => {
-                const visit = root => {
+                const point = (element,kind) => {
+                    if (element.disabled || element.getAttribute('aria-disabled') === 'true') return null;
+                    const old = element.getBoundingClientRect();
+                    if (!old.width || !old.height) return null;
+                    element.scrollIntoView({block:'center',inline:'center',behavior:'instant'});
+                    const r = element.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2;
+                    if (x<0 || y<0 || x>=innerWidth || y>=innerHeight) return null;
+                    let hit=document.elementFromPoint(x,y);
+                    while (hit?.shadowRoot) {
+                        const child=hit.shadowRoot.elementFromPoint(x,y);
+                        if (!child || child===hit) break;
+                        hit=child;
+                    }
+                    return hit && (element===hit || element.contains(hit)) ?
+                        {kind,x,y,controller:element.closest('[jscontroller]')?.getAttribute('jscontroller')} : null;
+                };
+                const visit = (root,label,kind) => {
                     for (const element of root.querySelectorAll('*')) {
-                        if (element.shadowRoot) { const found = visit(element.shadowRoot); if (found) return found; }
+                        if (element.shadowRoot) { const found = visit(element.shadowRoot,label,kind); if (found) return found; }
                         if ((element.tagName === 'BUTTON' || element.getAttribute('role') === 'button') &&
-                            element.textContent.trim() === 'Add to Chrome' && !element.disabled) {
-                            const r = element.getBoundingClientRect();
-                            if (r.width && r.height) return {x:r.x+r.width/2,y:r.y+r.height/2};
+                            element.textContent.trim() === label) {
+                            const result=point(element,kind); if (result) return result;
                         }
                     }
                     return null;
                 };
-                return JSON.stringify(visit(document));
+                const promo=document.querySelector('[role="dialog"][aria-labelledby="promo-header"]');
+                if (promo?.querySelector('#promo-header')?.textContent.trim()==='Switch to Chrome?') {
+                    const dismiss=visit(promo,'No thanks','dismissPromotion');
+                    if (dismiss) return JSON.stringify(dismiss);
+                }
+                return JSON.stringify(visit(document,'Add to Chrome','install'));
             })()
             """)
-            if let bytes = value.data(using: .utf8), let point = try JSONSerialization.jsonObject(with: bytes, options: [.fragmentsAllowed]) as? [String: Double] {
-                target = point; break
+            if let bytes = value.data(using: .utf8),
+               let point = try JSONSerialization.jsonObject(with: bytes, options: [.fragmentsAllowed]) as? [String: Any],
+               let kind = point["kind"] as? String, let x = point["x"] as? Double, let y = point["y"] as? Double {
+                print("Radius Chromium Web Store pointer target: \(value)")
+                _ = try await tab.request("Input.dispatchMouseEvent", parameters: ["type":"mousePressed", "x":x, "y":y, "button":"left", "clickCount":1])
+                _ = try await tab.request("Input.dispatchMouseEvent", parameters: ["type":"mouseReleased", "x":x, "y":y, "button":"left", "clickCount":1])
+                if kind == "install" { clickedInstall = true; break }
             }
             try await Task.sleep(for: .milliseconds(250))
         }
-        guard let target, let x = target["x"], let y = target["y"] else {
-            throw ValidationError("The live Chrome Web Store did not offer Add to Chrome for the MV3 acceptance extension.")
+        guard clickedInstall else {
+            if let output = ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_OUTPUT"], let chrome = tab.chromeWindow {
+                await AppSmokeTest.captureWindow(chrome, to: URL(fileURLWithPath: output).appendingPathComponent("Radius-webstore-install-target-timeout.png"))
+            }
+            throw ValidationError("The live Chrome Web Store did not offer a visible, enabled Add to Chrome button for the MV3 acceptance extension.")
         }
-        try await focusPage(tab)
-        _ = try await tab.request("Input.dispatchMouseEvent", parameters: ["type":"mousePressed", "x":x, "y":y, "button":"left", "clickCount":1])
-        _ = try await tab.request("Input.dispatchMouseEvent", parameters: ["type":"mouseReleased", "x":x, "y":y, "button":"left", "clickCount":1])
         // Inspect our own native accessibility tree and press only the enabled
         // Add extension button on this fixed fixture's real permission dialog.
         print("Radius Chromium acceptance: waiting for the native Web Store permission dialog")

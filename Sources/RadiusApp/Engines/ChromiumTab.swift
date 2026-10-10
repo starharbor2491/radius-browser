@@ -313,6 +313,10 @@ final class ChromiumTab: BrowserEngineTab {
     }
     private func receive(_ event: Int32, json: String) {
         guard let data = json.data(using: .utf8), let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        if CommandLine.arguments.contains("--smoke-test"), ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_DATA"] != nil,
+           event == Int32(RADIUS_CEF_ERROR) || value["committedURL"] != nil {
+            print("Radius Chromium navigation event=\(event) known=\(activeContentKnown) committed=\(value["committedURL"] as? String ?? "nil") failed=\(value["failedURL"] as? String ?? "nil") error=\(value["message"] as? String ?? "nil")")
+        }
         switch event {
         case Int32(RADIUS_CEF_STATE), Int32(RADIUS_CEF_FINISHED):
             if value["activeContentChanged"] as? Bool == true {
