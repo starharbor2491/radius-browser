@@ -53,7 +53,7 @@ struct ResourceModuleTests {
                     probe.attemptUpdate()
                 }
             })
-            CFRunLoopAddObserver(CFRunLoopGetMain(), observer, kCFRunLoopDefaultMode)
+            CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .defaultMode)
             defer { CFRunLoopObserverInvalidate(observer) }
 
             if rollback {
