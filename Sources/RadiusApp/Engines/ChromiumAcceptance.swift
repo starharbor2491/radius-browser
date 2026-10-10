@@ -705,11 +705,49 @@ enum ChromiumAcceptance {
               installed["state"] as? String == "ENABLED", installed["version"] as? String == version else {
             throw ValidationError("The Chrome Web Store extension did not persist enabled across the full process restart.")
         }
-        _ = try await evaluate(manager, "String(await chrome.management.uninstall('ddkjiahejlhfcafbddmgiahcphecmpfh',{showConfirmDialog:false}))")
+        try await removeFixtureExtension("ddkjiahejlhfcafbddmgiahcphecmpfh", manager: manager)
         let remains = try await evaluate(manager, "String((await chrome.developerPrivate.getExtensionsInfo({includeDisabled:true,includeTerminated:true})).some(e => e.id === 'ddkjiahejlhfcafbddmgiahcphecmpfh'))")
         guard remains == "false" else { throw ValidationError("The Web Store extension could not be removed after restart.") }
         try FileManager.default.removeItem(at: receiptURL)
         print("Radius Chromium acceptance: Web Store extension persisted across a full process restart and was removed")
+    }
+    private static func removeFixtureExtension(_ id: String, manager: ChromiumTab) async throws {
+        guard ["pomncmnnjempbbdlbamhjphmpidacofc", "ddkjiahejlhfcafbddmgiahcphecmpfh"].contains(id) else {
+            throw ValidationError("Only the isolated acceptance extensions may be removed by this probe.")
+        }
+        try await focusPage(manager)
+        // Chrome requires native confirmation for removing another extension.
+        // Start the real API without awaiting its dialog, then press that
+        // specific fixture's owned Remove button and verify the real registry.
+        _ = try await evaluate(manager, """
+        (() => {
+            window.radiusFixtureRemoval = 'pending';
+            chrome.management.uninstall('\(id)', {showConfirmDialog:true}).then(
+                () => window.radiusFixtureRemoval = 'removed',
+                error => window.radiusFixtureRemoval = 'error:' + error.message);
+            return 'requested';
+        })()
+        """)
+        var approved = false
+        let deadline = ContinuousClock.now.advanced(by: .seconds(20))
+        while ContinuousClock.now < deadline {
+            if !approved {
+                let response = try await manager.request("Radius.removeFixtureExtension", parameters: ["id": id])
+                approved = (try JSONSerialization.jsonObject(with: response) as? [String: Any])?["pressed"] as? Bool == true
+            }
+            if approved {
+                let state = try await evaluate(manager, "String(window.radiusFixtureRemoval)")
+                if state.hasPrefix("error:") { throw ValidationError(state) }
+                if state == "removed" {
+                    let remains = try await evaluate(manager, "String((await chrome.developerPrivate.getExtensionsInfo({includeDisabled:true,includeTerminated:true})).some(e => e.id === '\(id)'))")
+                    guard remains == "false" else { throw ValidationError("The confirmed fixture remained in the native extension registry.") }
+                    print("Radius Chromium acceptance: confirmed the fixture's native Remove dialog and verified registry removal")
+                    return
+                }
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw ValidationError("The fixture's native Remove dialog or confirmed removal did not finish.")
     }
     private static func waitForManager(_ tab: ChromiumTab) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(20))
@@ -932,7 +970,7 @@ enum ChromiumAcceptance {
         print("Radius Chromium acceptance: disabling stopped injection and re-enabling restored worker/content with retained storage")
         // This validates reload/update behavior for a local fixture. Signed Web
         // Store update delivery and whole-process restart are separate checks.
-        _ = try await evaluate(manager, "String(await chrome.management.uninstall('\(id)',{showConfirmDialog:false}))")
+        try await removeFixtureExtension(id, manager: manager)
         let removed = try await evaluate(manager, "String((await chrome.developerPrivate.getExtensionsInfo({includeDisabled:true,includeTerminated:true})).some(e => e.id === '\(id)'))")
         guard removed == "false" else { throw ValidationError("The extension manager did not remove the fixture.") }
         page.reload(); try await waitForLoad(page, host: "127.0.0.1")

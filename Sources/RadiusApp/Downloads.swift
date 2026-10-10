@@ -198,12 +198,14 @@ final class DownloadCenter: NSObject, ObservableObject, WKDownloadDelegate {
         item.name = cleanName.isEmpty ? "Download" : cleanName
         let selected: URL?
         let environment = ProcessInfo.processInfo.environment
+        var fixtureComponents = environment["RADIUS_SMOKE_TEST_URL"].flatMap(URLComponents.init(string:))
+        fixtureComponents?.path = "/slow-download"
         if let destination = acceptanceDestination,
            CommandLine.arguments.contains("--smoke-test"),
            let root = environment["RADIUS_SMOKE_TEST_DATA"],
-           let fixture = environment["RADIUS_SMOKE_TEST_URL"].flatMap(URL.init(string:)),
+           let fixture = fixtureComponents?.url,
            fixture.scheme == "http", fixture.host == "127.0.0.1", fixture.port != nil,
-           let source = item.sourceURL, source == fixture.deletingLastPathComponent().appendingPathComponent("slow-download"),
+           let source = item.sourceURL, source == fixture,
            destination.standardizedFileURL.resolvingSymlinksInPath().deletingLastPathComponent() ==
              URL(fileURLWithPath: root, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath().appendingPathComponent("DownloadAcceptance", isDirectory: true) {
             // A fixed loopback transfer in the isolated native acceptance run.

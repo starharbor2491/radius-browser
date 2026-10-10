@@ -44,7 +44,8 @@ struct ResourceModuleTests {
             let timer = Timer(timeInterval: 0.02, repeats: false) { _ in
                 MainActor.assumeIsolated { probe.attemptUpdate() }
             }
-            RunLoop.main.add(timer, forMode: .default)
+            // Keep the probe available across AppKit common run-loop modes.
+            RunLoop.main.add(timer, forMode: .common)
             defer { timer.invalidate() }
 
             if rollback {

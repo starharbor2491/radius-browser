@@ -1265,7 +1265,8 @@ void Command(void* opaque,int command,const char* text,double value) {
 }
 // Inspect only this process's own accessibility objects, and only in the
 // isolated acceptance launch. No system AX trust or TCC permission is changed.
-bool AcceptFixtureExtension(Page* page,CefRefPtr<CefDictionaryValue> details) {
+bool PressFixtureExtensionDialog(Page* page,CefRefPtr<CefDictionaryValue> details,
+    NSString* fixture_name,NSString* button_name) {
   if (!diagnostics || !page->view.browserWindow) return false;
   NSWindow* chrome = page->view.browserWindow;
   auto windows=CefListValue::Create();
@@ -1305,7 +1306,7 @@ bool AcceptFixtureExtension(Page* page,CefRefPtr<CefDictionaryValue> details) {
       if ([element respondsToSelector:@selector(accessibilityValue)]) {
         id value=[element accessibilityValue]; if ([value isKindOfClass:[NSString class]]) { [labels addObject:value]; [text appendString:value]; }
       }
-      if ([text rangeOfString:@"uBlock Origin Lite" options:NSCaseInsensitiveSearch].location!=NSNotFound) fixture=true;
+      if ([text rangeOfString:fixture_name options:NSCaseInsensitiveSearch].location!=NSNotFound) fixture=true;
       NSString* role=[element respondsToSelector:@selector(accessibilityRole)] ? [element accessibilityRole] : nil;
       if ([role isEqualToString:NSAccessibilityButtonRole]) {
         for (NSString* label in labels) if (buttons->GetSize()<64) {
@@ -1313,7 +1314,7 @@ bool AcceptFixtureExtension(Page* page,CefRefPtr<CefDictionaryValue> details) {
           buttons->SetString(buttons->GetSize(),[bounded UTF8String]);
         }
         if ([labels containsObject:@"Cancel"]) cancel=true;
-        if ([labels containsObject:@"Add extension"] && [element respondsToSelector:@selector(isAccessibilityEnabled)] &&
+        if ([labels containsObject:button_name] && [element respondsToSelector:@selector(isAccessibilityEnabled)] &&
             [element isAccessibilityEnabled] && [element respondsToSelector:@selector(accessibilityPerformPress)]) accept=element;
       }
       if ([element respondsToSelector:@selector(accessibilityChildren)]) {
@@ -1360,7 +1361,19 @@ void DevTools(void* opaque,int id,const char* method,const char* parameters) {
     response->SetDictionary("result",result); EmitOwned(owner,RADIUS_CEF_RESULT,response); return;
   }
   if (diagnostics && std::string(method)=="Radius.acceptFixtureExtension") {
-    auto result=CefDictionaryValue::Create(); result->SetBool("pressed",AcceptFixtureExtension(owner,result));
+    auto result=CefDictionaryValue::Create(); result->SetBool("pressed",PressFixtureExtensionDialog(owner,result,@"uBlock Origin Lite",@"Add extension"));
+    auto response=CefDictionaryValue::Create(); response->SetInt("id",id); response->SetBool("success",true);
+    response->SetDictionary("result",result); EmitOwned(owner,RADIUS_CEF_RESULT,response); return;
+  }
+  if (diagnostics && owner->management && std::string(method)=="Radius.removeFixtureExtension") {
+    auto parsed=CefParseJSON(parameters,JSON_PARSER_RFC);
+    auto params=parsed ? parsed->GetDictionary() : nullptr;
+    const std::string fixture_id=params ? params->GetString("id").ToString() : "";
+    NSString* fixture_name=nil;
+    if (fixture_id=="pomncmnnjempbbdlbamhjphmpidacofc") fixture_name=@"Radius MV3 Test Fixture";
+    if (fixture_id=="ddkjiahejlhfcafbddmgiahcphecmpfh") fixture_name=@"uBlock Origin Lite";
+    auto result=CefDictionaryValue::Create();
+    result->SetBool("pressed",fixture_name && PressFixtureExtensionDialog(owner,result,fixture_name,@"Remove"));
     auto response=CefDictionaryValue::Create(); response->SetInt("id",id); response->SetBool("success",true);
     response->SetDictionary("result",result); EmitOwned(owner,RADIUS_CEF_RESULT,response); return;
   }
