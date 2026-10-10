@@ -4,6 +4,9 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import argparse
 from pathlib import Path
+from threading import Event
+
+retry_enabled = Event()
 
 PAGE = b'''<!doctype html><html><head><title>Radius HTTP fixture</title></head>
 <body><main><h1>Local browser check</h1><p>This page is served from loopback, without internet access.</p>
@@ -13,6 +16,13 @@ PAGE = b'''<!doctype html><html><head><title>Radius HTTP fixture</title></head>
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path == "/navigation-retry/enable":
+            retry_enabled.set()
+        elif self.path == "/navigation-retry" and not retry_enabled.is_set():
+            # A genuine provisional network failure, with no committed HTTP
+            # response. The same address becomes available for native Retry.
+            self.close_connection = True
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(PAGE)))

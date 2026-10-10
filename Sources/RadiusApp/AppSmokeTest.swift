@@ -336,7 +336,7 @@ enum AppSmokeTest {
         guard let png = image.representation(using: .png, properties: [:]), png.count > 1000 else { throw ValidationError("The \(url.lastPathComponent) screenshot was empty.") }
         try png.write(to: url)
     }
-    private static func captureWindow(_ window: NSWindow, to url: URL) async {
+    static func captureWindow(_ window: NSWindow, to url: URL) async {
         window.makeKeyAndOrderFront(nil)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")

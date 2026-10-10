@@ -62,7 +62,7 @@ def code_hashes(app):
 
 
 def process_snapshot():
-    output = checked(['ps', '-axo', 'pid=,ppid=,rss=,time=,command='], timeout=5)
+    output = checked(['ps', '-ww', '-axo', 'pid=,ppid=,rss=,time=,command='], timeout=5)
     if len(output) > 4 * 1024 * 1024:
         raise ValueError('Process listing exceeds the CI observation limit')
     rows = {}
@@ -95,20 +95,27 @@ def run_smoke(command, environment, timeout):
             raise subprocess.CalledProcessError(status, command)
     except BaseException:
         # Timeout/interruption never counts as a normal quit. Stop only this
-        # owned invocation's process group and leave any surviving copy intact.
-        if process.poll() is None:
+        # owned invocation's process group, even if its leader exited first.
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        deadline = time.monotonic() + 8
+        while True:
+            process.poll()  # Reap the leader without conflating it with its group.
             try:
-                os.killpg(process.pid, signal.SIGTERM)
+                os.killpg(process.pid, 0)
             except ProcessLookupError:
-                pass
-            try:
-                process.wait(timeout=8)
-            except subprocess.TimeoutExpired:
+                break
+            if time.monotonic() >= deadline:
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                process.wait(timeout=5)
+                if process.poll() is None:
+                    process.wait(timeout=5)
+                break
+            time.sleep(0.1)
         raise
 
 

@@ -25,14 +25,14 @@ struct ModulesView: View {
             ScrollView {
                 LazyVStack(spacing: 12) {
                     if listings.isEmpty {
-                        EmptyPanel(title: section == .updates ? updates.isEmpty ? "You're up to date" : "No matching updates" : "No modules found", icon: section == .updates && updates.isEmpty ? "checkmark.circle" : "shippingbox", detail: section == .updates && updates.isEmpty ? "Updates are checked against the bundled and added community catalogs. Refresh a community catalog to discover newer data packages." : "Try another search or discover a feature to install.").frame(height: 220)
+                        EmptyPanel(title: section == .updates ? updates.isEmpty ? "No module updates" : "No matching updates" : "No modules found", icon: section == .updates && updates.isEmpty ? "checkmark.circle" : "shippingbox", detail: section == .updates && updates.isEmpty ? "Refresh an added catalog to check for newer versions." : "Try another search or discover a feature to install.").frame(height: 220)
                     }
                     ForEach(listings) { manifest in
                         ModuleCard(manifest: manifest, installed: app.installedModules.first { $0.id == manifest.id })
                     }
                 }
             }
-            Text("Installed packages contain their native worker, behavior program, or interface definition. Uninstall deletes that payload; retained data stays on this Mac.")
+            Text("Uninstall removes the module. Saved data stays on this Mac unless you choose to delete it.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
                 Menu("Add modules") {
@@ -64,7 +64,7 @@ struct ModuleCard: View {
                 VStack(alignment: .leading, spacing: 5) {
                     HStack { Text(manifest.name).font(.headline); Text("v\(manifest.version)").font(.caption).foregroundStyle(.secondary) }
                     Text(manifest.summary).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    HStack { Text(manifest.publisher); Text(packageKind); Link("Source", destination: manifest.source) }.font(.caption).foregroundStyle(.secondary)
+                    HStack { Text(manifest.publisher); Text(category); Link("Source", destination: manifest.source) }.font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
                 if let installed {
@@ -85,7 +85,6 @@ struct ModuleCard: View {
             }.font(.caption).foregroundStyle(.secondary)
             HStack {
                 Text("No restart required")
-                if let checksum = installed?.payloadSHA256 { Text("· SHA-256 " + String(checksum.prefix(12))).textSelection(.enabled) }
                 Spacer()
                 Text(app.bundledModuleIDs.contains(manifest.id) ? "Official bundled package" : "Publisher unverified")
             }.font(.caption).foregroundStyle(.secondary)
@@ -96,7 +95,7 @@ struct ModuleCard: View {
             }
             if isLegacyReader {
                 HStack {
-                    Text("This legacy descriptor no longer provides Reader. Install or update the removable Reader package.")
+                    Text("This version of Reader is no longer supported. Install or update Reader.")
                         .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     Spacer()
                     if let bundled = app.catalog.first(where: { $0.runtime == .nativeReaderWorker }) {
@@ -115,13 +114,16 @@ struct ModuleCard: View {
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(.primary.opacity(0.1)))
     }
     private var isLegacyReader: Bool { manifest.capability == .reader && manifest.runtime == nil }
-    private var packageKind: String {
-        if isLegacyReader { return "· Legacy Reader descriptor" }
-        switch manifest.runtime {
-        case .nativeReaderWorker, .nativeResourceWorker: return "· Removable native worker"
-        case .behaviorProgram: return "· Constrained behavior program"
-        case .declarative: return "· Declarative interface package"
-        case nil: return "· Legacy descriptor — update required"
+    private var category: String {
+        if manifest.runtime == nil { return "· Older package — update required" }
+        switch manifest.capability {
+        case .resourceMonitor, .notes, .reader, .screenshot, .focusMode: return "· Feature"
+        case .tabSystem: return "· Tab system"
+        case .theme: return "· Theme"
+        case .layout: return "· Layout"
+        case .icons: return "· Icons"
+        case .menu: return "· Menu"
+        case .startWidget: return "· Start page"
         }
     }
     private var icon: String {

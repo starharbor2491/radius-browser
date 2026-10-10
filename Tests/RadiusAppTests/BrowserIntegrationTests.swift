@@ -75,6 +75,46 @@ struct BrowserIntegrationTests {
         #expect(!browser.hasPage && browser.address.isEmpty)
         browser.closeWindow(); #expect(await app.flush())
     }
+    @Test func failedNavigationFromHomeKeepsTheRequestedAddressAndReloadRetriesTheWebsite() async throws {
+        let (app, directory) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = BrowserModel(app: app, isPrivate: false)
+        defer { browser.closeWindow() }
+        let source = try #require(browser.activeWebTab as? WebTab)
+        let websiteStore = source.webView.configuration.websiteDataStore, history = source.webView.backForwardList
+        let server = try BrowserHistoryPageServer()
+        defer { server.stop() }
+        let pageURL = try await server.start()
+        browser.navigate(pageURL.absoluteString)
+        try await waitUntil { source.webView.title == "Current page" && !source.webView.isLoading }
+        browser.showStartPage()
+        try await waitUntil { source.webView.url?.scheme == "about" && !source.webView.isLoading && !browser.hasPage }
+        let homeURL = try #require(history.currentItem?.url)
+        server.stop()
+
+        // An uncached path makes this a real failed provisional navigation.
+        let target = pageURL.appendingPathComponent("unavailable-" + UUID().uuidString)
+        browser.navigate(target.absoluteString)
+        try await waitUntil { source.errorMessage != nil && !source.webView.isLoading }
+        print("HOME_FAILED_NAVIGATION native=\(source.webView.url?.absoluteString ?? "nil") adapter=\(source.url?.absoluteString ?? "nil") requested=\(target.absoluteString) descriptor=\(browser.selectedTab.url?.absoluteString ?? "nil") address=\(browser.address) home=\(source.isShowingStartPage)")
+        #expect(browser.selectedTab.url == target)
+        #expect(browser.address == target.absoluteString)
+        #expect(source.url == target && !source.isShowingStartPage)
+        #expect(browser.activeWebTab === source)
+        #expect(source.webView.configuration.websiteDataStore === websiteStore)
+        #expect(source.webView.backForwardList === history && history.currentItem?.url == homeURL)
+
+        let retryServer = try BrowserHistoryPageServer(port: UInt16(try #require(pageURL.port)))
+        defer { retryServer.stop() }
+        _ = try await retryServer.start()
+        source.reload()
+        try await waitUntil { retryServer.servedRequests > 0 && source.webView.url == target && !source.webView.isLoading && source.errorMessage == nil }
+        #expect(source.webView.title == "Current page" && browser.selectedTab.url == target)
+        #expect(browser.activeWebTab === source)
+        #expect(source.webView.configuration.websiteDataStore === websiteStore)
+        #expect(source.webView.backForwardList === history && history.backList.contains { $0.url == homeURL })
+        browser.closeWindow(); #expect(await app.flush())
+    }
     @Test func refusedFinalSaveKeepsTheLiveDocumentAndResynchronizesFrozenEngineCommits() async throws {
         let (app, directory) = try await fixture()
         let browser = BrowserModel(app: app, isPrivate: false)
@@ -442,12 +482,15 @@ struct BrowserIntegrationTests {
 @MainActor
 private final class BrowserHistoryPageServer {
     private let listener: NWListener
+    private(set) var servedRequests = 0
     private var connections: [UUID: NWConnection] = [:]
+    private var stopped = false
     private var startup: CheckedContinuation<URL, any Error>?
     private var watchdog: Task<Void, Never>?
-    init() throws {
+    init(port: UInt16 = 0) throws {
         let parameters = NWParameters.tcp
-        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+        parameters.allowLocalEndpointReuse = true
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!)
         listener = try NWListener(using: parameters)
         listener.stateUpdateHandler = { [weak self] state in
             Task { @MainActor in self?.changed(state) }
@@ -467,6 +510,7 @@ private final class BrowserHistoryPageServer {
         }
     }
     func stop() {
+        stopped = true
         listener.cancel(); connections.values.forEach { $0.cancel() }; connections.removeAll()
         finish(.failure(CancellationError()))
     }
@@ -481,13 +525,14 @@ private final class BrowserHistoryPageServer {
         startup.resume(with: result)
     }
     private func serve(_ connection: NWConnection) {
-        guard connections.count < 8 else { connection.cancel(); return }
+        guard !stopped, connections.count < 8 else { connection.cancel(); return }
         let id = UUID(); connections[id] = connection
         let body = Data("<html><title>Current page</title><body>Current page<script>window.radiusPreviousDocument = true</script></body></html>".utf8)
         let response = Data("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8) + body
         connection.start(queue: .main)
         connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] data, _, _, error in
             guard data != nil, error == nil else { connection.cancel(); return }
+            Task { @MainActor in self?.servedRequests += 1 }
             connection.send(content: response, completion: .contentProcessed { [weak self] _ in
                 connection.cancel()
                 Task { @MainActor in self?.connections.removeValue(forKey: id) }

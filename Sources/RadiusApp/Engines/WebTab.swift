@@ -9,9 +9,9 @@ import RadiusCore
 final class WebTab: BrowserEngineTab, WKNavigationDelegate, WKUIDelegate {
     let webView: WKWebView
     override var nativeView: NSView { webView }
-    override var isShowingStartPage: Bool { showingStartPage || webView.url == startPageURL }
-    override var url: URL? { isShowingStartPage ? nil : webView.url }
-    override var title: String? { isShowingStartPage ? nil : webView.title }
+    override var isShowingStartPage: Bool { failedNavigationURL == nil && (showingStartPage || webView.url == startPageURL) }
+    override var url: URL? { failedNavigationURL ?? (isShowingStartPage ? nil : webView.url) }
+    override var title: String? { isShowingStartPage || failedNavigationURL != nil ? nil : webView.title }
     override var engineID: BrowserEngineID { .webkit }
     private let downloads: DownloadCenter
     private let profileID: UUID
@@ -19,6 +19,7 @@ final class WebTab: BrowserEngineTab, WKNavigationDelegate, WKUIDelegate {
     private var imageSnapshots: [UUID: WebImageSnapshotRequest] = [:]
     private var pageSnapshots: [UUID: WebPageSnapshotRequest] = [:]
     private var showingStartPage = false
+    private var failedNavigationURL: URL?
     private let startPageURL = URL(string: "about:blank#radius-start-" + UUID().uuidString)!
     init(dataStore: WKWebsiteDataStore, downloads: DownloadCenter, profileID: UUID, configuration: WKWebViewConfiguration? = nil) {
         let config = configuration ?? WKWebViewConfiguration()
@@ -40,11 +41,11 @@ final class WebTab: BrowserEngineTab, WKNavigationDelegate, WKUIDelegate {
     }
     override func load(_ url: URL) {
         guard AddressResolver.isWebURL(url) else { errorMessage = "This address is not supported."; return }
-        showingStartPage = false
+        showingStartPage = false; failedNavigationURL = nil
         errorMessage = nil; updatePopupPolicy(); webView.load(URLRequest(url: url))
     }
     override func showStartPage() {
-        showingStartPage = true; errorMessage = nil; didStartNavigation()
+        showingStartPage = true; failedNavigationURL = nil; errorMessage = nil; didStartNavigation()
         imageSnapshots.values.forEach { $0.cancel() }; imageSnapshots.removeAll()
         pageSnapshots.values.forEach { $0.cancel() }; pageSnapshots.removeAll()
         // This trusted local transition stops the old document without closing
@@ -52,10 +53,13 @@ final class WebTab: BrowserEngineTab, WKNavigationDelegate, WKUIDelegate {
         webView.load(URLRequest(url: startPageURL))
     }
     override func updatePopupPolicy() { webView.configuration.preferences.javaScriptCanOpenWindowsAutomatically = allowPopups?() == true }
-    override func reload() { errorMessage = nil; webView.reload() }
+    override func reload() {
+        if let failedNavigationURL { load(failedNavigationURL) }
+        else { errorMessage = nil; webView.reload() }
+    }
     override func stop() { webView.stopLoading() }
-    override func goBack() { showingStartPage = false; webView.goBack() }
-    override func goForward() { showingStartPage = false; webView.goForward() }
+    override func goBack() { showingStartPage = false; failedNavigationURL = nil; webView.goBack() }
+    override func goForward() { showingStartPage = false; failedNavigationURL = nil; webView.goForward() }
     override func setZoom(_ value: Double) { super.setZoom(value); webView.pageZoom = zoom }
     override func dispose() {
         imageSnapshots.values.forEach { $0.cancel() }; imageSnapshots.removeAll()
@@ -68,19 +72,30 @@ final class WebTab: BrowserEngineTab, WKNavigationDelegate, WKUIDelegate {
         onChange?(finished)
     }
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        failedNavigationURL = nil
         didStartNavigation()
         imageSnapshots.values.forEach { $0.cancel() }; imageSnapshots.removeAll()
         pageSnapshots.values.forEach { $0.cancel() }; pageSnapshots.removeAll()
         errorMessage = nil; loading = true; refresh(false)
     }
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        failedNavigationURL = nil
         // Native history gestures also leave Home without using our commands.
         if webView.url != startPageURL { showingStartPage = false }
         refresh(false)
     }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { loading = false; refresh(true) }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { failed(error) }
-    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { failed(error) }
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        let failure = error as NSError
+        // WebKit restores the previous committed URL after a provisional error.
+        // Retain the attempted website so the address and Reload still target it.
+        if failure.code != NSURLErrorCancelled, !showingStartPage,
+           let target = (failure.userInfo[NSURLErrorFailingURLErrorKey] as? URL) ??
+               (failure.userInfo[NSURLErrorFailingURLStringErrorKey] as? String).flatMap(URL.init(string:)),
+           AddressResolver.isWebURL(target) { failedNavigationURL = target }
+        failed(error)
+    }
     private func failed(_ error: Error) {
         loading = false
         if (error as NSError).code != NSURLErrorCancelled { errorMessage = error.localizedDescription }

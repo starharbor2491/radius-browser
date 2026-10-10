@@ -34,6 +34,7 @@ final class ChromiumTab: BrowserEngineTab {
     private var page: UnsafeMutableRawPointer?
     private let hostView: NSView
     private var pageURL: URL?
+    private var failedURL: URL?
     private var pageTitle: String?
     private var showingStartPage = false
     private let startPageURL = URL(string: "about:blank#radius-start-" + UUID().uuidString)!
@@ -46,8 +47,8 @@ final class ChromiumTab: BrowserEngineTab {
     private var readerContexts: [Int: String] = [:]
     override var nativeView: NSView { hostView }
     var chromeWindow: NSWindow? { hostView.value(forKey: "browserWindow") as? NSWindow }
-    override var isShowingStartPage: Bool { showingStartPage || pageURL == startPageURL }
-    override var url: URL? { isShowingStartPage ? nil : pageURL }
+    override var isShowingStartPage: Bool { failedURL == nil && (showingStartPage || pageURL == startPageURL) }
+    override var url: URL? { isShowingStartPage ? nil : failedURL ?? pageURL }
     override var title: String? { isShowingStartPage ? nil : pageTitle }
     override var engineID: BrowserEngineID { .chromium }
 
@@ -155,23 +156,28 @@ final class ChromiumTab: BrowserEngineTab {
     }
     override func load(_ url: URL) {
         guard AddressResolver.isWebURL(url) else { errorMessage = "Only HTTP and HTTPS addresses are supported."; return }
-        showingStartPage = false
+        showingStartPage = false; failedURL = nil
         errorMessage = nil; pageURL = url; loading = true
         command(Int(RADIUS_CEF_LOAD), text: url.absoluteString)
     }
     override func showStartPage() {
         // Only this native operation can navigate to the internal empty page.
         // Keep the browser, history, context and active downloads alive.
-        showingStartPage = true; errorMessage = nil; didStartNavigation()
+        showingStartPage = true; failedURL = nil; errorMessage = nil; didStartNavigation()
         pageURL = nil; pageTitle = nil; loading = true
         command(Int(RADIUS_CEF_STOP))
         command(Int(RADIUS_CEF_LOAD), text: startPageURL.absoluteString)
     }
-    func showExtensions() { showingStartPage = false; command(Int(RADIUS_CEF_EXTENSIONS)) }
-    override func reload() { errorMessage = nil; command(Int(RADIUS_CEF_RELOAD)) }
+    func showExtensions() { showingStartPage = false; failedURL = nil; command(Int(RADIUS_CEF_EXTENSIONS)) }
+    override func reload() {
+        // Provisional failures do not commit a new CEF document. Retry the
+        // reported web address instead of reloading the previous Home entry.
+        if let failedURL { load(failedURL) }
+        else { errorMessage = nil; command(Int(RADIUS_CEF_RELOAD)) }
+    }
     override func stop() { command(Int(RADIUS_CEF_STOP)) }
-    override func goBack() { showingStartPage = false; errorMessage = nil; command(Int(RADIUS_CEF_BACK)) }
-    override func goForward() { showingStartPage = false; errorMessage = nil; command(Int(RADIUS_CEF_FORWARD)) }
+    override func goBack() { showingStartPage = false; failedURL = nil; errorMessage = nil; command(Int(RADIUS_CEF_BACK)) }
+    override func goForward() { showingStartPage = false; failedURL = nil; errorMessage = nil; command(Int(RADIUS_CEF_FORWARD)) }
     override func setZoom(_ value: Double) { super.setZoom(value); command(Int(RADIUS_CEF_ZOOM), value: zoom) }
     override func updatePopupPolicy() { command(Int(RADIUS_CEF_POPUPS), value: allowPopups?() == true ? 1 : 0) }
     override func focus() {
@@ -260,19 +266,19 @@ final class ChromiumTab: BrowserEngineTab {
             if let chrome = value["chromeStyle"] as? Bool { chromeStyle = chrome }
             if let chrome = value["navigationChrome"] as? Bool { navigationChrome = chrome }
             if let visible = value["navigationChromeVisible"] as? Bool { navigationChromeVisible = visible }
+            if let address = value["committedURL"] as? String, let url = URL(string: address) {
+                showingStartPage = false; failedURL = nil; errorMessage = nil; pageURL = url; pageTitle = nil
+            }
             if value["navigationStart"] as? Bool == true {
                 didStartNavigation()
-                if let address = value["committedURL"] as? String, let url = URL(string: address) {
-                    showingStartPage = false; pageURL = url; pageTitle = nil
-                    onChange?(false)
-                }
+                if value["committedURL"] != nil { onChange?(false) }
                 return
             }
             if let address = value["url"] as? String { pageURL = URL(string: address) }
             if let title = value["title"] as? String { pageTitle = title.isEmpty ? nil : title }
             if let value = value["loading"] as? Bool {
                 loading = value; progress = value ? 0.4 : 1
-                if value { errorMessage = nil }
+                if value && failedURL == nil { errorMessage = nil }
             }
             if let value = value["canGoBack"] as? Bool { canGoBack = value }
             if let value = value["canGoForward"] as? Bool { canGoForward = value }
@@ -280,6 +286,10 @@ final class ChromiumTab: BrowserEngineTab {
         case Int32(RADIUS_CEF_ERROR):
             errorMessage = value["message"] as? String
             loading = false; progress = 0
+            if let address = value["failedURL"] as? String, let url = URL(string: address), AddressResolver.isWebURL(url) {
+                failedURL = url; showingStartPage = false; pageTitle = nil
+            }
+            onChange?(false)
         case Int32(RADIUS_CEF_NOTICE):
             if let message = value["message"] as? String { onNotice?(message) }
         case Int32(RADIUS_CEF_CLOSED):

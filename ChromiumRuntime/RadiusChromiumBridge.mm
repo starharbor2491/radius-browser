@@ -396,7 +396,12 @@ class Client final : public CefClient, public CefLifeSpanHandler,
   }
   void OnAddressChange(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, const CefString& url) override {
     if (auto client = ForBrowser(browser); client && client != this) return client->OnAddressChange(browser,frame,url);
-    if (page_ && page_->browser && page_->browser->IsSame(browser) && frame->IsMain()) State(page_);
+    if (page_ && page_->navigated && page_->browser && page_->browser->IsSame(browser) && frame->IsMain()) {
+      // Successful same-document navigations do not call OnLoadStart.
+      page_->navigation_failed = false; page_->view.contentHidden = NO;
+      auto value = CefDictionaryValue::Create(); value->SetString("committedURL",url);
+      Emit(page_,RADIUS_CEF_STATE,value); State(page_);
+    }
   }
   void OnLoadingStateChange(CefRefPtr<CefBrowser> browser, bool loading, bool back, bool forward) override {
     if (auto client = ForBrowser(browser); client && client != this) return client->OnLoadingStateChange(browser,loading,back,forward);
@@ -428,7 +433,10 @@ class Client final : public CefClient, public CefLifeSpanHandler,
       page_->navigation_failed = true;
       if (code != ERR_ABORTED) {
         page_->view.contentHidden = YES;
-        Message(page_,RADIUS_CEF_ERROR,error.ToString());
+        auto value = CefDictionaryValue::Create();
+        value->SetString("message",error);
+        value->SetString("failedURL",url);
+        Emit(page_,RADIUS_CEF_ERROR,value);
       }
     }
   }
@@ -917,13 +925,27 @@ void Command(void* opaque,int command,const char* text,double value) {
 }
 // Inspect only this process's own accessibility objects, and only in the
 // isolated acceptance launch. No system AX trust or TCC permission is changed.
-bool AcceptFixtureExtension(Page* page) {
+bool AcceptFixtureExtension(Page* page,CefRefPtr<CefDictionaryValue> details) {
   if (!diagnostics || !page->view.browserWindow) return false;
   NSWindow* chrome = page->view.browserWindow;
+  auto windows=CefListValue::Create();
+  auto buttons=CefListValue::Create();
+  details->SetList("windows",windows); details->SetList("buttons",buttons);
+  int elements=0;
   for (NSWindow* window in [NSApp windows]) {
+    if (!window.visible) continue;
     bool owned = false;
-    for (NSWindow* owner=window; owner; owner=owner.parentWindow)
+    for (NSWindow* owner=window; owner; owner=owner.parentWindow ?: owner.sheetParent)
       if (owner==chrome) { owned=true; break; }
+    if (windows->GetSize()<32) {
+      auto item=CefDictionaryValue::Create();
+      item->SetInt("number",static_cast<int>(window.windowNumber));
+      item->SetInt("parent",static_cast<int>(window.parentWindow.windowNumber));
+      item->SetInt("sheetParent",static_cast<int>(window.sheetParent.windowNumber));
+      item->SetBool("owned",owned); item->SetBool("key",window.keyWindow);
+      item->SetString("title",[window.title UTF8String] ?: "");
+      windows->SetDictionary(windows->GetSize(),item);
+    }
     if (!owned) continue;
     std::vector<id> pending = {window};
     std::set<const void*> visited;
@@ -947,6 +969,10 @@ bool AcceptFixtureExtension(Page* page) {
       if ([text rangeOfString:@"uBlock Origin Lite" options:NSCaseInsensitiveSearch].location!=NSNotFound) fixture=true;
       NSString* role=[element respondsToSelector:@selector(accessibilityRole)] ? [element accessibilityRole] : nil;
       if ([role isEqualToString:NSAccessibilityButtonRole]) {
+        for (NSString* label in labels) if (buttons->GetSize()<64) {
+          NSString* bounded=label.length>160 ? [label substringToIndex:160] : label;
+          buttons->SetString(buttons->GetSize(),[bounded UTF8String]);
+        }
         if ([labels containsObject:@"Cancel"]) cancel=true;
         if ([labels containsObject:@"Add extension"] && [element respondsToSelector:@selector(isAccessibilityEnabled)] &&
             [element isAccessibilityEnabled] && [element respondsToSelector:@selector(accessibilityPerformPress)]) accept=element;
@@ -956,6 +982,9 @@ bool AcceptFixtureExtension(Page* page) {
         for (id child in children) pending.push_back(child);
       }
     }
+    elements+=static_cast<int>(visited.size()); details->SetInt("elements",elements);
+    if (fixture) details->SetBool("fixtureSeen",true);
+    if (cancel) details->SetBool("cancelSeen",true);
     if (fixture && cancel && accept) return [accept accessibilityPerformPress];
   }
   return false;
@@ -972,12 +1001,13 @@ void DevTools(void* opaque,int id,const char* method,const char* parameters) {
       result->SetBool("toolbarDrawn",page->toolbar->IsDrawn());
     }
     result->SetBool("windowVisible",page->window && page->window->IsVisible());
+    result->SetBool("windowActive",page->window && page->window->IsActive());
     result->SetInt("focusLocationRequests",page->focus_location_requests);
     auto response=CefDictionaryValue::Create(); response->SetInt("id",id); response->SetBool("success",true);
     response->SetDictionary("result",result); Emit(page,RADIUS_CEF_RESULT,response); return;
   }
   if (diagnostics && std::string(method)=="Radius.acceptFixtureExtension") {
-    auto result=CefDictionaryValue::Create(); result->SetBool("pressed",AcceptFixtureExtension(page));
+    auto result=CefDictionaryValue::Create(); result->SetBool("pressed",AcceptFixtureExtension(page,result));
     auto response=CefDictionaryValue::Create(); response->SetInt("id",id); response->SetBool("success",true);
     response->SetDictionary("result",result); Emit(page,RADIUS_CEF_RESULT,response); return;
   }

@@ -141,14 +141,9 @@ enum ChromiumAcceptance {
             try await Task.sleep(for: .milliseconds(100))
         }
         browser.showStartPage()
-        let homeDeadline = ContinuousClock.now.advanced(by: .seconds(10))
-        while tab.loading || tab.nativeView.window != nil {
-            guard ContinuousClock.now < homeDeadline else { throw ValidationError("Chromium Home did not stop its page and show Radius's start page.") }
-            try await Task.sleep(for: .milliseconds(100))
-        }
-        guard browser.activeWebTab === tab, !browser.hasPage, tab.url == nil, tab.canGoBack,
-              try await evaluate(tab, "location.href").hasPrefix("about:blank#radius-start-") else {
-            throw ValidationError("Chromium Home discarded its browser/history or left its previous document running.")
+        try await waitForStartPage(tab)
+        guard browser.activeWebTab === tab, !browser.hasPage, tab.url == nil, tab.canGoBack else {
+            throw ValidationError("Chromium Home did not retain its native state (sameBrowser=\(browser.activeWebTab === tab), hasPage=\(browser.hasPage), URL=\(tab.url?.absoluteString ?? "nil"), canGoBack=\(tab.canGoBack)).")
         }
         tab.goBack()
         let backDeadline = ContinuousClock.now.advanced(by: .seconds(10))
@@ -171,11 +166,7 @@ enum ChromiumAcceptance {
         }
         print("Radius Chromium acceptance: Home preserved its browser and Back/Forward restored the previous document and native start page")
         browser.showStartPage()
-        let externalHomeDeadline = ContinuousClock.now.advanced(by: .seconds(10))
-        while tab.loading {
-            guard ContinuousClock.now < externalHomeDeadline else { throw ValidationError("Chromium did not finish preparing its native Home navigation probe.") }
-            try await Task.sleep(for: .milliseconds(100))
-        }
+        try await waitForStartPage(tab)
         // Exercise the engine's navigation path, as extension tabs.update does,
         // without clearing the adapter's pending Home state through load().
         _ = try await tab.request("Page.navigate", parameters: ["url": target.absoluteString])
@@ -185,6 +176,7 @@ enum ChromiumAcceptance {
             try await Task.sleep(for: .milliseconds(100))
         }
         print("Radius Chromium acceptance: engine-originated navigation replaced the native Home state")
+        try await verifyNavigationRetry(browser: browser, tab: tab, fixtureURL: target)
         chrome.makeKeyAndOrderFront(nil); tab.focus()
         let beforeNew = Set(browser.session.tabs.map(\.id))
         guard let profileIndex = browser.app.library.profiles.firstIndex(where: { $0.id == browser.session.profileID }) else {
@@ -234,6 +226,49 @@ enum ChromiumAcceptance {
         browser.selectTab(selected)
         try await Task.sleep(for: .milliseconds(300))
         print("Radius Chromium acceptance: focused Chrome pane and native Cmd-L/T/W routing passed")
+    }
+    private static func verifyNavigationRetry(browser: BrowserModel, tab: ChromiumTab, fixtureURL: URL) async throws {
+        browser.showStartPage()
+        try await waitForStartPage(tab)
+        let target = fixtureURL.deletingLastPathComponent().appendingPathComponent("navigation-retry")
+        // Bypass the adapter's load method, as an extension can. The fixture
+        // closes the connection without a response until recovery is enabled.
+        _ = try await tab.request("Page.navigate", parameters: ["url": target.absoluteString])
+        let failureDeadline = ContinuousClock.now.advanced(by: .seconds(15))
+        while tab.errorMessage == nil || tab.loading {
+            guard ContinuousClock.now < failureDeadline else { throw ValidationError("Chromium did not report the fixture's failed HTTP navigation.") }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        guard !tab.isShowingStartPage, tab.url == target, browser.hasPage, browser.activeWebTab === tab,
+              browser.selectedTab.url == target, browser.address == target.absoluteString else {
+            throw ValidationError("A failed Chromium navigation lost its requested address behind the native start page.")
+        }
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let (_, response) = try await session.data(for: URLRequest(url: target.appendingPathComponent("enable"), timeoutInterval: 5))
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw ValidationError("The navigation recovery fixture could not be enabled.") }
+        tab.reload()
+        try await waitForLoad(tab, host: "127.0.0.1")
+        guard tab.url == target, tab.errorMessage == nil, !tab.isShowingStartPage,
+              try await evaluate(tab, "location.href") == target.absoluteString else {
+            throw ValidationError("Chromium Retry did not load the failed web address after its server recovered.")
+        }
+        print("Radius Chromium acceptance: Home failure retained its address and native Retry loaded the recovered HTTP page")
+    }
+    private static func waitForStartPage(_ tab: ChromiumTab) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        var document = ""
+        while ContinuousClock.now < deadline {
+            // StopLoad can synchronously report loading=false before the Home
+            // load commits. Require the actual replacement document as well.
+            if !tab.loading {
+                document = (try? await evaluate(tab, "location.href")) ?? ""
+                if document.hasPrefix("about:blank#radius-start-"), tab.isShowingStartPage,
+                   tab.nativeView.window == nil, !tab.loading { return }
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw ValidationError("Chromium Home did not commit its empty document (document=\(document), loading=\(tab.loading), mounted=\(tab.nativeView.window != nil), startPage=\(tab.isShowingStartPage)).")
     }
     private static func key(_ characters: String, code: UInt16, modifiers: NSEvent.ModifierFlags = [], window: NSWindow) throws {
         for type in [NSEvent.EventType.keyDown, .keyUp] {
@@ -667,12 +702,27 @@ enum ChromiumAcceptance {
         throw ValidationError("Extension API fixture did not reach \(key)=\(value).")
     }
     private static func click(_ tab: ChromiumTab, selector: String) async throws {
+        try await focusPage(tab)
         let encoded = String(decoding: try JSONSerialization.data(withJSONObject: selector, options: [.fragmentsAllowed]), as: UTF8.self)
         let point = try await evaluate(tab, "JSON.stringify((() => { const e=document.querySelector(\(encoded)); if (!e) return null; const r=e.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2}; })())")
         guard let data = point.data(using: .utf8), let position = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) as? [String: Double],
               let x = position["x"], let y = position["y"] else { throw ValidationError("The extension fixture control is unavailable: \(selector)") }
         _ = try await tab.request("Input.dispatchMouseEvent", parameters: ["type":"mousePressed", "x":x, "y":y, "button":"left", "clickCount":1])
         _ = try await tab.request("Input.dispatchMouseEvent", parameters: ["type":"mouseReleased", "x":x, "y":y, "button":"left", "clickCount":1])
+    }
+    private static func focusPage(_ tab: ChromiumTab) async throws {
+        tab.chromeWindow?.makeKeyAndOrderFront(nil)
+        tab.focus()
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while ContinuousClock.now < deadline {
+            if tab.chromeWindow?.isKeyWindow == true {
+                if tab.isAuxiliary { return }
+                let data = try await tab.request("Radius.chromeHostState", parameters: [:])
+                if (try JSONSerialization.jsonObject(with: data) as? [String: Any])?["windowActive"] as? Bool == true { return }
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw ValidationError("The native Chromium acceptance window did not become key and active before input.")
     }
     private static func waitForLoad(_ tab: ChromiumTab, host: String) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(25))
@@ -716,17 +766,24 @@ enum ChromiumAcceptance {
         guard let target, let x = target["x"], let y = target["y"] else {
             throw ValidationError("The live Chrome Web Store did not offer Add to Chrome for the MV3 acceptance extension.")
         }
+        try await focusPage(tab)
         _ = try await tab.request("Input.dispatchMouseEvent", parameters: ["type":"mousePressed", "x":x, "y":y, "button":"left", "clickCount":1])
         _ = try await tab.request("Input.dispatchMouseEvent", parameters: ["type":"mouseReleased", "x":x, "y":y, "button":"left", "clickCount":1])
         // Inspect our own native accessibility tree and press only the enabled
         // Add extension button on this fixed fixture's real permission dialog.
         print("Radius Chromium acceptance: waiting for the native Web Store permission dialog")
         var approved = false
+        var lastPromptState = ""
         let installDeadline = ContinuousClock.now.advanced(by: .seconds(45))
         while ContinuousClock.now < installDeadline {
             if !approved {
                 let response = try await tab.request("Radius.acceptFixtureExtension", parameters: [:])
                 approved = (try JSONSerialization.jsonObject(with: response) as? [String: Any])?["pressed"] as? Bool == true
+                let promptState = String(decoding: response, as: UTF8.self)
+                if promptState != lastPromptState {
+                    print("Radius Chromium native extension prompt: \(promptState)")
+                    lastPromptState = promptState
+                }
                 if approved { print("Radius Chromium acceptance: pressed the fixture's native Add extension button") }
             }
             let value = try await evaluate(tab, "String(document.body.innerText.includes('Remove from Chrome'))")
@@ -738,6 +795,9 @@ enum ChromiumAcceptance {
                 return
             }
             try await Task.sleep(for: .milliseconds(250))
+        }
+        if let output = ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_OUTPUT"], let chrome = tab.chromeWindow {
+            await AppSmokeTest.captureWindow(chrome, to: URL(fileURLWithPath: output).appendingPathComponent("Radius-webstore-permission-timeout.png"))
         }
         throw ValidationError("The native Chrome Web Store installation was not approved and completed before its deadline.")
     }
