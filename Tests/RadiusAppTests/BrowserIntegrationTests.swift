@@ -12,6 +12,34 @@ extension NativeIntegrationTests {
 @Suite(.serialized)
 @MainActor
 struct BrowserIntegrationTests {
+    @Test func nativeSwiftUIProfileMenuSelectionUpdatesItsBoundProfile() async throws {
+        _ = NSApplication.shared
+        let profiles = [Profile(name: "First profile"), Profile(name: "Second profile")]
+        var selected: UUID? = profiles[0].id
+        let binding = Binding<UUID?>(get: { selected }, set: { selected = $0 })
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 160), styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = NSHostingView(rootView:
+            Picker("Profile", selection: binding) {
+                ForEach(profiles) { profile in Text(profile.name).tag(Optional(profile.id)) }
+            }.frame(width: 250).padding()
+        )
+        defer { window.orderOut(nil); window.contentView = nil }
+        window.makeKeyAndOrderFront(nil)
+        func picker(in view: NSView) -> NSPopUpButton? {
+            if let control = view as? NSPopUpButton, control.itemTitles.contains(profiles[1].name) { return control }
+            for child in view.subviews { if let control = picker(in: child) { return control } }
+            return nil
+        }
+        try await waitUntil { window.contentView.flatMap { picker(in: $0) } != nil }
+        let control = try #require(window.contentView.flatMap { picker(in: $0) })
+        let item = try #require(control.item(withTitle: profiles[1].name))
+        let action = try #require(item.action)
+        control.selectItem(withTitle: profiles[1].name)
+        try #require(NSApp.sendAction(action, to: item.target, from: item))
+        try await waitUntil { selected == profiles[1].id }
+        #expect(control.titleOfSelectedItem == profiles[1].name)
+    }
+
     @Test func cachedDocumentSurvivesMountingInANewSwiftUILayoutAndOldLayoutTeardown() async throws {
         let (app, directory) = try await fixture()
         let browser = BrowserModel(app: app, isPrivate: false)
