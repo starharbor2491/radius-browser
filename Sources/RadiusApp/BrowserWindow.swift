@@ -615,7 +615,10 @@ struct WindowCloseObserver: NSViewRepresentable {
             let proxy = WindowDelegateProxy(original: window.delegate, model: model)
             delegateProxy = proxy; window.delegate = proxy
             focusObservation = NotificationObservation(NotificationCenter.default.addObserver(forName: NSWindow.didUpdateNotification, object: window, queue: .main) { [weak model, weak window] _ in
-                MainActor.assumeIsolated { model?.updateFocusedTab(window?.firstResponder) }
+                MainActor.assumeIsolated {
+                    guard let window, window.isKeyWindow else { return }
+                    model?.updateFocusedTab(window.firstResponder)
+                }
             })
             observation = NotificationObservation(NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [model] _ in
                 Task { @MainActor in model.closeWindow() }

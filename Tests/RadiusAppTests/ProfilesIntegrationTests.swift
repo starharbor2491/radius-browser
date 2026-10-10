@@ -319,13 +319,15 @@ struct ProfilesIntegrationTests {
         app.library.profiles[0].engineID = .chromium
         let website = BrowserTab(title: "Signed-in website", url: URL(string: "https://fixture.invalid/account"), pinned: true, engineID: .chromium)
         let generated = BrowserTab(title: "Extension options", url: URL(string: "chrome-extension://fixture/options.html"), parentID: website.id, engineID: .chromium)
-        app.library.sessions = [WindowSession(profileID: profileID, tabs: [website, generated])]
+        let webKitTab = BrowserTab(title: "Independent WebKit page", engineID: .webkit)
+        app.library.sessions = [WindowSession(profileID: profileID, tabs: [website, generated, webKitTab])]
         let browser = BrowserModel(app: app, isPrivate: false)
         defer {
             app.saveWithoutChromiumOnQuit = false; app.terminating = false
             browser.closeWindow()
         }
-        let cached = try #require(browser.activeWebTab as? UnavailableEngineTab, "This metadata regression must not require a real CEF runtime.")
+        let originalAdapter = browser.activeWebTab
+        let cachedWebKit = try #require(browser.webTab(webKitTab.id) as? WebTab)
         browser.closedTabs = [generated]
         let originalLibrary = app.library, originalSession = browser.session
         app.terminating = true
@@ -344,7 +346,14 @@ struct ProfilesIntegrationTests {
         #expect(app.library == originalLibrary)
         #expect(browser.session == originalSession)
         #expect(browser.closedTabs == [generated])
-        #expect(browser.activeWebTab === cached)
+        let duringQuit = browser.activeWebTab
+        if originalAdapter is UnavailableEngineTab {
+            #expect(duringQuit is UnavailableEngineTab)
+            #expect(duringQuit.engineID == .chromium)
+            #expect(duringQuit.errorMessage?.isEmpty == false)
+            #expect(duringQuit !== originalAdapter, "Transient closing placeholders must not replace a cached browsing adapter.")
+        } else { #expect(duringQuit === originalAdapter) }
+        #expect(browser.webTab(webKitTab.id) === cachedWebKit, "Preparing the restart snapshot must preserve actual cached engine pages.")
 
         app.saveWithoutChromiumOnQuit = false; app.terminating = false
         try #require(await app.flush())
@@ -354,7 +363,14 @@ struct ProfilesIntegrationTests {
         #expect(restored.profiles == expectedDurableLibrary.profiles)
         #expect(restored.sessions == expectedDurableLibrary.sessions)
         #expect(browser.session == originalSession)
-        #expect(browser.activeWebTab === cached)
+        let afterRefusal = browser.activeWebTab
+        if originalAdapter is UnavailableEngineTab {
+            #expect(afterRefusal is UnavailableEngineTab)
+            #expect(afterRefusal.engineID == .chromium)
+            #expect(afterRefusal.errorMessage?.isEmpty == false)
+            #expect(afterRefusal !== duringQuit && afterRefusal !== originalAdapter, "A refused quit must retry the engine factory instead of caching a temporary failure.")
+        } else { #expect(afterRefusal === originalAdapter) }
+        #expect(browser.webTab(webKitTab.id) === cachedWebKit)
     }
 
     @Test func refusingQuitSavesEditsMadeWhileTerminationSuspendedAutosave() async throws {

@@ -7,7 +7,8 @@ import RadiusCore
 enum ChromiumAcceptance {
     static func verifyExtensionSheet(browser: BrowserModel, ownerWindow: NSWindow) async throws {
         guard ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_DATA"] != nil,
-              CommandLine.arguments.contains("--smoke-test") else {
+              CommandLine.arguments.contains("--smoke-test"), !browser.app.terminating,
+              !browser.app.finalQuitDataFrozen else {
             throw ValidationError("Extension sheet acceptance requires the isolated smoke-test launch.")
         }
         let original = try await waitForExtensionSheet(ownerWindow: ownerWindow, profileID: browser.session.profileID)
@@ -27,15 +28,33 @@ enum ChromiumAcceptance {
             if profilePicker == nil { try await Task.sleep(for: .milliseconds(100)) }
         }
         guard let profilePicker, let action = profilePicker.action else { throw ValidationError("The extension profile selector has no native action.") }
+        // A profile selection can arrive while an asynchronous Quit is still
+        // awaiting its save decision. It must hide the old profile immediately
+        // and create the selected manager only after cancellation resumes work.
+        browser.app.terminating = true
+        defer { browser.app.terminating = false }
         profilePicker.selectItem(withTitle: profile.name)
         guard NSApp.sendAction(action, to: profilePicker.target, from: profilePicker) else {
             throw ValidationError("The extension profile selector did not handle its native selection action.")
         }
+        try await Task.sleep(for: .milliseconds(300))
+        guard original.nativeView.window == nil,
+              !ChromiumRuntime.shared.extensionManagementTabs.contains(where: { $0.profileID == profile.id }) else {
+            throw ValidationError("A deferred extension profile selection exposed the old profile or created a browser during Quit.")
+        }
+        browser.app.terminating = false
         let replacement = try await waitForExtensionSheet(ownerWindow: ownerWindow, profileID: profile.id)
         guard replacement !== original, original.nativeView.window == nil else {
             throw ValidationError("Switching extension profiles reused the disposed manager's native host.")
         }
         try await waitForManager(replacement)
+        browser.app.terminating = true
+        try await Task.sleep(for: .milliseconds(100))
+        browser.app.terminating = false
+        try await Task.sleep(for: .milliseconds(200))
+        guard try await waitForExtensionSheet(ownerWindow: ownerWindow, profileID: profile.id) === replacement else {
+            throw ValidationError("Refusing Quit needlessly replaced the unchanged extension manager.")
+        }
         _ = try? await replacement.request("Page.close", parameters: [:], timeout: .seconds(5))
         let closeDeadline = ContinuousClock.now.advanced(by: .seconds(10))
         while ownerWindow.attachedSheet != nil || browser.sheet != nil {
@@ -102,7 +121,7 @@ enum ChromiumAcceptance {
         chrome.makeKeyAndOrderFront(nil); tab.focus()
         try await Task.sleep(for: .milliseconds(200))
         guard chrome.isKeyWindow, browser.session.selectedTabID == probeID else {
-            throw ValidationError("Focusing the Chrome pane did not select its native Radius tab (key=\(chrome.isKeyWindow), visible=\(chrome.isVisible), selectedProbe=\(browser.session.selectedTabID == probeID)).")
+            throw ValidationError("Focusing the Chrome pane did not select its native Radius tab (active=\(NSApp.isActive), key=\(chrome.isKeyWindow), eligible=\(chrome.canBecomeKey), visible=\(chrome.isVisible), child=\(chrome.windowNumber), actualKey=\(NSApp.keyWindow?.windowNumber ?? -1), parent=\(ownerWindow.windowNumber), selectedProbe=\(browser.session.selectedTabID == probeID)).")
         }
         // Send ordinary AppKit events to our own key window. Do not invoke the
         // browser command callback or grant system accessibility permission.

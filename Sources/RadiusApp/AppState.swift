@@ -8,10 +8,17 @@ import RadiusCore
 final class AppState: ObservableObject {
     @Published var library = LibraryState() {
         didSet {
-            if finalQuitDataFrozen && !updatingQuitCleanup { library = oldValue; return }
+            guard !restoringFrozenLibrary else { return }
+            if finalQuitDataFrozen && !updatingQuitCleanup {
+                restoringFrozenLibrary = true
+                library = oldValue
+                restoringFrozenLibrary = false
+                return
+            }
             if ready { scheduleSave() }
         }
     }
+    private var restoringFrozenLibrary = false
     @Published var ready = false
     @Published var startupError: String?
     @Published var notice: String?
@@ -37,7 +44,7 @@ final class AppState: ObservableObject {
     @Published private(set) var finalQuitDataFrozen = false
     private var updatingQuitCleanup = false
     private var claimedSessions = Set<UUID>()
-    var terminating = false {
+    @Published var terminating = false {
         didSet { if oldValue && !terminating && ready { scheduleSave() } }
     }
     var saveWithoutChromiumOnQuit = false
@@ -631,23 +638,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 quit = await state.flush()
             }
             if quit {
-                state.cancelReaderRequests()
-                ResourceWorker.stopAll()
-                stoppedWorkersForQuit = true
-                for browser in state.windows.values.compactMap(\.model) { browser.disposeEngineTabs() }
                 state.freezeQuitData()
                 if saved {
                     let savedLatest = await state.flushForTermination()
                     if !savedLatest { quit = self.offerQuitWithoutSaving(state) }
                 }
                 if quit {
+                    state.cancelReaderRequests()
+                    ResourceWorker.stopAll()
+                    stoppedWorkersForQuit = true
+                    for browser in state.windows.values.compactMap(\.model) { browser.disposeEngineTabs() }
                     quit = await ChromiumRuntime.shared.shutdown()
                     if !quit { state.notice = ChromiumRuntime.shared.status }
                     if quit { await state.finishPendingProfileDeletions() }
                 }
             }
             self.smokeTrace("Sending termination reply: \(quit)")
-            if !quit { state.unfreezeQuitData() }
+            if !quit {
+                state.unfreezeQuitData()
+                for browser in state.windows.values.compactMap(\.model) { browser.resynchronizeCachedPages() }
+            }
             state.terminating = quit
             if !quit {
                 downloads.resume()

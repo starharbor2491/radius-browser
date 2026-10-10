@@ -33,6 +33,7 @@ enum AppSmokeTest {
                 return
             }
             trace("Browser window opened")
+            try await measureIdle("initial-shell-onboarding")
             if let view = window.contentView { try capture(view, to: output.appendingPathComponent("Radius-first-launch.png")) }
             let firstLaunchFrame = window.frame
             window.setContentSize(NSSize(width: 760, height: 520))
@@ -96,6 +97,7 @@ enum AppSmokeTest {
             app.applyConfiguration(baseline)
             if let address = ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_URL"] {
                 trace("Navigating to loopback HTTP fixture")
+                let navigationStarted = ProcessInfo.processInfo.systemUptime
                 browser.navigate(address)
                 let pageDeadline = Date().addingTimeInterval(10)
                 while browser.activeWebTab.title != "Radius HTTP fixture" || browser.activeWebTab.loading {
@@ -103,6 +105,10 @@ enum AppSmokeTest {
                     try await Task.sleep(for: .milliseconds(100))
                 }
                 guard browser.activeWebTab.url?.scheme == "http" else { throw ValidationError("HTTP navigation did not reach the fixture.") }
+                if ProcessInfo.processInfo.environment["RADIUS_SMOKE_PERFORMANCE"] == "1" {
+                    trace("SMOKE_PERFORMANCE_NAVIGATION_SECONDS \(ProcessInfo.processInfo.systemUptime - navigationStarted)")
+                }
+                try await measureIdle("loaded-webkit-loopback")
                 trace("Extracting reader text")
                 let text = try await app.readerText(from: browser.activeWebTab)
                 guard text.contains("Local browser check") else { throw ValidationError("Reader could not read the HTTP fixture.") }
@@ -200,6 +206,7 @@ enum AppSmokeTest {
                         throw ValidationError("Chromium was not hosted inside the actual Radius window.")
                     }
                     guard let chromium = browser.webTab(id) as? ChromiumTab else { throw ValidationError("Chromium adapter is unavailable.") }
+                    try await measureIdle("loaded-chromium-with-webkit-pane")
                     trace("Verifying Reader captures in an isolated Chromium world")
                     _ = try await evaluate(chromium, "(() => { window.radiusOriginalSerializer = window.XMLSerializer; window.radiusSnapshotTouched = false; window.XMLSerializer = class { constructor() { window.radiusSnapshotTouched = true; } serializeToString() { return '<html><body>Wrong page-world snapshot</body></html>'; } }; return 'ready'; })()")
                     guard try await app.readerText(from: chromium).contains("Local browser check"),
@@ -417,6 +424,12 @@ enum AppSmokeTest {
             }
             return (model, window)
         } catch { model.closeWindow(); window.close(); throw error }
+    }
+    private static func measureIdle(_ phase: String) async throws {
+        guard ProcessInfo.processInfo.environment["RADIUS_SMOKE_PERFORMANCE"] == "1" else { return }
+        trace("SMOKE_PERFORMANCE_IDLE_BEGIN \(phase)")
+        try await Task.sleep(for: .seconds(5))
+        trace("SMOKE_PERFORMANCE_IDLE_END \(phase)")
     }
     private static func trace(_ message: String) {
         FileHandle.standardOutput.write(Data((message + "\n").utf8))

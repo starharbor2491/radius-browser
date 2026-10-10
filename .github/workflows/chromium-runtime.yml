@@ -33,6 +33,7 @@ on:
       - 'scripts/smoke-app.sh'
       - 'scripts/smoke-server.py'
       - 'scripts/smoke-chromium-restart.py'
+      - 'scripts/installed-smoke.py'
       - '.github/workflows/chromium-runtime.yml'
 permissions:
   contents: read
@@ -69,6 +70,7 @@ jobs:
           path: ${{ runner.temp }}/radius-cef-runtime
           key: radius-cef154-chrome-3-${{ matrix.arch }}
       - name: Test native shell
+        id: native-tests
         run: ./scripts/test.sh
       - name: Build universal Radius application
         id: app-build
@@ -79,6 +81,7 @@ jobs:
           RADIUS_CHROMIUM_PACKAGE: ${{ runner.temp }}/radius-cef-runtime/Chromium-${{ matrix.arch }}.radiusengine
         run: ./scripts/build-app.sh
       - name: Package graphical development installer
+        id: installer-package
         if: ${{ !cancelled() && steps.app-build.outcome == 'success' }}
         run: python3 scripts/package-release.py --development
       - name: Verify installed Chromium renders inside Radius and quits normally
@@ -87,9 +90,14 @@ jobs:
         env:
           RADIUS_CHROMIUM_WEBSTORE_TEST: "1"
           RADIUS_CHROMIUM_PACKAGE: ${{ runner.temp }}/radius-cef-runtime/Chromium-${{ matrix.arch }}.radiusengine
-        run: ./scripts/smoke-app.sh
-      - name: Verify Chrome Web Store extension survives process restart
-        run: python3 scripts/smoke-chromium-restart.py
+          NATIVE_TESTS_PASSED: ${{ steps.native-tests.outcome == 'success' }}
+          INSTALLER_PACKAGE_PASSED: ${{ steps.installer-package.outcome == 'success' }}
+        run: |
+          if [[ "$NATIVE_TESTS_PASSED" == "true" && "$INSTALLER_PACKAGE_PASSED" == "true" ]]; then
+            python3 scripts/installed-smoke.py --chromium-restart
+          else
+            ./scripts/smoke-app.sh
+          fi
       - name: Archive development runtime
         run: |
           ditto -c -k --sequesterRsrc --keepParent "$RUNNER_TEMP/radius-cef-runtime/Chromium-${{ matrix.arch }}.radiusengine" "dist/Chromium-${{ matrix.arch }}.radiusengine.zip"
@@ -114,6 +122,8 @@ jobs:
           path: |
             dist/*.dmg
             dist/*-package.json
+            dist/installed-smoke.json
+            dist/smoke-performance.json
             dist/Chromium-*.radiusengine.zip
             dist/Radius-Chromium-*.zip
           if-no-files-found: error
@@ -130,5 +140,7 @@ jobs:
             dist/native-tests*.txt
             dist/smoke-data/Chromium/engine.log
             dist/*-package.json
+            dist/installed-smoke.json
+            dist/smoke-performance.json
             ${{ runner.temp }}/radius-cef-runtime/radius-adapter-*.json
           if-no-files-found: warn

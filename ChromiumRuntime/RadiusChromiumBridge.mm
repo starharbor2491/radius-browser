@@ -590,8 +590,11 @@ class WindowDelegate final : public CefWindowDelegate {
     }
   }
   void OnWindowActivationChanged(CefRefPtr<CefWindow>,bool active) override {
-    if (page_ && active) {
-      [page_->view.window makeMainWindow];
+    if (page_ && !page_->closing && active) {
+      NSWindow* owner = page_->view.window;
+      // AppKit can activate a child while its former owner is closing or is
+      // a sheet. Neither is eligible to become the application's main window.
+      if (owner.visible && owner.canBecomeMainWindow) [owner makeMainWindow];
       Message(page_,RADIUS_CEF_ACTIVATE,"");
     }
   }
@@ -887,18 +890,24 @@ void Command(void* opaque,int command,const char* text,double value) {
   switch (command) {
     case RADIUS_CEF_FOCUS_LOCATION: {
       if (page->window) page->window->Activate();
-      const int command = cef_id_for_command_id_name("IDC_FOCUS_LOCATION");
       ++page->focus_location_requests;
-      if (diagnostics) std::fprintf(stderr,"Radius Chromium: location focus command id=%d enabled=%d browser=%d\n",command,
-          command >= 0 && host->CanExecuteChromeCommand(command),browser->GetIdentifier());
-      if (command >= 0) host->ExecuteChromeCommand(command,CEF_WOD_CURRENT_TAB);
+      // Chrome's location command rejects CEF's trusted-popup window type even
+      // with an exposed toolbar. Its public default-focus implementation
+      // targets the omnibox and selects its text, independent of window type.
+      if (page->toolbar && page->toolbar->IsDrawn()) {
+        page->toolbar->RequestFocus();
+        if (diagnostics) std::fprintf(stderr,"Radius Chromium: requested Chrome toolbar location focus browser=%d\n",browser->GetIdentifier());
+      }
       break;
     }
     case RADIUS_CEF_RELOAD: browser->Reload(); break;
     case RADIUS_CEF_STOP: browser->StopLoad(); break;
     case RADIUS_CEF_BACK: browser->GoBack(); break;
     case RADIUS_CEF_FORWARD: browser->GoForward(); break;
-    case RADIUS_CEF_FOCUS: host->SetFocus(true); break;
+    case RADIUS_CEF_FOCUS:
+      if (page->window) page->window->Activate();
+      host->SetFocus(true);
+      break;
     case RADIUS_CEF_ZOOM: host->SetZoomLevel(std::log(value)/std::log(1.2)); break;
     case RADIUS_CEF_FIND:
       if (!text || !*text) host->StopFinding(true);

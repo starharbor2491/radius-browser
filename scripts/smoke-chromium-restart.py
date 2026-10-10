@@ -20,7 +20,8 @@ environment.update({
 log = root / "dist/smoke-chromium-restart.log"
 try:
     with log.open("w") as output:
-        result = subprocess.run([str(root / "dist/Radius.app/Contents/MacOS/Radius"), "--smoke-test"],
+        app = Path(environment.get("RADIUS_SMOKE_APP_PATH", str(root / "dist/Radius.app")))
+        result = subprocess.run([str(app / "Contents/MacOS/Radius"), "--smoke-test"],
                                 cwd=root, env=environment, stdout=output, stderr=subprocess.STDOUT,
                                 timeout=90, check=False)
     status = result.returncode

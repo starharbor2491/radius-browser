@@ -16,6 +16,7 @@ final class WindowDelegateProxy: NSObject, NSWindowDelegate {
             alert.addButton(withTitle: "Keep window open"); alert.addButton(withTitle: "Cancel downloads and close")
             guard alert.runModal() == .alertSecondButtonReturn else { return false }
         }
+        guard !model.app.finalQuitDataFrozen else { return false }
         return original?.windowShouldClose?(sender) ?? true
     }
     override func responds(to selector: Selector!) -> Bool { super.responds(to: selector) || original?.responds(to: selector) == true }

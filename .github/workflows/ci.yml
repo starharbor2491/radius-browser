@@ -29,7 +29,7 @@ jobs:
         run: python3 scripts/package-release.py --development
       - name: Launch packaged app and capture native screens
         timeout-minutes: 3
-        run: ./scripts/smoke-app.sh
+        run: python3 scripts/installed-smoke.py
       - name: Archive application
         run: ditto -c -k --sequesterRsrc --keepParent dist/Radius.app dist/Radius-macOS.zip
       - uses: actions/upload-artifact@v4
@@ -39,6 +39,8 @@ jobs:
             dist/Radius-macOS.zip
             dist/*.dmg
             dist/*-package.json
+            dist/installed-smoke.json
+            dist/smoke-performance.json
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
@@ -56,6 +58,8 @@ jobs:
             dist/native-tests*.log
             dist/native-tests*.txt
             dist/*-package.json
+            dist/installed-smoke.json
+            dist/smoke-performance.json
           if-no-files-found: warn
   portable-core:
     runs-on: ubuntu-24.04

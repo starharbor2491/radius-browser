@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 import AppKit
 import Testing
+import CSQLite
 @preconcurrency import WebKit
 @preconcurrency import Network
 import RadiusCore
@@ -73,6 +74,83 @@ struct BrowserIntegrationTests {
         #expect(browser.session.tabs.count == 2)
         #expect(!browser.hasPage && browser.address.isEmpty)
         browser.closeWindow(); #expect(await app.flush())
+    }
+    @Test func refusedFinalSaveKeepsTheLiveDocumentAndResynchronizesFrozenEngineCommits() async throws {
+        let (app, directory) = try await fixture()
+        let browser = BrowserModel(app: app, isPrivate: false)
+        defer {
+            app.ready = false; app.unfreezeQuitData(); app.terminating = false
+            browser.closeWindow(); try? FileManager.default.removeItem(at: directory)
+        }
+        let source = try #require(browser.activeWebTab as? WebTab)
+        let server = try BrowserHistoryPageServer()
+        defer { server.stop() }
+        let pageURL = try await server.start()
+        browser.navigate(pageURL.absoluteString)
+        try await waitUntil { source.webView.title == "Current page" && !source.webView.isLoading && browser.hasPage }
+        _ = try await source.webView.evaluateJavaScript("""
+            document.body.insertAdjacentHTML('beforeend', '<input id="radius-unsaved-form" value="kept">');
+            window.radiusUnsavedValue = 'kept';
+            """)
+        let view = source.webView, store = view.configuration.websiteDataStore
+        let history = view.backForwardList
+        let originalHistoryURL = try #require(history.currentItem?.url)
+        let originalSession = browser.session
+        try #require(await app.flush())
+
+        // Reject an actual SQLite UPDATE after the first quit save, rather than
+        // disposing the document or stubbing the final persistence result.
+        var connection: OpaquePointer?
+        try #require(sqlite3_open_v2(directory.appendingPathComponent("library.sqlite").path, &connection,
+                                   SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK)
+        let databaseHandle = try #require(connection)
+        defer {
+            sqlite3_exec(databaseHandle, "DROP TRIGGER IF EXISTS radius_reject_final_save", nil, nil, nil)
+            sqlite3_close(databaseHandle)
+        }
+        try #require(sqlite3_exec(databaseHandle, "CREATE TRIGGER radius_reject_final_save BEFORE UPDATE ON library BEGIN SELECT RAISE(ABORT, 'fixture rejected the final save'); END", nil, nil, nil) == SQLITE_OK)
+        app.terminating = true
+        let pendingNote = Note(profileID: browser.session.profileID, title: "Latest unsaved change", text: "Keep after refusing quit")
+        app.library.notes.append(pendingNote)
+        app.freezeQuitData()
+
+        let committedURL = pageURL.appending(queryItems: [URLQueryItem(name: "during", value: "frozen")])
+        let originalChange = source.onChange
+        var receivedFrozenCommit = false
+        source.onChange = { [weak source] finished in
+            if app.finalQuitDataFrozen && source?.url == committedURL { receivedFrozenCommit = true }
+            originalChange?(finished)
+        }
+        // A same-document website commit changes the live engine while Radius's
+        // durable snapshot is frozen; its unsaved form must remain untouched.
+        _ = try await view.evaluateJavaScript("history.pushState(null, '', '?during=frozen'); document.title = 'Changed while frozen';")
+        try await waitUntil { receivedFrozenCommit && source.title == "Changed while frozen" }
+        #expect(browser.session == originalSession)
+        #expect(!(await app.flushForTermination()))
+        #expect(browser.activeWebTab === source && source.webView.navigationDelegate === source)
+        #expect(try await view.evaluateJavaScript("window.radiusUnsavedValue + ':' + document.getElementById('radius-unsaved-form').value") as? String == "kept:kept")
+
+        try #require(sqlite3_exec(databaseHandle, "DROP TRIGGER radius_reject_final_save", nil, nil, nil) == SQLITE_OK)
+        app.unfreezeQuitData()
+        browser.resynchronizeCachedPages()
+        app.terminating = false
+        #expect(browser.activeWebTab === source && source.webView === view)
+        #expect(view.configuration.websiteDataStore === store)
+        #expect(view.backForwardList === history)
+        #expect(history.backList.contains { $0.url == originalHistoryURL })
+        #expect(view.backForwardList.currentItem?.url == committedURL && source.canGoBack)
+        #expect(browser.selectedTab.url == committedURL && browser.selectedTab.title == "Changed while frozen")
+        #expect(try await view.evaluateJavaScript("window.radiusUnsavedValue + ':' + document.getElementById('radius-unsaved-form').value") as? String == "kept:kept")
+
+        let database = try LibraryDatabase(url: directory.appendingPathComponent("library.sqlite"))
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        var persisted = try await database.load()
+        while (persisted.sessions != app.library.sessions || persisted.notes != [pendingNote]), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+            persisted = try await database.load()
+        }
+        #expect(persisted.sessions == app.library.sessions)
+        #expect(persisted.notes == [pendingNote])
     }
     @Test func generatedSubframesLoadWithoutBecomingSavedTopLevelPages() async throws {
         let (app, directory) = try await fixture()

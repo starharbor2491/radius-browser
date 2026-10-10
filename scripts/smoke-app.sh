@@ -91,12 +91,22 @@ if [[ ! "$smoke_port" =~ ^[0-9]+$ ]]; then
 fi
 smoke_url="http://127.0.0.1:$smoke_port/"
 curl --noproxy '*' --connect-timeout 2 --max-time 5 -fsS "$smoke_url" >/dev/null
+smoke_app_path="${RADIUS_SMOKE_APP_PATH:-$PWD/dist/Radius.app}"
+if [[ -n "${RADIUS_SMOKE_LAUNCH_RECORD:-}" ]]; then
+  python3 - "$RADIUS_SMOKE_LAUNCH_RECORD" <<'PY' || echo 'Optional launch measurement record unavailable.' >&2
+import json, pathlib, sys, time
+pathlib.Path(sys.argv[1]).write_text(json.dumps({'monotonic': time.monotonic()}))
+PY
+fi
 RADIUS_SMOKE_TEST_DATA="$PWD/dist/smoke-data" \
 RADIUS_SMOKE_TEST_OUTPUT="$PWD/dist/screenshots" \
 RADIUS_SMOKE_TEST_URL="$smoke_url" \
 RADIUS_SMOKE_TEST_EXTENSION_FIXTURE="$PWD/Tests/Fixtures/ChromiumExtension" \
-  dist/Radius.app/Contents/MacOS/Radius --smoke-test >dist/smoke-app.log 2>&1 &
+  "$smoke_app_path/Contents/MacOS/Radius" --smoke-test >dist/smoke-app.log 2>&1 &
 smoke_app_pid=$!
+if [[ -n "${RADIUS_SMOKE_PID_RECORD:-}" ]]; then
+  printf '%s\n' "$smoke_app_pid" >"$RADIUS_SMOKE_PID_RECORD" || echo 'Optional process measurement record unavailable.' >&2
+fi
 (
   timer_pid=""
   sample_pid=""

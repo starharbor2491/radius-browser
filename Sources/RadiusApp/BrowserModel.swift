@@ -8,10 +8,17 @@ import RadiusCore
 final class BrowserModel: ObservableObject {
     @Published var session: WindowSession {
         didSet {
-            if app.finalQuitDataFrozen { session = oldValue; return }
+            guard !restoringFrozenSession else { return }
+            if app.finalQuitDataFrozen {
+                restoringFrozenSession = true
+                session = oldValue
+                restoringFrozenSession = false
+                return
+            }
             if !isPrivate && !isClosed { app.updateSession(session) }
         }
     }
+    private var restoringFrozenSession = false
     @Published private(set) var isClosed = false
     @Published var panel: BrowserPanel? = nil
     @Published var address = ""
@@ -350,6 +357,11 @@ final class BrowserModel: ObservableObject {
     }
     func disposeEngineTabs() {
         webTabs.values.forEach { $0.dispose() }; webTabs.removeAll()
+    }
+    func resynchronizeCachedPages() {
+        // Engine commits can arrive while the final snapshot is frozen. Replay
+        // the existing adapters on refusal without recreating live documents.
+        for tab in webTabs.values { tab.onChange?(false) }
     }
 }
 enum BrowserPanel: String, CaseIterable, Identifiable {
