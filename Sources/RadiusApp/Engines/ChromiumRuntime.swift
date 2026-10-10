@@ -22,15 +22,31 @@ final class ChromiumRuntime: ObservableObject {
     // awaiting download cancellation after their native tab has disappeared.
     private var tabs: [ObjectIdentifier: ChromiumTab] = [:]
     private var blockedProfileIDs = Set<UUID>()
+    private var privateSessions = Set<UUID>()
     private var didShutDown = false
     func register(_ tab: ChromiumTab) { tabs[ObjectIdentifier(tab)] = tab }
     func retainWhileClosing(_ tab: ChromiumTab) { register(tab) }
     func finishedClosing(_ tab: ChromiumTab) {
         tabs.removeValue(forKey: ObjectIdentifier(tab))
-        // Private auxiliary windows cannot outlive their native private session.
-        if let session = tab.privateSessionID, !tab.isAuxiliary,
-           !tabs.values.contains(where: { $0.privateSessionID == session && !$0.isAuxiliary }) {
-            for auxiliary in Array(tabs.values) where auxiliary.privateSessionID == session { auxiliary.dispose() }
+    }
+    func beginPrivateSession(_ id: UUID) { privateSessions.insert(id) }
+    func canAdoptPage(profileID: UUID, privateSessionID: UUID?) -> Bool {
+        guard !stopped, !blockedProfileIDs.contains(profileID) else { return false }
+        return privateSessionID.map { privateSessions.contains($0) } ?? true
+    }
+    func closePrivateSession(_ id: UUID) {
+        privateSessions.remove(id)
+        for tab in Array(tabs.values) where tab.privateSessionID == id { tab.dispose() }
+        releasePrivateContexts(sessionID: id, profileID: nil)
+    }
+    func releasePrivateProfile(_ profileID: UUID, sessionID: UUID) {
+        for tab in Array(tabs.values) where tab.privateSessionID == sessionID && tab.profileID == profileID { tab.dispose() }
+        releasePrivateContexts(sessionID: sessionID, profileID: profileID)
+    }
+    private func releasePrivateContexts(sessionID: UUID?, profileID: UUID?) {
+        guard let api else { return }
+        (sessionID?.uuidString ?? "").withCString { session in
+            (profileID?.uuidString ?? "").withCString { profile in api.release_private_contexts(session, profile) }
         }
     }
     var auxiliaryTabs: [ChromiumTab] { tabs.values.filter(\.isAuxiliary) }
@@ -50,6 +66,11 @@ final class ChromiumRuntime: ObservableObject {
         for tab in affected { tab.dispose() }
         NotificationCenter.default.post(name: .radiusChromiumProfileClosed, object: id)
     }
+    func finalizeProfileDeletion(_ id: UUID) {
+        // Release only after the deletion tombstone is durably saved. A refused
+        // save can reopen the existing private profile without losing its login.
+        releasePrivateContexts(sessionID: nil, profileID: id)
+    }
 
     static var packageURL: URL {
         Bundle.main.bundleURL.appendingPathComponent("Contents/Frameworks/Chromium.radiusengine", isDirectory: true)
@@ -60,6 +81,9 @@ final class ChromiumRuntime: ObservableObject {
     func makeTab(profileID: UUID, privateSessionID: UUID?, dataDirectory: URL, downloads: DownloadCenter? = nil) throws -> ChromiumTab {
         guard !blockedProfileIDs.contains(profileID) else {
             throw ValidationError("This profile is being deleted. Choose another profile.")
+        }
+        if let privateSessionID, !privateSessions.contains(privateSessionID) {
+            throw ValidationError("This private browsing window is closed.")
         }
         try load(dataDirectory: dataDirectory)
         guard let api else { throw ValidationError("The Chromium runtime is not loaded.") }
@@ -88,7 +112,9 @@ final class ChromiumRuntime: ObservableObject {
         library = handle
         guard let symbol = dlsym(handle, "radius_cef_get_api") else { throw ValidationError("This runtime has no Radius engine API.") }
         let getter = unsafeBitCast(symbol, to: radius_cef_get_api_function.self)
-        guard let pointer = getter(), pointer.pointee.version == 2 else { throw ValidationError("This runtime uses an incompatible Radius engine API.") }
+        guard let pointer = getter(), UnsafeRawPointer(pointer).load(as: UInt32.self) == 3 else {
+            throw ValidationError("This runtime uses an incompatible Radius engine API.")
+        }
         let loadedAPI = pointer.pointee
         let success = package.path.withCString { packagePath in
             dataDirectory.path.withCString { dataPath in
@@ -123,7 +149,7 @@ final class ChromiumRuntime: ObservableObject {
         for _ in 0..<200 {
             if api.live_pages() == 0 {
                 let success = api.shutdown() != 0
-                if success { isLoaded = false; stopped = true; didShutDown = true }
+                if success { isLoaded = false; stopped = true; didShutDown = true; privateSessions.removeAll() }
                 return success
             }
             try? await Task.sleep(for: .milliseconds(50))
@@ -154,7 +180,7 @@ private enum ChromiumPackage {
         #else
         let architecture = "x86_64"
         #endif
-        guard manifest.format == 2, manifest.abi == 2, manifest.runtimeStyle == "chrome",
+        guard manifest.format == 2, manifest.abi == 3, manifest.runtimeStyle == "chrome",
               manifest.architecture == architecture, manifest.cefVersion == ChromiumRuntime.cefVersion else {
             throw ValidationError("This Chromium package is incompatible with this Radius build or Mac architecture.")
         }

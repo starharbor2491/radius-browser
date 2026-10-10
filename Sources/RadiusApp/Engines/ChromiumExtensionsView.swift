@@ -38,7 +38,7 @@ struct ChromiumExtensionsView: View {
                     Text("Actions and popups appear in each Chromium pane’s toolbar.").font(.caption).foregroundStyle(.secondary)
                 }
                 if let tab {
-                    ChromiumExtensionContent(tab: tab)
+                    ChromiumExtensionContent(tab: tab).id(ObjectIdentifier(tab))
                 } else { ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity) }
             } else {
                 ContentUnavailableView("Chromium is not installed", systemImage: "puzzlepiece.extension",
@@ -71,7 +71,10 @@ struct ChromiumExtensionsView: View {
             let page = try runtime.makeTab(profileID: profileID, privateSessionID: nil,
                                            dataDirectory: app.dataDirectory, downloads: downloads)
             page.onNotice = { message = $0 }
-            page.onClose = { tab = nil }
+            page.onClose = { [weak page] in
+                guard let page, tab === page else { return }
+                tab = nil; dismiss()
+            }
             page.onBrowserCommand = { [weak page] command in
                 switch command {
                 case "closeTab", "closeWindow": dismiss()

@@ -6,6 +6,7 @@ mkdir -p dist
 smoke_server_pid=""
 smoke_app_pid=""
 smoke_watchdog_pid=""
+smoke_started_at="$(date +%s)"
 smoke_deadline=90
 if [[ -n "${RADIUS_CHROMIUM_PACKAGE:-}" ]]; then smoke_deadline=420; fi
 cleanup() {
@@ -30,6 +31,35 @@ cleanup() {
     echo "Packaged-app smoke test exited with status $smoke_status." >&2
     cat dist/smoke-server.log >&2
     if [[ -f dist/smoke-sample.log ]]; then cat dist/smoke-sample.log >&2; fi
+    if [[ "$smoke_status" -ge 128 ]]; then
+      # ReportCrash can finish after the app exits. Collect only this launch's
+      # Radius reports, with a short deadline and a bounded artifact size.
+      python3 - "$smoke_started_at" <<'PY' || true
+import pathlib, shutil, sys, time
+started = int(sys.argv[1])
+destination = pathlib.Path('dist/smoke-crashes')
+locations = [pathlib.Path.home() / 'Library/Logs/DiagnosticReports', pathlib.Path('/Library/Logs/DiagnosticReports')]
+copied = set()
+for _ in range(10):
+    for directory in locations:
+        for report in directory.glob('Radius*'):
+            try:
+                if report.suffix not in {'.ips', '.crash'} or report.is_symlink() or report in copied:
+                    continue
+                info = report.stat()
+                if info.st_mtime < started or info.st_size > 16 * 1024 * 1024 or len(copied) >= 8:
+                    continue
+                destination.mkdir(exist_ok=True)
+                shutil.copyfile(report, destination / report.name)
+                copied.add(report)
+            except OSError:
+                continue
+    if copied:
+        break
+    time.sleep(0.5)
+print(f'Collected {len(copied)} current Radius crash reports.')
+PY
+    fi
   fi
   exit "$smoke_status"
 }

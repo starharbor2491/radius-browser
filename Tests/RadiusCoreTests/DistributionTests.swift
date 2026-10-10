@@ -130,11 +130,11 @@ final class DistributionTests: XCTestCase {
 
     func testWholeAppManifestAcceptsFutureABIWithoutWeakeningArchitectureOrSecurity() throws {
         let release = DistributionRelease(build: 30, version: "1.1.0", securityEpoch: 155, architecture: "arm64", chromium: true)
-        try DistributionEngineManifest(abi: 3, architecture: "arm64", cefVersion: "155.0.1").validate(release: release, architecture: "arm64")
+        try DistributionEngineManifest(abi: 4, architecture: "arm64", cefVersion: "155.0.1").validate(release: release, architecture: "arm64")
         for manifest in [DistributionEngineManifest(abi: 0, architecture: "arm64", cefVersion: "155.0.1"),
                          DistributionEngineManifest(abi: 1025, architecture: "arm64", cefVersion: "155.0.1"),
-                         DistributionEngineManifest(abi: 3, architecture: "x86_64", cefVersion: "155.0.1"),
-                         DistributionEngineManifest(abi: 3, architecture: "arm64", cefVersion: "156.0.1")] {
+                         DistributionEngineManifest(abi: 4, architecture: "x86_64", cefVersion: "155.0.1"),
+                         DistributionEngineManifest(abi: 4, architecture: "arm64", cefVersion: "156.0.1")] {
             XCTAssertThrowsError(try manifest.validate(release: release, architecture: "arm64"))
         }
         let booleanABI = Data(#"{"format":2,"abi":true,"runtimeStyle":"chrome","architecture":"arm64","cefVersion":"155.0.1"}"#.utf8)

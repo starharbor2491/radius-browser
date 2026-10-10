@@ -207,8 +207,12 @@ enum AppSmokeTest {
                     _ = try await evaluate(chromium, "(() => { window.XMLSerializer = window.radiusOriginalSerializer; delete window.radiusOriginalSerializer; delete window.radiusSnapshotTouched; return 'restored'; })()")
                     trace("Cancelling a Chromium page before its new context is ready")
                     let liveBeforeCancellation = ChromiumRuntime.shared.api?.live_pages()
-                    let pending = try ChromiumRuntime.shared.makeTab(profileID: UUID(), privateSessionID: UUID(), dataDirectory: app.dataDirectory)
+                    let pendingSession = UUID()
+                    ChromiumRuntime.shared.beginPrivateSession(pendingSession)
+                    defer { ChromiumRuntime.shared.closePrivateSession(pendingSession) }
+                    let pending = try ChromiumRuntime.shared.makeTab(profileID: UUID(), privateSessionID: pendingSession, dataDirectory: app.dataDirectory)
                     pending.dispose()
+                    ChromiumRuntime.shared.closePrivateSession(pendingSession)
                     guard ChromiumRuntime.shared.api?.live_pages() == liveBeforeCancellation else { throw ValidationError("An uninitialized Chromium page survived cancellation.") }
                     try await Task.sleep(for: .milliseconds(250))
                     guard ChromiumRuntime.shared.api?.live_pages() == liveBeforeCancellation else { throw ValidationError("A cancelled Chromium page was created later.") }
@@ -303,7 +307,7 @@ enum AppSmokeTest {
                     guard window.isVisible, browser.activeWebTab.engineID == .webkit else { throw ValidationError("Closing Chromium also closed the native window or WebKit pane.") }
                     trace("Leaving the native extension manager open to verify quit ownership")
                     browser.sheet = .extensions
-                    try await ChromiumAcceptance.verifyExtensionSheet(ownerWindow: window)
+                    try await ChromiumAcceptance.verifyExtensionSheet(browser: browser, ownerWindow: window)
                     trace("Embedded Chromium runtime check passed")
                 }
             }
@@ -345,7 +349,7 @@ enum AppSmokeTest {
             let png = try file.read(upToCount: 8 * 1024 * 1024 + 1) ?? Data()
             guard process.terminationStatus == 0, png.count > 1000, png.count <= 8 * 1024 * 1024,
                   png.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]) else { throw ValidationError("Window capture was unavailable.") }
-            trace("Chromium own-window OS capture saved")
+            trace("Native window OS capture saved: \(url.lastPathComponent)")
         } catch {
             if process.isRunning {
                 process.terminate()
@@ -355,7 +359,7 @@ enum AppSmokeTest {
             }
             // Recording permission depends on the runner. Keep the renderer assertions;
             // never grant recording access or alter the runner's privacy settings here.
-            trace("Chromium own-window OS capture unavailable: \(error.localizedDescription)")
+            trace("Native window OS capture unavailable: \(error.localizedDescription)")
             try? FileManager.default.removeItem(at: url)
         }
     }

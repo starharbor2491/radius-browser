@@ -4,12 +4,35 @@ on:
   pull_request:
     paths:
       - 'ChromiumRuntime/**'
+      - 'Package.swift'
+      - 'Sources/CSQLite/**'
+      - 'Sources/RadiusCore/**'
       - 'Sources/RadiusEngineABI/**'
-      - 'Sources/RadiusApp/Engines/**'
-      - 'Sources/RadiusApp/BrowserModel.swift'
-      - 'Sources/RadiusApp/AppSmokeTest.swift'
+      - 'Sources/RadiusApp/**'
+      - 'Sources/RadiusDistribution/**'
+      - 'Sources/RadiusUpdater/**'
+      - 'Sources/RadiusReaderLogic/**'
+      - 'Sources/RadiusReaderWorker/**'
+      - 'Sources/RadiusResourcePlatform/**'
+      - 'Sources/RadiusResourceMonitor/**'
+      - 'Sources/RadiusMemoryMonitor/**'
+      - 'Tests/RadiusAppTests/**'
+      - 'Tests/RadiusCoreTests/**'
+      - 'Tests/RadiusReaderTests/**'
+      - 'Resources/Info.plist'
+      - 'Resources/Entitlements/**'
       - 'scripts/chromium-runtime.py'
       - 'scripts/build-app.sh'
+      - 'scripts/build-icon.swift'
+      - 'scripts/distribution-metadata.py'
+      - 'scripts/sign-release.py'
+      - 'scripts/package-release.py'
+      - 'scripts/test.sh'
+      - 'scripts/native-tests.py'
+      - 'scripts/validate-packages.py'
+      - 'scripts/smoke-app.sh'
+      - 'scripts/smoke-server.py'
+      - 'scripts/smoke-chromium-restart.py'
       - '.github/workflows/chromium-runtime.yml'
 permissions:
   contents: read
@@ -35,7 +58,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/radius-cef-runtime
-          key: radius-cef154-chrome-2-${{ matrix.arch }}
+          key: radius-cef154-chrome-3-${{ matrix.arch }}
       - name: Build pinned optional Chromium package
         id: chromium-build
         run: python3 scripts/chromium-runtime.py --arch "${{ matrix.arch }}" --work-dir "$RUNNER_TEMP/radius-cef-runtime"
@@ -44,7 +67,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/radius-cef-runtime
-          key: radius-cef154-chrome-2-${{ matrix.arch }}
+          key: radius-cef154-chrome-3-${{ matrix.arch }}
       - name: Test native shell
         run: ./scripts/test.sh
       - name: Build universal Radius application
@@ -102,6 +125,7 @@ jobs:
             dist/screenshots/*.png
             dist/smoke-*.log
             dist/smoke-sample.txt
+            dist/smoke-crashes/*
             dist/native-tests*.log
             dist/native-tests*.txt
             dist/smoke-data/Chromium/engine.log

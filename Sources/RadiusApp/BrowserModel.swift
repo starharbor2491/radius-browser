@@ -6,7 +6,12 @@ import RadiusCore
 
 @MainActor
 final class BrowserModel: ObservableObject {
-    @Published var session: WindowSession { didSet { if !isPrivate && !isClosed { app.updateSession(session) } } }
+    @Published var session: WindowSession {
+        didSet {
+            if app.finalQuitDataFrozen { session = oldValue; return }
+            if !isPrivate && !isClosed { app.updateSession(session) }
+        }
+    }
     @Published private(set) var isClosed = false
     @Published var panel: BrowserPanel? = nil
     @Published var address = ""
@@ -50,7 +55,10 @@ final class BrowserModel: ObservableObject {
     init(app: AppState, isPrivate: Bool) {
         self.app = app; self.isPrivate = isPrivate; session = app.claimSession(privateBrowsing: isPrivate)
         for i in session.tabs.indices where session.tabs[i].engineID == nil { session.tabs[i].engineID = .webkit }
-        if isPrivate { privateDataStore = .nonPersistent() }
+        if isPrivate {
+            privateDataStore = .nonPersistent()
+            ChromiumRuntime.shared.beginPrivateSession(session.id)
+        }
         address = selectedTab.url?.absoluteString ?? ""
         app.registerWindow(self)
     }
@@ -72,7 +80,7 @@ final class BrowserModel: ObservableObject {
         let tab: BrowserEngineTab
         if engine == .chromium {
             do { tab = try ChromiumRuntime.shared.makeTab(profileID: session.profileID, privateSessionID: isPrivate ? session.id : nil, dataDirectory: app.dataDirectory, downloads: downloads) }
-            catch { tab = UnavailableEngineTab(engine: engine, reason: error.localizedDescription) }
+            catch { return UnavailableEngineTab(engine: engine, reason: error.localizedDescription) }
         } else {
             let dataStore = privateDataStore ?? app.webKitDataStore(profileID: session.profileID)
             tab = WebTab(dataStore: dataStore, downloads: downloads, profileID: session.profileID)
@@ -119,7 +127,7 @@ final class BrowserModel: ObservableObject {
             self.selectTab(id)
         }
         tab.onBrowserCommand = { [weak self, weak tab] command in
-            guard let self, !self.isClosed, let tab else { return }
+            guard let self, !self.isClosed, !self.app.finalQuitDataFrozen, let tab else { return }
             if self.session.selectedTabID != id { self.selectTab(id) }
             switch command {
             case "newTab":
@@ -145,7 +153,7 @@ final class BrowserModel: ObservableObject {
     }
     func updatePopupPolicy() { webTabs.values.forEach { $0.updatePopupPolicy() } }
     func navigate(_ input: String) {
-        guard !isClosed else { return }
+        guard !isClosed, !app.finalQuitDataFrozen else { return }
         guard let url = AddressResolver.resolve(input, search: app.library.preferences.search) else {
             app.notice = "Enter a website address or search. Only HTTP and HTTPS addresses are supported."; return
         }
@@ -155,7 +163,7 @@ final class BrowserModel: ObservableObject {
         tab.load(url)
     }
     func showStartPage() {
-        guard !isClosed, let index = session.tabs.firstIndex(where: { $0.id == session.selectedTabID }) else { return }
+        guard !isClosed, !app.finalQuitDataFrozen, let index = session.tabs.firstIndex(where: { $0.id == session.selectedTabID }) else { return }
         // Stop the old document while retaining its engine, website store,
         // back history and any transfers already owned by the adapter.
         activeWebTab.showStartPage()
@@ -163,7 +171,7 @@ final class BrowserModel: ObservableObject {
         address = ""; addressEditing = false
     }
     func newTab(url: URL? = nil, parentID: UUID? = nil, engine: BrowserEngineID? = nil) {
-        guard !isClosed else { return }
+        guard !isClosed, !app.finalQuitDataFrozen else { return }
         if let url, !AddressResolver.isWebURL(url) { app.notice = "This page cannot be reopened in a separate browsing context."; return }
         if let parentID, !session.tabs.contains(where: { $0.id == parentID }) || session.ancestors(of: parentID).count >= 8 {
             app.notice = "Tab trees support up to eight levels. Open this page as a top-level tab instead."; return
@@ -175,7 +183,7 @@ final class BrowserModel: ObservableObject {
         selectTab(tab.id)
     }
     func selectTab(_ id: UUID) {
-        guard session.tabs.contains(where: { $0.id == id }) else { return }
+        guard !app.finalQuitDataFrozen, session.tabs.contains(where: { $0.id == id }) else { return }
         session.selectTab(id); address = selectedTab.url?.absoluteString ?? ""
         // Both views remain mounted in a split. Keep native focus and toolbar context together.
         if session.split != nil, let view = webTabs[id]?.nativeView, let window = view.window {
@@ -184,7 +192,7 @@ final class BrowserModel: ObservableObject {
         }
     }
     func closeTab(_ id: UUID) {
-        guard let index = session.tabs.firstIndex(where: { $0.id == id }) else { return }
+        guard !app.finalQuitDataFrozen, let index = session.tabs.firstIndex(where: { $0.id == id }) else { return }
         let closing = session.tabs[index]
         if let url = closing.url, AddressResolver.isWebURL(url) { closedTabs.append(closing); if closedTabs.count > 20 { closedTabs.removeFirst() } }
         webTabs.removeValue(forKey: id)?.dispose()
@@ -196,7 +204,7 @@ final class BrowserModel: ObservableObject {
         if session.selectedTabID == id { selectTab(otherPane ?? session.tabs[min(index, session.tabs.count - 1)].id) }
     }
     func reopenClosedTab() {
-        guard session.tabs.count < 200, var tab = closedTabs.popLast() else { return }
+        guard !app.finalQuitDataFrozen, session.tabs.count < 200, var tab = closedTabs.popLast() else { return }
         tab.id = UUID(); tab.parentID = nil; tab.collapsed = nil
         if tab.pinned {
             session.tabs.insert(tab, at: session.tabs.firstIndex(where: { !$0.pinned }) ?? session.tabs.endIndex)
@@ -208,7 +216,7 @@ final class BrowserModel: ObservableObject {
         selectTab(session.tabs[(index + offset + session.tabs.count) % session.tabs.count].id)
     }
     func moveTab(_ id: UUID, by offset: Int) {
-        guard let index = session.tabs.firstIndex(where: { $0.id == id }) else { return }
+        guard !app.finalQuitDataFrozen, let index = session.tabs.firstIndex(where: { $0.id == id }) else { return }
         if app.configuration.layout.treeTabs == true {
             let siblings = session.tabs.filter { $0.parentID == session.tabs[index].parentID && $0.pinned == session.tabs[index].pinned }
             guard let sibling = siblings.firstIndex(where: { $0.id == id }), siblings.indices.contains(sibling + offset),
@@ -217,7 +225,7 @@ final class BrowserModel: ObservableObject {
         } else if session.tabs.indices.contains(index + offset), session.tabs[index].pinned == session.tabs[index + offset].pinned { session.tabs.swapAt(index, index + offset) }
     }
     @discardableResult func moveTab(_ id: UUID, before target: UUID) -> Bool {
-        guard id != target, let from = session.tabs.firstIndex(where: { $0.id == id }), let to = session.tabs.firstIndex(where: { $0.id == target }) else { return false }
+        guard !app.finalQuitDataFrozen, id != target, let from = session.tabs.firstIndex(where: { $0.id == id }), let to = session.tabs.firstIndex(where: { $0.id == target }) else { return false }
         guard session.tabs[from].pinned == session.tabs[to].pinned else { return false }
         if app.configuration.layout.treeTabs == true && session.tabs[from].parentID != session.tabs[to].parentID {
             guard session.setParent(id, to: session.tabs[to].parentID) else { return false }
@@ -226,24 +234,26 @@ final class BrowserModel: ObservableObject {
         return true
     }
     func pinTab(_ id: UUID) {
-        guard let index = session.tabs.firstIndex(where: { $0.id == id }) else { return }
+        guard !app.finalQuitDataFrozen, let index = session.tabs.firstIndex(where: { $0.id == id }) else { return }
         session.tabs[index].pinned.toggle()
         if session.tabs[index].pinned { session.tabs[index].parentID = nil }
         session.tabs = session.tabs.filter(\.pinned) + session.tabs.filter { !$0.pinned }
     }
     func synchronizeSplit(force: Bool = false) {
         // A layout preview must not create or persist browsing tabs.
-        guard !isClosed, app.previewConfiguration == nil else { return }
+        guard !isClosed, !app.finalQuitDataFrozen, app.previewConfiguration == nil else { return }
         if app.configuration.layout.split != nil {
             if force { session.splitSuppressed = nil }
             if session.splitSuppressed != true { session.enableSplit(defaultEngine: profile.engineID ?? .webkit) }
         } else { session.split = nil; session.splitSuppressed = nil }
     }
     func beginSplit(_ axis: SplitAxis) {
+        guard !app.finalQuitDataFrozen else { return }
         app.library.preferences.configuration.layout.split = axis
         synchronizeSplit(force: true)
     }
     func endSplit() {
+        guard !app.finalQuitDataFrozen else { return }
         session.split = nil; session.splitSuppressed = true
     }
     func selectOtherPane() {
@@ -259,7 +269,7 @@ final class BrowserModel: ObservableObject {
         }
     }
     func toggleBranch(_ id: UUID) {
-        guard let index = session.tabs.firstIndex(where: { $0.id == id }) else { return }
+        guard !app.finalQuitDataFrozen, let index = session.tabs.firstIndex(where: { $0.id == id }) else { return }
         session.tabs[index].collapsed = session.tabs[index].collapsed != true
         if session.tabs[index].collapsed == true && session.ancestors(of: session.selectedTabID).contains(id) { selectTab(id) }
     }
@@ -273,9 +283,10 @@ final class BrowserModel: ObservableObject {
         changeProfile(id)
     }
     func changeProfile(_ id: UUID) {
-        guard !isClosed, app.library.profiles.contains(where: { $0.id == id }) else { return }
+        guard !isClosed, !app.finalQuitDataFrozen, app.library.profiles.contains(where: { $0.id == id }) else { return }
         guard app.deletingProfileIDs.isDisjoint(with: [id, session.profileID]) else { app.notice = "Wait for profile deletion to finish before switching profiles."; return }
         webTabs.values.forEach { $0.dispose() }; webTabs.removeAll(); closedTabs.removeAll()
+        if isPrivate { ChromiumRuntime.shared.releasePrivateProfile(session.profileID, sessionID: session.id) }
         session.profileID = id; panel = nil
         for i in session.tabs.indices {
             if let url = session.tabs[i].url, !AddressResolver.isWebURL(url) {
@@ -288,6 +299,7 @@ final class BrowserModel: ObservableObject {
     func resetAfterProfileDeletion(replacementID: UUID) {
         guard !isClosed, let replacement = app.library.profiles.first(where: { $0.id == replacementID }) else { return }
         disposeEngineTabs(); closedTabs.removeAll(); panel = nil
+        if isPrivate { ChromiumRuntime.shared.releasePrivateProfile(session.profileID, sessionID: session.id) }
         session = app.library.sessions.first(where: { $0.id == session.id }) ??
             WindowSession(id: session.id, profileID: replacementID, tabs: [BrowserTab(engineID: replacement.engineID ?? .webkit)])
         address = ""; addressEditing = false
@@ -310,7 +322,7 @@ final class BrowserModel: ObservableObject {
         changeEngine(id, to: engine)
     }
     func changeEngine(_ id: UUID, to engine: BrowserEngineID) {
-        guard !isClosed, let index = session.tabs.firstIndex(where: { $0.id == id }) else { return }
+        guard !isClosed, !app.finalQuitDataFrozen, let index = session.tabs.firstIndex(where: { $0.id == id }) else { return }
         if let url = session.tabs[index].url, !AddressResolver.isWebURL(url) { return }
         webTabs.removeValue(forKey: id)?.dispose()
         session.tabs[index].engineID = engine
@@ -331,6 +343,7 @@ final class BrowserModel: ObservableObject {
         guard !isClosed else { return }
         isClosed = true
         disposeEngineTabs()
+        if isPrivate { ChromiumRuntime.shared.closePrivateSession(session.id) }
         downloads.cancelAll()
         if !isPrivate { app.closeSession(session.id) }
         privateDataStore = nil; closedTabs.removeAll(); app.unregisterWindow(session.id)

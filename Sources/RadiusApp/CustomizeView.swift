@@ -9,7 +9,7 @@ struct CustomizeView: View {
     @State private var draft = Configuration()
     @State private var undoStack: [(configuration: Configuration, requirements: [String])] = []
     @State private var selection = 0
-    @State private var preview = false
+    @State private var previewID = UUID()
     @State private var setupName = "My setup"
     @State private var initialized = false
     @State private var requirements: [String] = []
@@ -25,8 +25,11 @@ struct CustomizeView: View {
                     Text("Preview").font(.headline)
                     LayoutPreview(configuration: draft).frame(height: 285)
                     Text(designDescription).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    Toggle("Preview in browser windows", isOn: $preview)
-                    Text("Appearance changes leave tab and panel placement as you set them. Website content is unaffected.").font(.caption).foregroundStyle(.secondary)
+                    Toggle("Preview in browser windows", isOn: Binding(get: { app.previewOwnerID == previewID }, set: { enabled in
+                        if enabled { app.beginConfigurationPreview(draft, owner: previewID) }
+                        else { app.endConfigurationPreview(owner: previewID) }
+                    }))
+                    Text("Appearance and placement changes apply to Radius controls. Chromium keeps its own address bar above each page.").font(.caption).foregroundStyle(.secondary)
                     Spacer()
                 }.frame(maxWidth: .infinity)
             }
@@ -37,14 +40,13 @@ struct CustomizeView: View {
                 }.disabled(undoStack.isEmpty)
                 Button("Restore defaults") { change { $0 = Configuration() } }
                 Spacer()
-                Button("Cancel") { app.previewConfiguration = nil; dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Cancel") { app.endConfigurationPreview(owner: previewID); dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Apply") { app.perform { if try app.applySetup(draft, requirements: requirements) { dismiss() } } }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
             }
         }.padding(28).frame(width: 820, height: 650)
         .onAppear { if !initialized { draft = app.library.preferences.configuration; requirements = app.configurationModuleRequirements; initialized = true } }
-        .onChange(of: draft) { _, value in if preview { app.previewConfiguration = value } }
-        .onChange(of: preview) { _, enabled in app.previewConfiguration = enabled ? draft : nil }
-        .onDisappear { app.previewConfiguration = nil }
+        .onChange(of: draft) { _, value in app.updateConfigurationPreview(value, owner: previewID) }
+        .onDisappear { app.endConfigurationPreview(owner: previewID) }
     }
     private var appearance: some View {
         VStack(alignment: .leading, spacing: 22) {
@@ -151,12 +153,9 @@ struct CustomizeView: View {
         Binding(get: { draft[keyPath: path] }, set: { value in change { $0[keyPath: path] = value } })
     }
     private func change(_ mutation: (inout Configuration) -> Void) {
+        let previous = draft
         undoStack.append((draft, requirements)); if undoStack.count > 50 { undoStack.removeFirst() }; mutation(&draft)
-        if draft.layout.tabs == .top || draft.layout.tabs == .bottom { draft.layout.treeTabs = false }
-        if requirements.contains("org.radius.tree-tabs") || requirements.contains("org.radius.standard-tabs") {
-            requirements.removeAll { $0 == "org.radius.tree-tabs" || $0 == "org.radius.standard-tabs" }
-            requirements.append(draft.layout.treeTabs == true ? "org.radius.tree-tabs" : "org.radius.standard-tabs")
-        }
+        app.reconcileCustomizedTabRequirements(previous: previous, draft: &draft, requirements: &requirements)
     }
     private func field<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 8) { Text(label).font(.callout.weight(.medium)); content() }
@@ -178,8 +177,7 @@ struct CustomizeView: View {
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.json]
         guard panel.runModal() == .OK, let url = panel.url else { return }
         app.perform {
-            guard (try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) <= 64 * 1024 else { throw ValidationError("Setup packs must be smaller than 64 KB.") }
-            let pack = try SetupPack.decode(Data(contentsOf: url))
+            let pack = try SetupPack.decode(BoundedImportFile.read(url, maximumBytes: 64 * 1024, kind: .setup))
             let required = pack.requiredModuleIDs ?? []
             let available = required.filter { id in app.catalog.contains(where: { $0.id == id }) || app.installedModules.contains(where: { $0.id == id }) }
             let missing = required.filter { !available.contains($0) }

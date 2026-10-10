@@ -5,11 +5,54 @@ import RadiusCore
 /// Executed only by the packaged application's isolated native smoke test.
 @MainActor
 enum ChromiumAcceptance {
-    static func verifyExtensionSheet(ownerWindow: NSWindow) async throws {
+    static func verifyExtensionSheet(browser: BrowserModel, ownerWindow: NSWindow) async throws {
+        guard ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_DATA"] != nil,
+              CommandLine.arguments.contains("--smoke-test") else {
+            throw ValidationError("Extension sheet acceptance requires the isolated smoke-test launch.")
+        }
+        let original = try await waitForExtensionSheet(ownerWindow: ownerWindow, profileID: browser.session.profileID)
+        let profile = Profile(name: "Extension profile acceptance")
+        browser.app.library.profiles.append(profile)
+        defer { browser.app.library.profiles.removeAll { $0.id == profile.id } }
+        func picker(in view: NSView) -> NSPopUpButton? {
+            if let control = view as? NSPopUpButton, control.itemTitles.contains(profile.name) { return control }
+            for child in view.subviews { if let control = picker(in: child) { return control } }
+            return nil
+        }
+        let pickerDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        var profilePicker: NSPopUpButton?
+        while profilePicker == nil {
+            if let root = ownerWindow.attachedSheet?.contentView { profilePicker = picker(in: root) }
+            guard ContinuousClock.now < pickerDeadline else { throw ValidationError("The extension sheet's native profile selector was not available.") }
+            if profilePicker == nil { try await Task.sleep(for: .milliseconds(100)) }
+        }
+        guard let profilePicker, let action = profilePicker.action else { throw ValidationError("The extension profile selector has no native action.") }
+        profilePicker.selectItem(withTitle: profile.name)
+        guard NSApp.sendAction(action, to: profilePicker.target, from: profilePicker) else {
+            throw ValidationError("The extension profile selector did not handle its native selection action.")
+        }
+        let replacement = try await waitForExtensionSheet(ownerWindow: ownerWindow, profileID: profile.id)
+        guard replacement !== original, original.nativeView.window == nil else {
+            throw ValidationError("Switching extension profiles reused the disposed manager's native host.")
+        }
+        try await waitForManager(replacement)
+        _ = try? await replacement.request("Page.close", parameters: [:], timeout: .seconds(5))
+        let closeDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while ownerWindow.attachedSheet != nil || browser.sheet != nil {
+            guard ContinuousClock.now < closeDeadline else { throw ValidationError("Closing the extension manager from Chrome left an empty native sheet open.") }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        // Keep the final manager alive so normal app Quit still proves that
+        // runtime-owned sheet pages are included in shutdown ownership.
+        browser.sheet = .extensions
+        _ = try await waitForExtensionSheet(ownerWindow: ownerWindow, profileID: browser.session.profileID)
+        print("Radius Chromium acceptance: native extension profile switching, engine close dismissal, and reopened sheet geometry passed")
+    }
+    private static func waitForExtensionSheet(ownerWindow: NSWindow, profileID: UUID) async throws -> ChromiumTab {
         let deadline = ContinuousClock.now.advanced(by: .seconds(15))
         while ContinuousClock.now < deadline {
             if let tab = ChromiumRuntime.shared.extensionManagementTabs.first(where: {
-                $0.nativeView.window?.sheetParent === ownerWindow
+                $0.profileID == profileID && $0.nativeView.window?.sheetParent === ownerWindow
             }), !tab.loading, tab.chromeStyle,
                let sheet = tab.nativeView.window, let chrome = tab.chromeWindow,
                chrome.parent === sheet, chrome.isVisible {
@@ -18,8 +61,7 @@ enum ChromiumAcceptance {
                       abs(chrome.frame.width - expected.width) < 2, abs(chrome.frame.height - expected.height) < 2 else {
                     throw ValidationError("The extension manager's Chrome child is misaligned inside its native sheet.")
                 }
-                print("Radius Chromium acceptance: native extension sheet visibility and child geometry passed")
-                return
+                return tab
             }
             try await Task.sleep(for: .milliseconds(100))
         }
@@ -66,6 +108,8 @@ enum ChromiumAcceptance {
         // browser command callback or grant system accessibility permission.
         try key("l", code: 37, modifiers: .command, window: chrome)
         try await Task.sleep(for: .milliseconds(150))
+        let focusedState = try await tab.request("Radius.chromeHostState", parameters: [:])
+        print("Radius Chromium shortcut state after Cmd-L: \(String(decoding: focusedState, as: UTF8.self)), responder=\(String(describing: chrome.firstResponder))")
         components.fragment = "radius-native-shortcut"
         guard let target = components.url else { throw ValidationError("The shortcut probe address is invalid.") }
         for character in target.absoluteString { try key(String(character), code: 0, window: chrome) }
@@ -107,6 +151,21 @@ enum ChromiumAcceptance {
             try await Task.sleep(for: .milliseconds(100))
         }
         print("Radius Chromium acceptance: Home preserved its browser and Back/Forward restored the previous document and native start page")
+        browser.showStartPage()
+        let externalHomeDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while tab.loading {
+            guard ContinuousClock.now < externalHomeDeadline else { throw ValidationError("Chromium did not finish preparing its native Home navigation probe.") }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        // Exercise the engine's navigation path, as extension tabs.update does,
+        // without clearing the adapter's pending Home state through load().
+        _ = try await tab.request("Page.navigate", parameters: ["url": target.absoluteString])
+        let externalDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while tab.url != target || tab.loading || !tab.hasNativeNavigationChrome || !browser.hasPage {
+            guard ContinuousClock.now < externalDeadline else { throw ValidationError("An engine-originated Chromium navigation remained hidden behind Radius's start page.") }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        print("Radius Chromium acceptance: engine-originated navigation replaced the native Home state")
         chrome.makeKeyAndOrderFront(nil); tab.focus()
         let beforeNew = Set(browser.session.tabs.map(\.id))
         guard let profileIndex = browser.app.library.profiles.firstIndex(where: { $0.id == browser.session.profileID }) else {
@@ -164,7 +223,9 @@ enum ChromiumAcceptance {
                 characters: characters, charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code) else {
                 throw ValidationError("AppKit could not create the owned-window keyboard event.")
             }
-            NSApp.sendEvent(event)
+            // Enter AppKit's own event queue so local monitors and key
+            // equivalents run through the same dispatch path as user input.
+            NSApp.postEvent(event, atStart: false)
         }
     }
     private static func verifyChromeGeometry(_ tab: ChromiumTab, ownerWindow: NSWindow) async throws {
@@ -240,18 +301,45 @@ enum ChromiumAcceptance {
         guard manager.chromeStyle, manager.chromeWindow?.parent === managerWindow else {
             throw ValidationError("Extension management escaped its native Radius window.")
         }
-        try await verifyFixture(manager, app: app)
-        if ProcessInfo.processInfo.environment["RADIUS_CHROMIUM_WEBSTORE_TEST"] == "1" {
-            try await verifyWebStore(manager)
-            let version = try await evaluate(manager, "String((await chrome.developerPrivate.getExtensionsInfo({includeDisabled:true,includeTerminated:true})).find(e => e.id === 'ddkjiahejlhfcafbddmgiahcphecmpfh')?.version)")
-            let receipt: [String: Any] = ["profileID": manager.profileID.uuidString, "version": version,
-                                          "processID": ProcessInfo.processInfo.processIdentifier]
-            try JSONSerialization.data(withJSONObject: receipt).write(
-                to: app.dataDirectory.appendingPathComponent("Chromium/ExtensionAcceptance/webstore-restart.json"), options: .atomic)
+        var failures: [String] = []
+        do { try await verifyFixture(manager, app: app) }
+        catch { failures.append("Local MV3 fixture: " + error.localizedDescription) }
+        manager.dispose(); managerWindow.close()
+        let closeDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while manager.chromeWindow != nil, ContinuousClock.now < closeDeadline {
+            try await Task.sleep(for: .milliseconds(100))
         }
+        if ProcessInfo.processInfo.environment["RADIUS_CHROMIUM_WEBSTORE_TEST"] == "1" {
+            do {
+                // Use a separate profile/window so a local fixture or its own
+                // file chooser cannot obscure independent Store evidence.
+                let store = try ChromiumRuntime.shared.makeTab(profileID: UUID(), privateSessionID: nil, dataDirectory: app.dataDirectory)
+                let storeWindow = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 1000, height: 740),
+                                           styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+                storeWindow.isReleasedWhenClosed = false; storeWindow.title = "Radius Web Store acceptance"
+                storeWindow.contentView = store.nativeView; storeWindow.makeKeyAndOrderFront(nil)
+                defer { store.dispose(); storeWindow.close() }
+                store.showExtensions(); try await waitForManager(store)
+                try await verifyWebStore(store)
+                let version = try await evaluate(store, "String((await chrome.developerPrivate.getExtensionsInfo({includeDisabled:true,includeTerminated:true})).find(e => e.id === 'ddkjiahejlhfcafbddmgiahcphecmpfh')?.version)")
+                let receipt: [String: Any] = ["profileID": store.profileID.uuidString, "version": version,
+                                              "processID": ProcessInfo.processInfo.processIdentifier]
+                try JSONSerialization.data(withJSONObject: receipt).write(
+                    to: app.dataDirectory.appendingPathComponent("Chromium/ExtensionAcceptance/webstore-restart.json"), options: .atomic)
+            } catch { failures.append("Chrome Web Store: " + error.localizedDescription) }
+        }
+        if !failures.isEmpty { throw ValidationError(failures.joined(separator: "\n")) }
         print("Radius Chromium acceptance: Chrome Views, native child geometry/focus, and extension manager passed")
     }
     static func verifySessionCookieAfterLastBrowserCloses(app: AppState) async throws {
+        var failures: [String] = []
+        for isPrivate in [false, true] {
+            do { try await verifySessionCookieAfterLastBrowserCloses(app: app, isPrivate: isPrivate) }
+            catch { failures.append((isPrivate ? "Private window: " : "Regular profile: ") + error.localizedDescription) }
+        }
+        if !failures.isEmpty { throw ValidationError(failures.joined(separator: "\n")) }
+    }
+    private static func verifySessionCookieAfterLastBrowserCloses(app: AppState, isPrivate: Bool) async throws {
         guard ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_DATA"] != nil,
               CommandLine.arguments.contains("--smoke-test"),
               let address = ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_URL"],
@@ -259,7 +347,10 @@ enum ChromiumAcceptance {
             throw ValidationError("The Chromium session-cookie probe requires the loopback fixture.")
         }
         let profile = UUID()
-        let first = try ChromiumRuntime.shared.makeTab(profileID: profile, privateSessionID: nil, dataDirectory: app.dataDirectory)
+        let privateSessionID = isPrivate ? UUID() : nil
+        if let privateSessionID { ChromiumRuntime.shared.beginPrivateSession(privateSessionID) }
+        defer { if let privateSessionID { ChromiumRuntime.shared.closePrivateSession(privateSessionID) } }
+        let first = try ChromiumRuntime.shared.makeTab(profileID: profile, privateSessionID: privateSessionID, dataDirectory: app.dataDirectory)
         let window = NSWindow(contentRect: NSRect(x: 120, y: 100, width: 900, height: 680),
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
@@ -282,14 +373,38 @@ enum ChromiumAcceptance {
             guard ContinuousClock.now < deadline else { throw ValidationError("The last Chromium profile browser did not acknowledge closing.") }
             try await Task.sleep(for: .milliseconds(50))
         }
-        let reopened = try ChromiumRuntime.shared.makeTab(profileID: profile, privateSessionID: nil, dataDirectory: app.dataDirectory)
+        guard window.isVisible else { throw ValidationError("Closing a Chromium browser also closed its native Radius window.") }
+        let reopened = try ChromiumRuntime.shared.makeTab(profileID: profile, privateSessionID: privateSessionID, dataDirectory: app.dataDirectory)
         defer { reopened.dispose() }
         window.contentView = reopened.nativeView
         reopened.load(url); try await waitForLoad(reopened, host: "127.0.0.1")
         guard try await evaluate(reopened, "document.cookie").contains(cookie + "=present") else {
-            throw ValidationError("Closing the last Chromium browser signed out its regular profile while Radius was still running.")
+            throw ValidationError("Closing the last Chromium browser signed out its website context while its Radius window remained open.")
         }
-        print("Radius Chromium acceptance: expiry-free profile cookie survived its last browser closing")
+        print("Radius Chromium acceptance: expiry-free \(isPrivate ? "private-window" : "regular-profile") cookie survived its last browser closing")
+        if let privateSessionID {
+            ChromiumRuntime.shared.closePrivateSession(privateSessionID)
+            window.close()
+            let releaseDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+            while reopened.chromeWindow != nil {
+                guard ContinuousClock.now < releaseDeadline else { throw ValidationError("Closing the private window did not finish closing its Chromium browsers.") }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            // Deliberately reuse the diagnostic identity to prove the released
+            // context itself is gone, rather than only testing a different key.
+            ChromiumRuntime.shared.beginPrivateSession(privateSessionID)
+            let fresh = try ChromiumRuntime.shared.makeTab(profileID: profile, privateSessionID: privateSessionID, dataDirectory: app.dataDirectory)
+            let freshWindow = NSWindow(contentRect: NSRect(x: 120, y: 100, width: 900, height: 680),
+                                       styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+            freshWindow.isReleasedWhenClosed = false
+            freshWindow.contentView = fresh.nativeView; freshWindow.makeKeyAndOrderFront(nil)
+            defer { fresh.dispose(); freshWindow.close() }
+            fresh.load(url); try await waitForLoad(fresh, host: "127.0.0.1")
+            guard try await evaluate(fresh, "document.cookie").contains(cookie + "=present") == false else {
+                throw ValidationError("A private context kept its sign-in after its native window lifetime ended.")
+            }
+            print("Radius Chromium acceptance: private-window lifetime release erased its session cookie")
+        }
     }
     static func verifyStoreRestart(app: AppState) async throws {
         guard ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_DATA"] != nil,
@@ -364,8 +479,7 @@ enum ChromiumAcceptance {
         if FileManager.default.fileExists(atPath: installedFolder.path) { try FileManager.default.removeItem(at: installedFolder) }
         try FileManager.default.copyItem(at: URL(fileURLWithPath: sourcePath, isDirectory: true), to: installedFolder)
         _ = try await evaluate(manager, "String(await chrome.developerPrivate.updateProfileConfiguration({inDeveloperMode:true}))")
-        _ = try await manager.request("Radius.chooseFixtureDirectory", parameters: [:])
-        _ = try await evaluate(manager, "String(await chrome.developerPrivate.loadUnpacked({failQuietly:true}))")
+        try await ChromiumFixtureLoader.load(manager: manager, dataDirectory: app.dataDirectory)
         let enabled = try await evaluate(manager, "String((await chrome.developerPrivate.getExtensionsInfo({includeDisabled:true,includeTerminated:true})).find(e => e.id === '\(id)')?.state)")
         guard enabled == "ENABLED" else { throw ValidationError("The native manager did not load the MV3 fixture.") }
         _ = try await evaluate(manager, "String(await chrome.developerPrivate.updateExtensionConfiguration({extensionId:'\(id)',pinnedToToolbar:true}))")
@@ -451,7 +565,10 @@ enum ChromiumAcceptance {
             throw ValidationError("Extension settings/storage did not survive document reload.")
         }
         // Private Radius contexts start without regular-profile extensions.
-        let privatePage = try ChromiumRuntime.shared.makeTab(profileID: manager.profileID, privateSessionID: UUID(), dataDirectory: app.dataDirectory)
+        let fixturePrivateSession = UUID()
+        ChromiumRuntime.shared.beginPrivateSession(fixturePrivateSession)
+        defer { ChromiumRuntime.shared.closePrivateSession(fixturePrivateSession) }
+        let privatePage = try ChromiumRuntime.shared.makeTab(profileID: manager.profileID, privateSessionID: fixturePrivateSession, dataDirectory: app.dataDirectory)
         defer { privatePage.dispose() }
         privatePage.load(fixtureURL)
         try await waitForLoad(privatePage, host: "127.0.0.1")
@@ -469,6 +586,25 @@ enum ChromiumAcceptance {
         page.reload()
         _ = try await waitForFixture(page, key: "radiusFixtureVersion", value: "1.0.1")
         _ = try await waitForFixture(page, key: "radiusFixtureTheme", value: "dark")
+        let beforeDisable = try await fixtureState(page)
+        let beforeDisableCount = Int(beforeDisable["radiusFixtureCount"] ?? "") ?? 0
+        _ = try await evaluate(manager, "String(await chrome.management.setEnabled('\(id)',false))")
+        guard try await evaluate(manager, "String((await chrome.developerPrivate.getExtensionsInfo({includeDisabled:true,includeTerminated:true})).find(e => e.id === '\(id)')?.state)") == "DISABLED" else {
+            throw ValidationError("The extension manager did not disable the fixture.")
+        }
+        page.reload(); try await waitForLoad(page, host: "127.0.0.1")
+        try await Task.sleep(for: .milliseconds(300))
+        guard try await evaluate(page, "String(document.documentElement.dataset.radiusFixtureContent)") == "undefined" else {
+            throw ValidationError("A disabled extension still injected into a new document.")
+        }
+        _ = try await evaluate(manager, "String(await chrome.management.setEnabled('\(id)',true))")
+        page.reload()
+        let restored = try await waitForFixture(page, key: "radiusFixtureWorker", value: "ready")
+        guard restored["radiusFixtureTheme"] == "dark", restored["radiusFixtureVersion"] == "1.0.1",
+              (Int(restored["radiusFixtureCount"] ?? "") ?? 0) > beforeDisableCount else {
+            throw ValidationError("Re-enabling the fixture did not restore its worker/content or retained settings/storage.")
+        }
+        print("Radius Chromium acceptance: disabling stopped injection and re-enabling restored worker/content with retained storage")
         // This validates reload/update behavior for a local fixture. Signed Web
         // Store update delivery and whole-process restart are separate checks.
         _ = try await evaluate(manager, "String(await chrome.management.uninstall('\(id)',{showConfirmDialog:false}))")

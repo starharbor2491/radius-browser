@@ -73,7 +73,11 @@ final class WebTab: BrowserEngineTab, WKNavigationDelegate, WKUIDelegate {
         pageSnapshots.values.forEach { $0.cancel() }; pageSnapshots.removeAll()
         errorMessage = nil; loading = true; refresh(false)
     }
-    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) { refresh(false) }
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        // Native history gestures also leave Home without using our commands.
+        if webView.url != startPageURL { showingStartPage = false }
+        refresh(false)
+    }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { loading = false; refresh(true) }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { failed(error) }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { failed(error) }

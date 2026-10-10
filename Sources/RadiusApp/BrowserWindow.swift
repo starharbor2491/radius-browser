@@ -15,20 +15,25 @@ struct BrowserWindowRoot: View {
             else { ProgressView("Opening Radius…").frame(maxWidth: .infinity, maxHeight: .infinity) }
         }
         .frame(minWidth: 760, minHeight: 520)
+        .disabled(app.finalQuitDataFrozen)
         .task {
             if !app.ready { await app.load() }
             if app.ready && (model == nil || model?.isClosed == true) { createModel() }
         }
         .onOpenURL { url in
-            guard AddressResolver.isWebURL(url) else { return }
+            guard !app.finalQuitDataFrozen, AddressResolver.isWebURL(url) else { return }
             if let model, !model.isClosed { model.newTab(url: url) }
             else { pendingURLs.append(url); if app.ready { createModel() } }
         }
         .onChange(of: app.ready) { _, ready in
             if ready && model == nil { createModel() }
         }
+        .onChange(of: app.finalQuitDataFrozen) { _, frozen in
+            if !frozen && app.ready && (model == nil || model?.isClosed == true) { createModel() }
+        }
     }
     private func createModel() {
+        guard !app.finalQuitDataFrozen else { return }
         let created = BrowserModel(app: app, isPrivate: isPrivate)
         model = created
         for url in pendingURLs { created.newTab(url: url) }

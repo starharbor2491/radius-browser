@@ -414,6 +414,156 @@ struct ProfilesIntegrationTests {
         #expect(app.terminating)
     }
 
+    @Test func finalQuitFreezeProtectsTheSnapshotAndCancellationResumesRealAutosave() async throws {
+        let (app, directory) = try await fixture()
+        let originalProfile = app.library.profiles[0]
+        let otherProfile = Profile(name: "Other profile")
+        app.library.profiles.append(otherProfile)
+        let firstTab = BrowserTab(title: "First", pinned: true, engineID: .webkit)
+        let secondTab = BrowserTab(title: "Second", engineID: .webkit)
+        app.library.sessions = [WindowSession(profileID: originalProfile.id, tabs: [firstTab, secondTab])]
+        let browser = BrowserModel(app: app, isPrivate: false)
+        defer {
+            app.ready = false; app.unfreezeQuitData(); app.terminating = false
+            browser.closeWindow(); try? FileManager.default.removeItem(at: directory)
+        }
+        browser.closedTabs = [BrowserTab(title: "Closed", url: URL(string: "https://quit.fixture.invalid/closed"))]
+        let deletedID = UUID()
+        app.library.pendingProfileDeletions = [deletedID]
+        app.library.pendingWebsiteDataClears = [originalProfile.id]
+        try #require(await app.flush())
+        let baseline = app.library, session = browser.session, closedTabs = browser.closedTabs
+        let blocked = Note(profileID: originalProfile.id, title: "Blocked", text: "Never save this frozen edit")
+
+        app.terminating = true; app.freezeQuitData()
+        app.library.notes.append(blocked)
+        app.library.preferences.configuration.theme.accent = .orange
+        browser.session.tabs[0].title = "Blocked title"
+        browser.newTab()
+        browser.reopenClosedTab()
+        browser.closeTab(firstTab.id)
+        browser.pinTab(firstTab.id)
+        browser.changeProfile(otherProfile.id)
+        browser.changeEngine(firstTab.id, to: .chromium)
+        browser.beginSplit(.sideBySide)
+        browser.navigate("https://quit.fixture.invalid/blocked")
+        #expect(app.finalQuitDataFrozen)
+        #expect(app.library == baseline)
+        #expect(browser.session == session)
+        #expect(browser.closedTabs == closedTabs)
+
+        // Accepted cleanup may clear its durable retry records synchronously;
+        // returning from that closure must immediately restore the freeze.
+        app.updateQuitCleanup { library in
+            library.pendingProfileDeletions?.removeAll()
+            library.pendingWebsiteDataClears?.removeAll()
+        }
+        app.library.notes.append(blocked)
+        #expect(app.library.notes == baseline.notes)
+        try #require(await app.flushForTermination())
+        let database = try LibraryDatabase(url: directory.appendingPathComponent("library.sqlite"))
+        let cleaned = try await database.load()
+        #expect(cleaned.pendingProfileDeletions?.isEmpty != false)
+        #expect(cleaned.pendingWebsiteDataClears?.isEmpty != false)
+        #expect(cleaned.notes == baseline.notes)
+        #expect(cleaned.sessions == baseline.sessions)
+        #expect(cleaned.profiles == baseline.profiles)
+
+        app.unfreezeQuitData(); app.terminating = false
+        let resumed = Note(profileID: originalProfile.id, title: "After cancelled quit", text: "Autosave must resume")
+        app.library.notes.append(resumed)
+        browser.newTab()
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        var persisted = try await database.load()
+        while (!persisted.notes.contains(where: { $0.id == resumed.id }) || persisted.sessions != app.library.sessions), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+            persisted = try await database.load()
+        }
+        #expect(persisted.notes == baseline.notes + [resumed])
+        #expect(persisted.sessions == app.library.sessions)
+        #expect(browser.session.tabs.count == session.tabs.count + 1)
+        #expect(persisted.profiles == baseline.profiles)
+    }
+
+    @Test func simultaneousStartupRecoveryKeepsOneBackupAndWritesToTheNewDatabase() async throws {
+        let directory = temporaryDirectory()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let originalBytes = Data("A corrupt database that recovery must preserve".utf8)
+        try originalBytes.write(to: directory.appendingPathComponent("library.sqlite"))
+        let app = AppState(directory: directory)
+        defer { app.ready = false; try? FileManager.default.removeItem(at: directory) }
+        await app.load()
+        try #require(!app.ready && app.startupError != nil)
+
+        // Separate startup-error windows can request recovery at the same time.
+        // The second request must never move the first request's open database.
+        let first = Task { @MainActor in await app.resetLibrary() }
+        let second = Task { @MainActor in await app.resetLibrary() }
+        await first.value; await second.value
+        try #require(app.ready && app.startupError == nil)
+        let backups = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).filter { $0.lastPathComponent.hasPrefix("Recovery-") }
+        let backup = try #require(backups.count == 1 ? backups.first : nil)
+        #expect(try Data(contentsOf: backup.appendingPathComponent("library.sqlite")) == originalBytes)
+        let saved = Note(profileID: app.library.profiles[0].id, title: "Recovered", text: "Write to the active data directory")
+        app.library.notes.append(saved)
+        try #require(await app.flush())
+        let reopened = try LibraryDatabase(url: directory.appendingPathComponent("library.sqlite"))
+        #expect(try await reopened.load().notes == [saved])
+        #expect(try Data(contentsOf: backup.appendingPathComponent("library.sqlite")) == originalBytes)
+    }
+
+    @Test func overlappingWebsiteClearRequestsRetryWithoutLosingExistingQueuesOrUnrelatedEdits() async throws {
+        let (app, directory) = try await fixture()
+        defer { app.ready = false; try? FileManager.default.removeItem(at: directory) }
+        let existing = app.library.profiles[0]
+        let firstProfile = Profile(name: "First request"), secondProfile = Profile(name: "Second request")
+        app.library.profiles.append(contentsOf: [firstProfile, secondProfile])
+        try await app.requestWebsiteDataClear(existing.id)
+        var firstSave: ProfileCallbackWait<Bool>?
+        let first = Task { @MainActor in
+            try await app.requestWebsiteDataClear(firstProfile.id, persist: {
+                (try? await ProfileCallbackWait<Bool>.wait("the first website-clear save") { request in firstSave = request }) ?? false
+            })
+        }
+        defer { firstSave?.finish(.success(false)); first.cancel() }
+        let deadline = ContinuousClock().now.advanced(by: .seconds(5))
+        while firstSave == nil && ContinuousClock().now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        let heldSave = try #require(firstSave)
+        #expect(Set(app.library.pendingWebsiteDataClears ?? []) == [existing.id, firstProfile.id])
+        for id in [secondProfile.id, firstProfile.id] {
+            var rejected = false
+            do { try await app.requestWebsiteDataClear(id) }
+            catch { rejected = true }
+            #expect(rejected, "Overlapping and duplicate requests must explicitly retry instead of reporting unsaved success.")
+        }
+        var deletionRejected = false
+        do { try await app.deleteProfile(firstProfile.id, replacingWith: existing.id) }
+        catch { deletionRejected = true }
+        #expect(deletionRejected)
+        let edit = Note(profileID: secondProfile.id, title: "Concurrent edit", text: "Keep this when the first save fails")
+        app.library.notes.append(edit)
+        heldSave.finish(.success(false))
+        var firstFailed = false
+        do { try await first.value }
+        catch { firstFailed = true }
+        #expect(firstFailed)
+        #expect(!app.savingWebsiteDataClearRequest)
+        #expect(app.library.pendingWebsiteDataClears == [existing.id])
+        #expect(app.library.notes == [edit])
+        #expect(app.library.profiles.contains { $0.id == firstProfile.id })
+
+        // Retrying invokes the real database writer. Repeating a successful
+        // profile request must preserve the other durable requests as well.
+        try await app.requestWebsiteDataClear(secondProfile.id)
+        try await app.requestWebsiteDataClear(firstProfile.id)
+        try await app.requestWebsiteDataClear(secondProfile.id)
+        let database = try LibraryDatabase(url: directory.appendingPathComponent("library.sqlite"))
+        let persisted = try await database.load()
+        #expect(Set(persisted.pendingWebsiteDataClears ?? []) == [existing.id, firstProfile.id, secondProfile.id])
+        #expect(persisted.notes == [edit])
+        #expect(persisted.profiles == app.library.profiles)
+    }
+
     private func fixture() async throws -> (AppState, URL) {
         _ = NSApplication.shared
         let directory = temporaryDirectory(), app = AppState(directory: directory)

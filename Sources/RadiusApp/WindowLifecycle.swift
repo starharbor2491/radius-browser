@@ -9,6 +9,7 @@ final class WindowDelegateProxy: NSObject, NSWindowDelegate {
     let model: BrowserModel
     init(original: (any NSWindowDelegate)?, model: BrowserModel) { self.original = original; self.model = model }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard !model.app.finalQuitDataFrozen else { return false }
         if model.downloads.hasActive && !model.app.terminating {
             let alert = NSAlert(); alert.messageText = "Cancel downloads and close this window?"
             alert.informativeText = "This window has active downloads. Their temporary files will be removed."

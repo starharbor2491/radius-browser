@@ -6,13 +6,19 @@ import RadiusCore
 
 @MainActor
 final class AppState: ObservableObject {
-    @Published var library = LibraryState() { didSet { if ready { scheduleSave() } } }
+    @Published var library = LibraryState() {
+        didSet {
+            if finalQuitDataFrozen && !updatingQuitCleanup { library = oldValue; return }
+            if ready { scheduleSave() }
+        }
+    }
     @Published var ready = false
     @Published var startupError: String?
     @Published var notice: String?
     @Published var installedModules: [InstalledModule] = [] { didSet { resourceWorkerGeneration = UUID(); synchronizeModuleContributions(previous: oldValue) } }
     @Published private(set) var resourceWorkerGeneration = UUID()
-    @Published var previewConfiguration: Configuration?
+    @Published var previewConfiguration: Configuration? { didSet { if previewConfiguration == nil { previewOwnerID = nil } } }
+    @Published private(set) var previewOwnerID: UUID?
     @Published var deletingProfileIDs = Set<UUID>()
     @Published var profilesAwaitingWebsiteDataRemoval = Set<UUID>()
     let dataDirectory: URL
@@ -28,14 +34,29 @@ final class AppState: ObservableObject {
     private var saveTask: Task<Void, Never>?
     private var revision: UInt64 = 0
     private var libraryChangedDuringTermination = false
+    @Published private(set) var finalQuitDataFrozen = false
+    private var updatingQuitCleanup = false
     private var claimedSessions = Set<UUID>()
     var terminating = false {
         didSet { if oldValue && !terminating && ready { scheduleSave() } }
     }
     var saveWithoutChromiumOnQuit = false
+    var savingWebsiteDataClearRequest = false
     var webKitDataStores: [UUID: WKWebsiteDataStore] = [:]
     private(set) var windows: [UUID: BrowserReference] = [:]
     var configuration: Configuration { previewConfiguration ?? library.preferences.configuration }
+
+    func beginConfigurationPreview(_ configuration: Configuration, owner: UUID) {
+        previewOwnerID = owner; previewConfiguration = configuration
+    }
+    func updateConfigurationPreview(_ configuration: Configuration, owner: UUID) {
+        guard previewOwnerID == owner else { return }
+        previewConfiguration = configuration
+    }
+    func endConfigurationPreview(owner: UUID) {
+        guard previewOwnerID == owner else { return }
+        previewConfiguration = nil
+    }
 
     init(directory: URL? = nil) {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -62,6 +83,7 @@ final class AppState: ObservableObject {
             if !state.preferences.restoreSession { library.sessions = [] }
             try loadCatalog()
             do {
+                try requireModuleMutationAllowed()
                 let repo = try ModuleRepository(root: dataDirectory.appendingPathComponent("Modules", isDirectory: true))
                 repository = repo
                 let available = catalog.filter { $0.runtime == nil || modulePayloads[$0.id] != nil }
@@ -197,6 +219,7 @@ final class AppState: ObservableObject {
     }
     /// Called after the install dialog approves the bundled package and any dependencies.
     func installApprovedModule(_ id: String, repairing: Bool = false, approval: ModuleApprovalSnapshot? = nil) throws {
+        try requireModuleMutationAllowed()
         guard let repository else { throw ValidationError("Open Recovery to repair module storage first.") }
         if repairing { _ = try compatibleReinstallationManifest(for: id) }
         let activate = installedModules.first { $0.id == id }?.enabled ?? true
@@ -233,6 +256,7 @@ final class AppState: ObservableObject {
         panel.message = "Choose a Radius data package containing a manifest and its program or definition. Native code must come from the bundled official catalog."
         guard panel.runModal() == .OK, let url = panel.url else { return }
         perform {
+            try requireModuleMutationAllowed()
             guard let repository else { throw ValidationError("Repair module storage before importing packages.") }
             let package = try DeclarativeModulePackage.decode(readModuleFile(url, limit: 192 * 1024))
             let catalogs = try repository.communityCatalogs()
@@ -323,26 +347,32 @@ final class AppState: ObservableObject {
     /// Mutation after the graphical permission preview, also used by native
     /// integration tests to avoid interacting with a modal approval dialog.
     func setModuleEnabledApproved(_ id: String, enabled: Bool) throws {
+        try requireModuleMutationAllowed()
         guard let repository, let module = installedModules.first(where: { $0.id == id }) else { throw ValidationError("This module is not installed.") }
         if enabled { try validateModulePayload(module, requireEnabled: false) }
         defer { resourceWorkerGeneration = UUID() }
         ResourceWorker.stopAll(moduleID: id); cancelReaderRequests(moduleID: id)
+        try requireModuleMutationAllowed()
         try repository.setEnabled(id, enabled); installedModules = try repository.installed()
     }
     func replaceResourceProvider(with id: String) throws {
+        try requireModuleMutationAllowed()
         guard let repository else { throw ValidationError("Repair module storage first.") }
         guard installedModules.contains(where: { $0.id == id && $0.manifest.runtime == .nativeResourceWorker }) else { throw ValidationError("Choose an installed resource provider.") }
         _ = try validatedWorkerPackage(id: id, requireEnabled: false)
         defer { resourceWorkerGeneration = UUID() }
         ResourceWorker.stopAll()
+        try requireModuleMutationAllowed()
         try repository.replaceResourceProvider(with: id)
         installedModules = try repository.installed()
     }
     func removeModule(_ id: String) throws {
+        try requireModuleMutationAllowed()
         guard let repository else { throw ValidationError("Repair module storage first.") }
         defer { resourceWorkerGeneration = UUID() }
         ResourceWorker.stopAll(moduleID: id)
         cancelReaderRequests(moduleID: id)
+        try requireModuleMutationAllowed()
         try repository.uninstall(id)
         installedModules = try repository.installed()
     }
@@ -366,6 +396,7 @@ final class AppState: ObservableObject {
         perform {
             try removeModule(module.id)
             if response == .alertThirdButtonReturn {
+                try requireModuleMutationAllowed()
                 try repository?.deleteSettings(for: module.id)
                 if module.manifest.capability == .notes { library.notes.removeAll() }
             }
@@ -406,10 +437,10 @@ final class AppState: ObservableObject {
     func importBookmarks(profileID: UUID) -> Bool {
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.html]; panel.message = "Choose bookmarks exported from Safari, Chrome, or Firefox."
         guard panel.runModal() == .OK, let url = panel.url else { return false }
+        guard !finalQuitDataFrozen else { notice = "Wait for Radius to finish saving before importing bookmarks."; return false }
         guard !deletingProfileIDs.contains(profileID), library.profiles.contains(where: { $0.id == profileID }) else { notice = "This profile is unavailable."; return false }
         do {
-            guard (try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) <= 10 * 1024 * 1024 else { throw ValidationError("Bookmark files must be smaller than 10 MB.") }
-            let imported = try BookmarkExchange.parse(Data(contentsOf: url), profileID: profileID)
+            let imported = try BookmarkExchange.parse(BoundedImportFile.read(url, maximumBytes: 10 * 1024 * 1024, kind: .bookmarks), profileID: profileID)
             var urls = Set(library.bookmarks.filter { $0.profileID == profileID }.map(\.url))
             let additions = imported.filter { urls.insert($0.url).inserted }
             library.bookmarks.append(contentsOf: additions)
@@ -428,9 +459,11 @@ final class AppState: ObservableObject {
     }
     func resetModules() {
         perform {
+            try requireModuleMutationAllowed()
             defer { resourceWorkerGeneration = UUID() }
             ResourceWorker.stopAll()
             cancelReaderRequests()
+            try requireModuleMutationAllowed()
             let old = dataDirectory.appendingPathComponent("Modules", isDirectory: true)
             if FileManager.default.fileExists(atPath: old.path) {
                 try FileManager.default.moveItem(at: old, to: dataDirectory.appendingPathComponent("Modules-backup-" + UUID().uuidString))
@@ -442,6 +475,10 @@ final class AppState: ObservableObject {
         }
     }
     func resetLibrary() async {
+        guard !ready, !terminating, startupTask == nil else {
+            notice = "Wait for startup recovery to finish before resetting the library."
+            return
+        }
         database = nil; saveTask?.cancel()
         do {
             let backup = dataDirectory.appendingPathComponent("Recovery-" + UUID().uuidString, isDirectory: true)
@@ -482,6 +519,15 @@ final class AppState: ObservableObject {
             return false
         }
         return true
+    }
+    func freezeQuitData() { finalQuitDataFrozen = true }
+    func unfreezeQuitData() { finalQuitDataFrozen = false }
+    func updateQuitCleanup(_ mutation: (inout LibraryState) -> Void) {
+        // Only synchronous tombstone bookkeeping bypasses the final snapshot.
+        // Never allow unrelated mutations while cleanup awaits an engine/store.
+        updatingQuitCleanup = true
+        defer { updatingQuitCleanup = false }
+        mutation(&library)
     }
     private func scheduleSave() {
         guard !terminating else { libraryChangedDuringTermination = true; return }
@@ -526,8 +572,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             smokeTrace("No application state; returning terminateNow")
             return .terminateNow
         }
-        guard state.deletingProfileIDs.isEmpty else {
-            state.notice = "Wait for profile deletion to finish before quitting."
+        guard state.deletingProfileIDs.isEmpty, !state.savingWebsiteDataClearRequest else {
+            state.notice = "Wait for the current privacy operation to finish before quitting."
             DistributionManager.shared.cancelledQuit()
             return .terminateCancel
         }
@@ -542,6 +588,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 DistributionManager.shared.cancelledQuit()
                 return .terminateCancel
             }
+        }
+        // Modal download confirmation can run already queued privacy work.
+        guard state.deletingProfileIDs.isEmpty, !state.savingWebsiteDataClearRequest else {
+            state.notice = "Wait for the current privacy operation to finish before quitting."
+            DistributionManager.shared.cancelledQuit()
+            return .terminateCancel
         }
         downloads.freeze()
         state.terminating = true
@@ -583,15 +635,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 ResourceWorker.stopAll()
                 stoppedWorkersForQuit = true
                 for browser in state.windows.values.compactMap(\.model) { browser.disposeEngineTabs() }
-                quit = await ChromiumRuntime.shared.shutdown()
-                if !quit { state.notice = ChromiumRuntime.shared.status }
-                if quit { await state.finishPendingProfileDeletions() }
-            }
-            if quit && saved {
-                let savedLatest = await state.flushForTermination()
-                if !savedLatest { quit = self.offerQuitWithoutSaving(state) }
+                state.freezeQuitData()
+                if saved {
+                    let savedLatest = await state.flushForTermination()
+                    if !savedLatest { quit = self.offerQuitWithoutSaving(state) }
+                }
+                if quit {
+                    quit = await ChromiumRuntime.shared.shutdown()
+                    if !quit { state.notice = ChromiumRuntime.shared.status }
+                    if quit { await state.finishPendingProfileDeletions() }
+                }
             }
             self.smokeTrace("Sending termination reply: \(quit)")
+            if !quit { state.unfreezeQuitData() }
             state.terminating = quit
             if !quit {
                 downloads.resume()

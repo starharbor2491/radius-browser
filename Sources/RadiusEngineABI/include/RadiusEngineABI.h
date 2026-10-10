@@ -33,6 +33,9 @@ typedef struct radius_cef_api {
     void (*close_page)(void *page);
     int (*live_pages)(void);
     int (*shutdown)(void);
+    /// Release private context ownership for one window and/or profile. Empty
+    /// fields are wildcards; at least one field must be nonempty.
+    void (*release_private_contexts)(const char *private_window_id, const char *profile_id);
 } radius_cef_api;
 typedef const radius_cef_api *(*radius_cef_get_api_function)(void);
 

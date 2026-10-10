@@ -69,6 +69,11 @@ final class ChromiumTab: BrowserEngineTab {
             guard let context, let child else { return 0 }
             return MainActor.assumeIsolated {
                 let parent = Unmanaged<ChromiumTab>.fromOpaque(context).takeUnretainedValue()
+                // A download can keep the native source alive after its Radius
+                // owner closes. Reject before constructing a Swift child; the
+                // native callback contract owns destruction of rejected pages.
+                guard !parent.disposing,
+                      parent.runtime.canAdoptPage(profileID: parent.profileID, privateSessionID: parent.privateSessionID) else { return 0 }
                 let tab = ChromiumTab(runtime: parent.runtime, page: child, downloads: parent.downloads, profileID: parent.profileID, privateSessionID: parent.privateSessionID)
                 if tab.isAuxiliary {
                     tab.onNotice = parent.onNotice
@@ -255,7 +260,14 @@ final class ChromiumTab: BrowserEngineTab {
             if let chrome = value["chromeStyle"] as? Bool { chromeStyle = chrome }
             if let chrome = value["navigationChrome"] as? Bool { navigationChrome = chrome }
             if let visible = value["navigationChromeVisible"] as? Bool { navigationChromeVisible = visible }
-            if value["navigationStart"] as? Bool == true { didStartNavigation(); return }
+            if value["navigationStart"] as? Bool == true {
+                didStartNavigation()
+                if let address = value["committedURL"] as? String, let url = URL(string: address) {
+                    showingStartPage = false; pageURL = url; pageTitle = nil
+                    onChange?(false)
+                }
+                return
+            }
             if let address = value["url"] as? String { pageURL = URL(string: address) }
             if let title = value["title"] as? String { pageTitle = title.isEmpty ? nil : title }
             if let value = value["loading"] as? Bool {

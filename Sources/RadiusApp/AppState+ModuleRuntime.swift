@@ -13,6 +13,9 @@ struct ModuleApprovalSnapshot: Equatable {
 
 @MainActor
 extension AppState {
+    func requireModuleMutationAllowed() throws {
+        guard !finalQuitDataFrozen else { throw ValidationError("Radius is saving data before quitting. Try again if the quit is canceled.") }
+    }
     func captureModuleApproval(_ requirements: [ModuleManifest], rootIDs: [String]) throws -> ModuleApprovalSnapshot {
         guard let repository, requirements.count <= 128, Set(requirements.map(\.id)).count == requirements.count,
               rootIDs.count <= 64 else { throw ValidationError("This module operation exceeds its package limit.") }
@@ -24,6 +27,7 @@ extension AppState {
                                       installed: try repository.installed(), catalogPayloadSHA256: hashes)
     }
     func validateModuleApproval(_ approval: ModuleApprovalSnapshot, requirements: [ModuleManifest]) throws {
+        try requireModuleMutationAllowed()
         guard try captureModuleApproval(requirements, rootIDs: approval.rootIDs) == approval else {
             throw ValidationError("The packages or active providers changed while the approval was open. Review the updated modules and permissions before trying again.")
         }
@@ -32,6 +36,7 @@ extension AppState {
     /// its manifest version. Refresh only already installed official native roles;
     /// removed packages and user activation choices survive the application update.
     func refreshBundledNativePackages() throws {
+        try requireModuleMutationAllowed()
         guard let repository else { return }
         for current in installedModules where current.manifest.runtime?.isNative == true {
             guard bundledModuleIDs.contains(current.id), let factory = catalog.first(where: { $0.id == current.id }),
@@ -47,6 +52,7 @@ extension AppState {
             } else { existing = nil }
             if current.manifest != factory || existing != trusted {
                 ResourceWorker.stopAll(moduleID: current.id); cancelReaderRequests(moduleID: current.id)
+                try requireModuleMutationAllowed()
                 try repository.install(factory, enabled: current.enabled, payload: trusted)
             }
         }
@@ -114,6 +120,7 @@ extension AppState {
     }
     func setModuleSetting(_ schema: ModuleSetting, value: ModuleValue, moduleID: String) {
         perform {
+            try requireModuleMutationAllowed()
             guard let repository else { throw ValidationError("Repair module storage first.") }
             try repository.setSetting(schema.id, value: value, for: moduleID)
             // Preferences are separate data, so publishing an edit must not
@@ -208,16 +215,19 @@ extension AppState {
     /// All candidates start with their existing activation choice, and new
     /// packages stay disabled until the approved closure is ready to activate.
     func installApprovedModuleCode(_ requirements: [ModuleManifest], repairingIDs: Set<String> = []) throws {
+        try requireModuleMutationAllowed()
         guard let repository else { throw ValidationError("Repair module storage first.") }
         for manifest in requirements {
             if !repairingIDs.contains(manifest.id), installedModules.contains(where: { $0.id == manifest.id && $0.manifest == manifest }) { continue }
             ResourceWorker.stopAll(moduleID: manifest.id); cancelReaderRequests(moduleID: manifest.id)
+            try requireModuleMutationAllowed()
             let previous = installedModules.first(where: { $0.id == manifest.id })?.enabled ?? false
             try repository.install(manifest, enabled: previous, payload: modulePayloads[manifest.id])
         }
         installedModules = try repository.installed()
     }
     func activateApprovedModuleRequirements(_ requirements: [ModuleManifest]) throws {
+        try requireModuleMutationAllowed()
         guard let repository else { throw ValidationError("Repair module storage first.") }
         for manifest in requirements {
             guard let installed = installedModules.first(where: { $0.id == manifest.id && $0.manifest == manifest }) else { throw ValidationError("A required package did not install.") }
@@ -231,6 +241,7 @@ extension AppState {
         }
     }
     func withAtomicModuleChanges<T>(for ids: [String], _ operation: () throws -> T) throws -> T {
+        try requireModuleMutationAllowed()
         guard let repository else { throw ValidationError("Repair module storage first.") }
         if suspendingModuleContributions { return try operation() }
         let previous = installedModules, configuration = library.preferences.configuration
@@ -269,6 +280,7 @@ extension AppState {
         panel.message = "Choose a community catalog containing bounded declarative or behavior packages. Adding a catalog does not install its modules."
         guard panel.runModal() == .OK, let url = panel.url else { return }
         perform {
+            try requireModuleMutationAllowed()
             guard let repository else { throw ValidationError("Repair module storage first.") }
             let catalog = try DeclarativeModuleCatalog.decode(readModuleFile(url, limit: 2 * 1024 * 1024))
             let replacing = try repository.communityCatalogs().contains { $0.name == catalog.name }
@@ -276,11 +288,13 @@ extension AppState {
         }
     }
     func addCatalog(_ catalog: DeclarativeModuleCatalog, replaceExisting: Bool = false) throws {
+        try requireModuleMutationAllowed()
         guard let repository else { throw ValidationError("Repair module storage first.") }
         let alert = NSAlert(); alert.messageText = replaceExisting ? "Refresh \(catalog.name)?" : "Add \(catalog.name)?"
         alert.informativeText = "\(catalog.packages.count) data packages will appear in Discover. Publishers are self-reported. No modules will be installed or granted permissions until you approve their installation."
         alert.addButton(withTitle: replaceExisting ? "Refresh catalog" : "Add catalog"); alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        try requireModuleMutationAllowed()
         try repository.addCommunityCatalog(catalog, reservedIDs: bundledModuleIDs, replaceExisting: replaceExisting); try loadCommunityCatalogs()
     }
     func removeCatalog(named name: String) {
@@ -289,17 +303,13 @@ extension AppState {
         alert.addButton(withTitle: "Remove catalog"); alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         perform {
+            try requireModuleMutationAllowed()
             try repository?.removeCommunityCatalog(named: name); try loadCommunityCatalogs()
             notice = "The catalog was removed. Already installed modules and their data are kept."
         }
     }
     func readModuleFile(_ url: URL, limit: Int) throws -> Data {
-        let values = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey])
-        guard values.isRegularFile == true, values.isSymbolicLink != true, (values.fileSize ?? 0) <= limit else { throw ValidationError("Choose a regular JSON file within the package size limit.") }
-        let file = try FileHandle(forReadingFrom: url); defer { try? file.close() }
-        let bytes = try file.read(upToCount: limit + 1) ?? Data()
-        guard bytes.count <= limit else { throw ValidationError("The package exceeds its size limit.") }
-        return bytes
+        try BoundedImportFile.read(url, maximumBytes: limit, kind: .module)
     }
     func presentTabReplacementBeforeRemoval(_ current: InstalledModule, removeAfterReplacement: Bool = true) {
         let dependents = installedModules.filter { $0.manifest.dependencies.contains(current.id) && (removeAfterReplacement || $0.enabled) }

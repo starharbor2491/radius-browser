@@ -2,6 +2,7 @@
 import AppKit
 import Testing
 @preconcurrency import WebKit
+@preconcurrency import Network
 import RadiusCore
 @testable import RadiusApp
 
@@ -20,7 +21,10 @@ struct BrowserIntegrationTests {
         browser.session.selectedTabID = child.id
         browser.session.split = TabSplit(first: pinned.id, second: child.id)
         let source = try #require(browser.activeWebTab as? WebTab)
-        source.webView.loadHTMLString("<html><title>Current page</title><body>Current page<script>window.radiusPreviousDocument = true</script></body></html>", baseURL: URL(string: "https://fixture.invalid/"))
+        let server = try BrowserHistoryPageServer()
+        defer { server.stop() }
+        let pageURL = try await server.start()
+        browser.navigate(pageURL.absoluteString)
         try await waitUntil { source.webView.title == "Current page" && !source.webView.isLoading && browser.hasPage }
         let websiteStore = source.webView.configuration.websiteDataStore
         var expected = browser.session
@@ -37,12 +41,14 @@ struct BrowserIntegrationTests {
         #expect((try await source.webView.evaluateJavaScript("typeof window.radiusPreviousDocument")) as? String == "undefined")
         #expect(source.canGoBack)
         #expect(app.library.sessions.first(where: { $0.id == expected.id }) == expected)
-        source.goBack()
+        // WebKit's own history gestures bypass the adapter commands.
+        source.webView.goBack()
         try await waitUntil { source.webView.title == "Current page" && !source.webView.isLoading && browser.hasPage }
-        #expect(browser.session.selectedTabID == child.id && browser.selectedTab.url?.host == "fixture.invalid")
+        #expect(!source.isShowingStartPage)
+        #expect(browser.session.selectedTabID == child.id && browser.selectedTab.url == pageURL)
         #expect(browser.session.tabs.count == 2)
 
-        source.goForward()
+        source.webView.goForward()
         try await waitUntil { source.webView.url == homeURL && !source.webView.isLoading && !browser.hasPage }
         #expect(source.isShowingStartPage && source.url == nil && source.title == nil)
         #expect(browser.activeWebTab === source && browser.address.isEmpty)
@@ -50,7 +56,12 @@ struct BrowserIntegrationTests {
         #expect(app.library.sessions.first(where: { $0.id == expected.id }) == expected)
         source.goBack()
         try await waitUntil { source.webView.title == "Current page" && !source.webView.isLoading && browser.hasPage }
-        #expect(!source.isShowingStartPage && browser.selectedTab.url?.host == "fixture.invalid")
+        #expect(!source.isShowingStartPage && browser.selectedTab.url == pageURL)
+        source.goForward()
+        try await waitUntil { source.webView.url == homeURL && !source.webView.isLoading && !browser.hasPage }
+        #expect(browser.session == expected && source.isShowingStartPage)
+        source.goBack()
+        try await waitUntil { source.webView.title == "Current page" && !source.webView.isLoading && browser.hasPage }
 
         // A pinned tab using a different engine keeps that engine and its place.
         browser.selectTab(pinned.id)
@@ -348,6 +359,63 @@ struct BrowserIntegrationTests {
     }
 }
 
+}
+
+@MainActor
+private final class BrowserHistoryPageServer {
+    private let listener: NWListener
+    private var connections: [UUID: NWConnection] = [:]
+    private var startup: CheckedContinuation<URL, any Error>?
+    private var watchdog: Task<Void, Never>?
+    init() throws {
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+        listener = try NWListener(using: parameters)
+        listener.stateUpdateHandler = { [weak self] state in
+            Task { @MainActor in self?.changed(state) }
+        }
+        listener.newConnectionHandler = { [weak self] connection in
+            Task { @MainActor in self?.serve(connection) }
+        }
+    }
+    func start() async throws -> URL {
+        try await withCheckedThrowingContinuation { continuation in
+            startup = continuation
+            watchdog = Task { [weak self] in
+                do { try await Task.sleep(for: .seconds(8)) } catch { return }
+                self?.finish(.failure(ValidationError("The history test's local server did not start.")))
+            }
+            listener.start(queue: .main)
+        }
+    }
+    func stop() {
+        listener.cancel(); connections.values.forEach { $0.cancel() }; connections.removeAll()
+        finish(.failure(CancellationError()))
+    }
+    private func changed(_ state: NWListener.State) {
+        if case .ready = state, let port = listener.port {
+            finish(.success(URL(string: "http://127.0.0.1:\(port.rawValue)/history")!))
+        } else if case .failed(let error) = state { finish(.failure(error)) }
+    }
+    private func finish(_ result: Result<URL, any Error>) {
+        guard let startup else { return }
+        self.startup = nil; watchdog?.cancel(); watchdog = nil
+        startup.resume(with: result)
+    }
+    private func serve(_ connection: NWConnection) {
+        guard connections.count < 8 else { connection.cancel(); return }
+        let id = UUID(); connections[id] = connection
+        let body = Data("<html><title>Current page</title><body>Current page<script>window.radiusPreviousDocument = true</script></body></html>".utf8)
+        let response = Data("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8) + body
+        connection.start(queue: .main)
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] data, _, _, error in
+            guard data != nil, error == nil else { connection.cancel(); return }
+            connection.send(content: response, completion: .contentProcessed { [weak self] _ in
+                connection.cancel()
+                Task { @MainActor in self?.connections.removeValue(forKey: id) }
+            })
+        }
+    }
 }
 
 @MainActor

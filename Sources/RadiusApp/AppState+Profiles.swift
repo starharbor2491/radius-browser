@@ -17,7 +17,7 @@ extension AppState {
         webKitDataStores.removeValue(forKey: profileID)
     }
     func deleteProfile(_ id: UUID, replacingWith replacement: UUID) async throws {
-        guard !terminating, deletingProfileIDs.isEmpty else { throw ValidationError("Wait for the current operation to finish.") }
+        guard !terminating, !savingWebsiteDataClearRequest, deletingProfileIDs.isEmpty else { throw ValidationError("Wait for the current operation to finish.") }
         var validation = library
         _ = try validation.removeProfile(id, replacingWith: replacement)
         deletingProfileIDs.insert(id)
@@ -46,6 +46,7 @@ extension AppState {
             ChromiumRuntime.shared.blockProfilesPendingDeletion(Set((library.pendingProfileDeletions ?? []) + (library.pendingWebsiteDataClears ?? [])))
             throw ValidationError(notice ?? "The profile could not be saved. Nothing was erased.")
         }
+        ChromiumRuntime.shared.finalizeProfileDeletion(id)
         ChromiumRuntime.shared.blockProfilesPendingDeletion(Set((library.pendingProfileDeletions ?? []) + (library.pendingWebsiteDataClears ?? [])))
         // New windows may have opened while downloads and engine closure awaited.
         for window in windows.values.compactMap(\.model) where window.session.profileID == id {
@@ -99,12 +100,16 @@ extension AppState {
             } catch { notice = "Website storage removal is pending. Quit and reopen Radius to retry. \(error.localizedDescription)" }
         }
         if !completed.isEmpty {
-            library.pendingProfileDeletions?.removeAll { completed.contains($0) }
-            library.pendingWebsiteDataClears?.removeAll { completed.contains($0) }
+            updateQuitCleanup { library in
+                library.pendingProfileDeletions?.removeAll { completed.contains($0) }
+                library.pendingWebsiteDataClears?.removeAll { completed.contains($0) }
+            }
             if !(await flush()) {
                 // Keep the retry record if its removal could not be committed.
-                library.pendingProfileDeletions = deleted
-                library.pendingWebsiteDataClears = clearRequests
+                updateQuitCleanup { library in
+                    library.pendingProfileDeletions = deleted
+                    library.pendingWebsiteDataClears = clearRequests
+                }
             }
         }
         ChromiumRuntime.shared.blockProfilesPendingDeletion(Set((library.pendingProfileDeletions ?? []) + (library.pendingWebsiteDataClears ?? [])))
@@ -115,10 +120,26 @@ extension AppState {
     }
 
     func requestWebsiteDataClear(_ id: UUID) async throws {
+        try await requestWebsiteDataClear(id, persist: { await self.flush() })
+    }
+    func requestWebsiteDataClear(_ id: UUID, persist: @MainActor () async -> Bool) async throws {
+        guard !savingWebsiteDataClearRequest else {
+            throw ValidationError("Wait for the current website data request to finish, then try again.")
+        }
         guard !terminating, deletingProfileIDs.isEmpty, library.profiles.contains(where: { $0.id == id }) else { throw ValidationError("This profile is unavailable.") }
+        savingWebsiteDataClearRequest = true
+        defer { savingWebsiteDataClearRequest = false }
         let old = library.pendingWebsiteDataClears
         library.pendingWebsiteDataClears = Array(Set((old ?? []) + [id]))
-        guard await flush() else { library.pendingWebsiteDataClears = old; throw ValidationError(notice ?? "The website data request could not be saved.") }
+        guard await persist() else {
+            // Undo only this unsaved addition. Existing durable requests and
+            // unrelated edits made during the save remain intact.
+            if !(old ?? []).contains(id) {
+                library.pendingWebsiteDataClears?.removeAll { $0 == id }
+                if old == nil && library.pendingWebsiteDataClears?.isEmpty == true { library.pendingWebsiteDataClears = nil }
+            }
+            throw ValidationError(notice ?? "The website data request could not be saved.")
+        }
         // Storage can be in use in other tabs and extension workers. Retain the
         // durable request and perform removal before engines start next time.
         notice = "Quit and reopen Radius to clear this profile's website data. Your bookmarks, notes, history, and tab addresses are kept."

@@ -3,6 +3,12 @@ import RadiusCore
 
 @MainActor
 extension AppState {
+    func reconcileCustomizedTabRequirements(previous: Configuration, draft: inout Configuration, requirements: inout [String]) {
+        if draft.layout.tabs == .top || draft.layout.tabs == .bottom { draft.layout.treeTabs = false }
+        guard (previous.layout.treeTabs == true) != (draft.layout.treeTabs == true) else { return }
+        requirements.removeAll { moduleManifestCandidate($0)?.capability == .tabSystem }
+        requirements.append(draft.layout.treeTabs == true ? "org.radius.tree-tabs" : "org.radius.standard-tabs")
+    }
     func synchronizeModuleContributions(previous: [InstalledModule]) {
         guard ready && !suspendingModuleContributions else { return }
         var next = library.preferences.configuration
@@ -23,6 +29,7 @@ extension AppState {
         applyConfiguration(next)
     }
     func applySetup(_ configuration: Configuration, requirements: [String], approvalTitle: String? = nil) throws -> Bool {
+        try requireModuleMutationAllowed()
         var required = requirements
         // A setup's tab behavior must have a real interchangeable provider.
         let desired = configuration.layout.treeTabs == true ? "org.radius.tree-tabs" : "org.radius.standard-tabs"

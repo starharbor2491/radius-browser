@@ -111,6 +111,13 @@ class EngineApp final : public CefApp, public CefBrowserProcessHandler {
     // otherwise ignores Radius's allow toggle, especially in private contexts
     // where default content settings cannot be changed.
     if (process_type.empty()) command_line->AppendSwitch("disable-popup-blocking");
+    if (process_type.empty() && diagnostics &&
+        [[[NSProcessInfo processInfo] environment] objectForKey:@"RADIUS_SMOKE_TEST_EXTENSION_FIXTURE"]) {
+      // Only isolated acceptance launches expose browser-target CDP. Chrome
+      // allocates a loopback port and records it in disposable DevToolsActivePort.
+      command_line->AppendSwitchWithValue("remote-debugging-port", "0");
+      command_line->AppendSwitchWithValue("remote-debugging-address", "127.0.0.1");
+    }
   }
   CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override { return this; }
   CefRefPtr<CefClient> GetDefaultClient() override { return DefaultClient(); }
@@ -147,7 +154,15 @@ void SchedulePump(int64_t delay) {
   [[NSRunLoop mainRunLoop] addTimer:pump_timer forMode:NSModalPanelRunLoopMode];
 }
 
-struct Context { CefRefPtr<CefRequestContext> value; size_t pages = 0; bool ready = false; uint64_t generation = 0; };
+struct Context {
+  CefRefPtr<CefRequestContext> value;
+  size_t pages = 0;
+  bool ready = false;
+  uint64_t generation = 0;
+  bool retained = false;
+  std::string private_window;
+  std::string profile;
+};
 uint64_t next_context_generation = 0;
 std::map<std::string, Context> contexts;
 struct Page;
@@ -179,8 +194,8 @@ struct Page {
   bool awaiting_context = true;
   bool pending_popup = false;
   bool management = false;
-  bool fixture_dialog = false;
   bool navigation_chrome_visible = false;
+  int focus_location_requests = 0;
   void* callback_context = nullptr;
   radius_cef_event_callback event = nullptr;
   radius_cef_popup_callback popup = nullptr;
@@ -226,7 +241,7 @@ Page* AdoptAuxiliaryBrowser(CefRefPtr<CefBrowser> browser,Page* preferred_owner)
 class Client final : public CefClient, public CefLifeSpanHandler,
                      public CefDisplayHandler, public CefLoadHandler,
                      public CefRequestHandler, public CefDownloadHandler,
-                     public CefDevToolsMessageObserver, public CefCommandHandler, public CefDialogHandler {
+                     public CefDevToolsMessageObserver, public CefCommandHandler {
  public:
   explicit Client(Page* page) : page_(page) {}
   void DetachPage() { page_ = nullptr; }
@@ -242,23 +257,6 @@ class Client final : public CefClient, public CefLifeSpanHandler,
   CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
   CefRefPtr<CefDownloadHandler> GetDownloadHandler() override { return this; }
   CefRefPtr<CefCommandHandler> GetCommandHandler() override { return this; }
-  CefRefPtr<CefDialogHandler> GetDialogHandler() override { return this; }
-  bool OnFileDialog(CefRefPtr<CefBrowser> browser,FileDialogMode mode,const CefString& title,const CefString& path,
-      const std::vector<CefString>& filters,const std::vector<CefString>& extensions,const std::vector<CefString>& descriptions,
-      CefRefPtr<CefFileDialogCallback> callback) override {
-    if (auto client = ForBrowser(browser); client && client != this)
-      return client->OnFileDialog(browser,mode,title,path,filters,extensions,descriptions,callback);
-    // Automated API fixture selection only. Consumer installations always use
-    // Chrome's Web Store permission UI; no release file chooser is overridden.
-    if (!diagnostics || !page_ || !page_->fixture_dialog || mode!=FILE_DIALOG_OPEN_FOLDER ||
-        browser->GetMainFrame()->GetURL().ToString().rfind("chrome://extensions/",0)!=0) return false;
-    page_->fixture_dialog=false;
-    const std::string fixture_path=data_root+"/ExtensionAcceptance/current";
-    if (![[NSFileManager defaultManager] fileExistsAtPath:[NSString stringWithUTF8String:(fixture_path+"/manifest.json").c_str()]]) {
-      callback->Cancel(); return true;
-    }
-    callback->Continue({CefString(fixture_path)}); return true;
-  }
   bool OnChromeCommand(CefRefPtr<CefBrowser> browser,int id,cef_window_open_disposition_t disposition) override {
     if (auto client = ForBrowser(browser); client && client != this) return client->OnChromeCommand(browser,id,disposition);
     if (!page_) return true;
@@ -294,14 +292,14 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     }
     // Radius owns windows and profiles. Its native File menu provides these.
     for (const char* command : {"IDC_NEW_WINDOW","IDC_NEW_INCOGNITO_WINDOW","IDC_EXIT",
-                               "IDC_SHOW_SIGNIN","IDC_ADD_NEW_PROFILE","IDC_SHOW_SETTINGS"})
+                               "IDC_SHOW_SIGNIN","IDC_ADD_NEW_PROFILE","IDC_OPTIONS"})
       if (id == cef_id_for_command_id_name(command)) return true;
     return false;
   }
   bool IsChromeAppMenuItemVisible(CefRefPtr<CefBrowser> browser,int id) override {
     if (auto client = ForBrowser(browser); client && client != this) return client->IsChromeAppMenuItemVisible(browser,id);
     for (const char* command : {"IDC_NEW_WINDOW","IDC_NEW_INCOGNITO_WINDOW","IDC_EXIT",
-                               "IDC_SHOW_SIGNIN","IDC_ADD_NEW_PROFILE","IDC_SHOW_SETTINGS"})
+                               "IDC_SHOW_SIGNIN","IDC_ADD_NEW_PROFILE","IDC_OPTIONS"})
       if (id == cef_id_for_command_id_name(command)) return false;
     return true;
   }
@@ -410,6 +408,12 @@ class Client final : public CefClient, public CefLifeSpanHandler,
       page_->view.contentHidden = NO;
       page_->navigation_failed = false; page_->title.clear();
       auto value = CefDictionaryValue::Create(); value->SetBool("navigationStart",true);
+      // OnLoadStart runs after main-frame navigation commits. This covers
+      // extension/history navigation that did not enter Radius's load command,
+      // without treating earlier loading/title updates as a committed page.
+      const std::string committed_url=frame->GetURL().ToString();
+      if (!committed_url.empty() && committed_url!="about:blank") page_->navigated=true;
+      if (page_->navigated) value->SetString("committedURL",committed_url);
       Emit(page_,RADIUS_CEF_STATE,value);
     }
   }
@@ -708,7 +712,7 @@ void Destroy(Page* page) {
   page->view.browserWindow = nil;
   browser_pages.erase(page->browser_id);
   auto context = contexts.find(page->context_key);
-  if (context != contexts.end() && --context->second.pages == 0) contexts.erase(context);
+  if (context != contexts.end() && --context->second.pages == 0 && !context->second.retained) contexts.erase(context);
   pages.erase(page);
 }
 Page* Allocate(const std::string& key) {
@@ -831,6 +835,10 @@ void* Create(const char* profile,const char* private_window) {
   if (!initialized || stopped) return nullptr;
   const bool ephemeral = private_window && *private_window;
   const std::string key = ephemeral ? std::string("private:")+private_window+":"+profile : std::string("profile:")+profile;
+  if (ephemeral && contexts.count(key) && !contexts.at(key).retained) {
+    last_error="This private profile is still closing. Retry opening the tab after it finishes.";
+    return nullptr;
+  }
   if (!contexts.count(key)) {
     CefRequestContextSettings settings;
     if (!ephemeral) {
@@ -841,7 +849,7 @@ void* Create(const char* profile,const char* private_window) {
     const uint64_t generation = ++next_context_generation;
     auto context = CefRequestContext::CreateContext(settings,new ContextHandler(key,generation));
     if (!context) { last_error="Chromium could not create an isolated website context."; return nullptr; }
-    contexts.emplace(key,Context{context,0,false,generation});
+    contexts.emplace(key,Context{context,0,false,generation,ephemeral,ephemeral ? private_window : "",profile});
   }
   Page* page = Allocate(key);
   if (contexts.at(key).ready) {
@@ -880,6 +888,9 @@ void Command(void* opaque,int command,const char* text,double value) {
     case RADIUS_CEF_FOCUS_LOCATION: {
       if (page->window) page->window->Activate();
       const int command = cef_id_for_command_id_name("IDC_FOCUS_LOCATION");
+      ++page->focus_location_requests;
+      if (diagnostics) std::fprintf(stderr,"Radius Chromium: location focus command id=%d enabled=%d browser=%d\n",command,
+          command >= 0 && host->CanExecuteChromeCommand(command),browser->GetIdentifier());
       if (command >= 0) host->ExecuteChromeCommand(command,CEF_WOD_CURRENT_TAB);
       break;
     }
@@ -952,12 +963,7 @@ void DevTools(void* opaque,int id,const char* method,const char* parameters) {
       result->SetBool("toolbarDrawn",page->toolbar->IsDrawn());
     }
     result->SetBool("windowVisible",page->window && page->window->IsVisible());
-    auto response=CefDictionaryValue::Create(); response->SetInt("id",id); response->SetBool("success",true);
-    response->SetDictionary("result",result); Emit(page,RADIUS_CEF_RESULT,response); return;
-  }
-  if (diagnostics && std::string(method)=="Radius.chooseFixtureDirectory") {
-    page->fixture_dialog=true;
-    auto result=CefDictionaryValue::Create(); result->SetBool("armed",true);
+    result->SetInt("focusLocationRequests",page->focus_location_requests);
     auto response=CefDictionaryValue::Create(); response->SetInt("id",id); response->SetBool("success",true);
     response->SetDictionary("result",result); Emit(page,RADIUS_CEF_RESULT,response); return;
   }
@@ -979,6 +985,21 @@ void Close(void* opaque) {
   else if (!page->pending_popup) Destroy(page);
 }
 int Live() { return static_cast<int>(pages.size() + unowned_browsers.size()); }
+void ReleasePrivateContexts(const char* private_window,const char* profile) {
+  const std::string window_id=private_window ? private_window : "";
+  const std::string profile_id=profile ? profile : "";
+  if (window_id.empty() && profile_id.empty()) return;
+  for (auto entry=contexts.begin(); entry!=contexts.end();) {
+    auto& context=entry->second;
+    if (!context.private_window.empty() &&
+        (window_id.empty() || context.private_window==window_id) &&
+        (profile_id.empty() || context.profile==profile_id)) {
+      context.retained=false;
+      if (context.pages==0) { entry=contexts.erase(entry); continue; }
+    }
+    ++entry;
+  }
+}
 int Shutdown() {
   if (!initialized) return 1;
   if (!pages.empty() || !unowned_browsers.empty()) { last_error="Chromium pages are still closing."; return 0; }
@@ -988,6 +1009,6 @@ int Shutdown() {
   return 1;
 }
 const char* Error() { return last_error.c_str(); }
-const radius_cef_api api={2,Initialize,Error,Create,NativeView,Callbacks,Command,DevTools,Close,Live,Shutdown};
+const radius_cef_api api={3,Initialize,Error,Create,NativeView,Callbacks,Command,DevTools,Close,Live,Shutdown,ReleasePrivateContexts};
 }
 extern "C" __attribute__((visibility("default"))) const radius_cef_api* radius_cef_get_api() { return &api; }

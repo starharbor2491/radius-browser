@@ -18,7 +18,7 @@ The v1 implementation combines a native WebKit browser, optional Chrome-style Ch
 
 ## Verification boundary
 
-The current portable suite passes 64 tests, including database recovery, hostile imports, paired custom colors, profile deletion/rollback, compatibility bounds, module installation and interrupted transaction rollback, publisher/ABI/update policy, and downgrade rejection. All 18 factory packages validate. Native tests additionally exercise real WebKit storage, downloads, module workers and app installation staging. Current macOS results and artifacts will be recorded in AUDIT.md after their runs finish.
+The current portable suite passes 66 tests, including database recovery, hostile imports, paired custom colors, profile deletion/rollback, compatibility bounds, module installation and interrupted transaction rollback, publisher/ABI/update policy, and downgrade rejection. All 18 factory packages validate. Native tests additionally exercise real WebKit storage, downloads, module workers and app installation staging. Current macOS results and artifacts will be recorded in AUDIT.md after their runs finish.
 
 The Chromium workflow runs on ARM and Intel. It must pass actual embedded HTTP/HTTPS rendering, Reader/capture, profile/private isolation, popup/auxiliary lifetime, Chrome toolbar geometry/focus, MV3 lifecycle, genuine Web Store installation, and ordinary shutdown. Building the bridge or loading an unpacked fixture alone does not establish Web Store compatibility.
 

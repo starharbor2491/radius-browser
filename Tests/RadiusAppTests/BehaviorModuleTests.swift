@@ -6,6 +6,75 @@ import RadiusCore
 
 extension NativeIntegrationTests {
 struct BehaviorModuleTests {
+@Test @MainActor func anApprovedModuleUpdateCannotDivergeFromItsSetupDuringTheFinalQuitFlush() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("radius-frozen-module-approval-" + UUID().uuidString)
+    let previous = AppDelegate.state
+    let app = AppState(directory: directory)
+    defer { AppDelegate.state = previous; try? FileManager.default.removeItem(at: directory) }
+    let repository = try ModuleRepository(root: directory.appendingPathComponent("Modules")); app.repository = repository
+    var focus = ModuleManifest(id: "org.test.frozen-focus", name: "Focus", summary: "Approved update", capability: .focusMode, runtime: .behaviorProgram)
+    let originalBytes = try completeBehaviorFixture(Data(#"{"formatVersion":1,"entrypoints":{"enter":{"op":"object","fields":{"active":{"op":"literal","value":true},"hiddenComponents":{"op":"literal","value":["tabs"]}}}}}"#.utf8), capability: .focusMode)
+    let updatedBytes = try completeBehaviorFixture(Data(#"{"formatVersion":1,"entrypoints":{"enter":{"op":"object","fields":{"active":{"op":"literal","value":true},"hiddenComponents":{"op":"literal","value":["navigation"]}}}}}"#.utf8), capability: .focusMode)
+    try repository.install(focus, payload: originalBytes); app.installedModules = try repository.installed()
+    focus.version = 2; app.catalog = [focus]; app.modulePayloads = [focus.id: updatedBytes]
+    let requirements = try app.validateModuleRequirements(for: [focus.id])
+    let approval = try app.captureModuleApproval(requirements, rootIDs: [focus.id])
+    let receipts = try repository.installed(), originalConfiguration = app.library.preferences.configuration
+    var setup = originalConfiguration; setup.theme.accent = .orange
+
+    // An already reviewed approval returns after the final durable snapshot starts.
+    app.freezeQuitData()
+    #expect(throws: (any Error).self) { try app.installApprovedModule(focus.id, approval: approval) }
+    #expect(throws: (any Error).self) { try app.applyApprovedSetup(setup, requirements: requirements, approval: approval) }
+    #expect(try repository.installed() == receipts)
+    #expect(try repository.dataPayload(for: focus.id, runtime: .behaviorProgram) == originalBytes)
+    #expect(app.library.preferences.configuration == originalConfiguration)
+
+    // Canceling quit reopens the same unchanged approval for the real transaction.
+    app.unfreezeQuitData()
+    try app.applyApprovedSetup(setup, requirements: requirements, approval: approval)
+    #expect(try repository.installed().first(where: { $0.id == focus.id })?.manifest.version == 2)
+    #expect(try repository.dataPayload(for: focus.id, runtime: .behaviorProgram) == updatedBytes)
+    #expect(app.library.preferences.configuration == setup)
+    #expect(try app.requestedFocusPresentation().hiddenComponents == ["navigation"])
+}
+
+@Test @MainActor func multipleCustomizeEditorsOnlyUpdateAndCancelTheirOwnLivePreview() {
+    let previous = AppDelegate.state
+    defer { AppDelegate.state = previous }
+    let app = AppState()
+    let committed = app.library.preferences.configuration
+    let firstEditor = UUID(), secondEditor = UUID()
+    var first = committed; first.theme.accent = .orange
+    var second = committed; second.theme.accent = .purple; second.layout.navigation = .bottom
+    app.beginConfigurationPreview(first, owner: firstEditor)
+    #expect(app.previewOwnerID == firstEditor && app.configuration == first)
+    app.beginConfigurationPreview(second, owner: secondEditor)
+    #expect(app.previewOwnerID == secondEditor && app.configuration == second)
+
+    // A stale editor can keep changing or close after another takes over.
+    first.theme.accent = .teal
+    app.updateConfigurationPreview(first, owner: firstEditor)
+    app.endConfigurationPreview(owner: firstEditor)
+    #expect(app.previewOwnerID == secondEditor && app.configuration == second)
+    #expect(app.library.preferences.configuration == committed)
+    second.theme.cornerRadius = 18
+    app.updateConfigurationPreview(second, owner: secondEditor)
+    #expect(app.configuration == second)
+    app.endConfigurationPreview(owner: secondEditor)
+    #expect(app.previewOwnerID == nil && app.previewConfiguration == nil)
+    #expect(app.configuration == committed)
+
+    // Existing direct previews remain usable, and applying a setup ends them.
+    app.previewConfiguration = first
+    #expect(app.configuration == first && app.previewOwnerID == nil)
+    app.previewConfiguration = nil
+    app.beginConfigurationPreview(second, owner: secondEditor)
+    app.applyConfiguration(first)
+    #expect(app.previewOwnerID == nil && app.previewConfiguration == nil)
+    #expect(app.configuration == first)
+}
+
 @Test @MainActor func restoringTheDefaultInterfaceReplacesCustomTreeTabsAndExportsAUsableSetup() async throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("radius-default-recovery-" + UUID().uuidString)
     let previous = AppDelegate.state
@@ -53,6 +122,62 @@ struct BehaviorModuleTests {
     #expect(app.library.sessions == sessions)
     #expect(app.library.notes == notes)
     #expect(await app.flush())
+}
+
+@Test @MainActor func customizedTreeBehaviorReplacesCustomProvidersAndKeepsUnrelatedRequirements() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("radius-custom-tab-transition-" + UUID().uuidString)
+    let previous = AppDelegate.state
+    let app = AppState(directory: directory)
+    defer { app.ready = false; AppDelegate.state = previous; try? FileManager.default.removeItem(at: directory) }
+    let repository = try ModuleRepository(root: directory.appendingPathComponent("Modules")); app.repository = repository
+    let standard = ModuleManifest(id: "org.radius.standard-tabs", name: "Standard tabs", summary: "Flat tabs", capability: .tabSystem, runtime: .declarative)
+    let tree = ModuleManifest(id: "org.radius.tree-tabs", name: "Tree tabs", summary: "Nested tabs", capability: .tabSystem, runtime: .declarative)
+    let customTree = ModuleManifest(id: "org.test.custom-tree", name: "Custom tree", summary: "Custom nested tabs", capability: .tabSystem, runtime: .declarative)
+    let customFlat = ModuleManifest(id: "org.test.custom-flat", name: "Custom flat", summary: "Custom flat tabs", capability: .tabSystem, runtime: .declarative)
+    let widget = ModuleManifest(id: "org.test.kept-widget", name: "Kept widget", summary: "Unrelated customization", capability: .startWidget, runtime: .declarative)
+    let flatBytes = Data(#"{"formatVersion":1,"treeTabs":false}"#.utf8)
+    let treeBytes = Data(#"{"formatVersion":1,"treeTabs":true}"#.utf8)
+    let widgetBytes = Data(#"{"formatVersion":1,"widgetTitle":"Kept widget","widgetBody":"Kept during tab transitions"}"#.utf8)
+    app.catalog = [standard, tree, customTree, customFlat, widget]
+    app.modulePayloads = [standard.id: flatBytes, tree.id: treeBytes, customTree.id: treeBytes, customFlat.id: flatBytes, widget.id: widgetBytes]
+    for manifest in app.catalog { try repository.install(manifest, enabled: manifest.id == standard.id || manifest.id == widget.id, payload: app.modulePayloads[manifest.id]) }
+    app.installedModules = try repository.installed(); app.ready = true
+    let pinned = BrowserTab(title: "Pinned", pinned: true), child = BrowserTab(title: "Child", parentID: pinned.id)
+    app.library.sessions = [WindowSession(profileID: app.library.profiles[0].id, tabs: [pinned, child])]
+    let sessions = app.library.sessions
+
+    for scenario in 0..<4 {
+        let custom = scenario == 1 ? customFlat : customTree
+        try repository.replaceProvider(role: .tabSystem, with: custom.id)
+        app.installedModules = try repository.installed()
+        var before = app.library.preferences.configuration; before.layout.tabs = .leading
+        app.applyConfiguration(before)
+        var appearance = before; appearance.theme.accent = .orange
+        var appearanceRequirements = [custom.id, widget.id]
+        app.reconcileCustomizedTabRequirements(previous: before, draft: &appearance, requirements: &appearanceRequirements)
+        #expect(appearanceRequirements == [custom.id, widget.id])
+        let appearancePlan = try app.validateModuleRequirements(for: appearanceRequirements)
+        try app.applyApprovedSetup(appearance, requirements: appearancePlan)
+        #expect(app.installedModules.first(where: { $0.id == custom.id })?.enabled == true)
+
+        var draft = appearance, requirements = appearanceRequirements
+        if scenario == 0 { draft.layout.treeTabs = false }
+        else if scenario == 1 { draft.layout.treeTabs = true }
+        else { draft.layout.tabs = scenario == 2 ? .top : .bottom }
+        app.reconcileCustomizedTabRequirements(previous: appearance, draft: &draft, requirements: &requirements)
+        let expectedID = scenario == 1 ? tree.id : standard.id
+        #expect(requirements.contains(expectedID) && requirements.contains(widget.id))
+        #expect(!requirements.contains(custom.id))
+        let plan = try app.validateModuleRequirements(for: requirements)
+        let approval = try app.captureModuleApproval(plan, rootIDs: requirements)
+        try app.applyApprovedSetup(draft, requirements: plan, approval: approval)
+        #expect(app.installedModules.first(where: { $0.id == expectedID })?.enabled == true)
+        #expect(app.installedModules.first(where: { $0.id == custom.id })?.enabled == false)
+        #expect(app.installedModules.first(where: { $0.id == widget.id })?.enabled == true)
+        #expect(app.declarativeDefinition(.tabSystem)?.treeTabs == (scenario == 1))
+        #expect(app.library.preferences.configuration.layout.treeTabs == (scenario == 1))
+        #expect(app.library.sessions == sessions)
+    }
 }
 
 @Test @MainActor func changedCatalogDependenciesOrPayloadsRequireNewApprovalBeforeInstallingOrApplyingASetup() throws {
