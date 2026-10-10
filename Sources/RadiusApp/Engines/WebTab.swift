@@ -153,7 +153,7 @@ final class WebTab: BrowserEngineTab, WKNavigationDelegate, WKUIDelegate {
         panel.canChooseDirectories = parameters.allowsDirectories; panel.canChooseFiles = true
         completionHandler(panel.runModal() == .OK ? panel.urls : nil)
     }
-    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor @Sendable () -> Void) {
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @Sendable () -> Void) {
         let alert = siteAlert(frame, message); alert.addButton(withTitle: "OK"); alert.runModal(); completionHandler()
     }
     func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo) async -> Bool {

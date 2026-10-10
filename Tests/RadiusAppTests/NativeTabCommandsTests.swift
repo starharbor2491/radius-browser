@@ -4,8 +4,11 @@ import Testing
 @testable import RadiusApp
 
 extension NativeIntegrationTests.BrowserIntegrationTests {
-    @Test func nativeTabMenuTargetsTheCurrentOwnedWindowAndRejectsFrozenOrClosedModels() throws {
+    @Test func nativeTabMenuTargetsTheCurrentOwnedWindowAndRejectsFrozenOrClosedModels() async throws {
         _ = NSApplication.shared
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
         let previousState = AppDelegate.state
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("radius-menu-test-" + UUID().uuidString)
         let app = AppState(directory: directory)
@@ -22,6 +25,7 @@ extension NativeIntegrationTests.BrowserIntegrationTests {
             first.closeWindow(); second.closeWindow()
             withExtendedLifetime((firstProxy, secondProxy)) {}
             AppDelegate.state = previousState
+            NSApp.setActivationPolicy(previousPolicy)
             try? FileManager.default.removeItem(at: directory)
         }
         let commands = NativeTabCommands()
@@ -38,8 +42,7 @@ extension NativeIntegrationTests.BrowserIntegrationTests {
         }
         let new = try item("new"), reopen = try item("reopen")
         let original = first.session.selectedTabID
-        firstWindow.makeKeyAndOrderFront(nil)
-        try #require(NSApp.keyWindow === firstWindow)
+        try await focusCommandWindow(firstWindow)
         file.update(); browse.update()
         #expect(new.isEnabled && !reopen.isEnabled)
         try perform("new")
@@ -58,8 +61,7 @@ extension NativeIntegrationTests.BrowserIntegrationTests {
         // Validation may have run before focus changes. Invocation must resolve
         // the new actual key window instead of retaining the previous model.
         file.update()
-        secondWindow.makeKeyAndOrderFront(nil)
-        try #require(NSApp.keyWindow === secondWindow)
+        try await focusCommandWindow(secondWindow)
         try perform("new")
         #expect(second.session.tabs.count == 2 && first.session.tabs.count == 2)
         let firstSnapshot = first.session, secondSnapshot = second.session
@@ -74,14 +76,12 @@ extension NativeIntegrationTests.BrowserIntegrationTests {
         file.update()
         #expect(new.isEnabled)
 
-        otherWindow.makeKeyAndOrderFront(nil)
-        try #require(NSApp.keyWindow === otherWindow)
+        try await focusCommandWindow(otherWindow)
         file.update()
         #expect(!new.isEnabled)
         #expect(NSApp.sendAction(try #require(new.action), to: new.target, from: new))
         #expect(first.session == firstSnapshot && second.session == secondSnapshot)
-        secondWindow.makeKeyAndOrderFront(nil)
-        try #require(NSApp.keyWindow === secondWindow)
+        try await focusCommandWindow(secondWindow)
         second.closeWindow()
         file.update()
         #expect(!new.isEnabled)
@@ -132,6 +132,15 @@ extension NativeIntegrationTests.BrowserIntegrationTests {
         #expect(menu.items.prefix(2).flatMap { $0.submenu?.items ?? [] }.allSatisfy { $0.target !== commands })
         #expect(restored.map(\.keyEquivalent) == ["t", "t", "w", "[", "]"])
         #expect(restored.map(\.keyEquivalentModifierMask) == [.command, [.command, .shift], .command, [.command, .shift], [.command, .shift]])
+    }
+
+    private func focusCommandWindow(_ window: NSWindow) async throws {
+        window.makeKeyAndOrderFront(nil)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while NSApp.keyWindow !== window, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try #require(NSApp.keyWindow === window)
     }
 
     private func commandWindow() -> NSWindow {
