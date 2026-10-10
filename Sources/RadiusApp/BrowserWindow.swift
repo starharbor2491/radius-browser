@@ -141,12 +141,14 @@ struct BrowserWindow: View {
                 }
             }
             .background(Color(nsColor: .windowBackgroundColor))
+            .background(BrowserSheetTerminationPolicy())
         }
         .sheet(isPresented: Binding(get: { reader != nil }, set: { if !$0 { readerTask?.cancel(); reader = nil } })) {
             VStack(alignment: .leading, spacing: 16) {
                 HStack { Text(readerTitle).font(.title2); Spacer(); Button("Done") { readerTask?.cancel(); reader = nil }.keyboardShortcut(.defaultAction) }
                 ScrollView { Text(reader ?? "").font(.system(size: 18, design: .serif)).lineSpacing(7).textSelection(.enabled).frame(maxWidth: 660, alignment: .leading).padding(24).frame(maxWidth: .infinity) }
             }.padding(24).frame(width: 760, height: 640).background(Color(nsColor: .windowBackgroundColor))
+            .background(BrowserSheetTerminationPolicy())
         }
     }
     private var windowCommands: some View {
@@ -668,6 +670,22 @@ struct ZoomControls: View {
             Button("\(Int((tab.zoom * 100).rounded()))%") { tab.setZoom(1) }.buttonStyle(.plain).help("Reset zoom")
             Button("+") { tab.setZoom(tab.zoom + 0.1) }.buttonStyle(.plain).accessibilityLabel("Zoom in")
         }
+    }
+}
+
+/// Radius saves management edits immediately. Its application delegate owns
+/// download confirmation, final saving, and engine shutdown, even with a sheet open.
+private struct BrowserSheetTerminationPolicy: NSViewRepresentable {
+    func makeNSView(context: Context) -> PolicyView { PolicyView() }
+    func updateNSView(_ view: PolicyView, context: Context) {
+        view.window?.preventsApplicationTerminationWhenModal = false
+    }
+    @MainActor final class PolicyView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            window?.preventsApplicationTerminationWhenModal = false
+        }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
     }
 }
 

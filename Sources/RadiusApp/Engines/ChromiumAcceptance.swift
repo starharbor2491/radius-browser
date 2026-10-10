@@ -79,6 +79,9 @@ enum ChromiumAcceptance {
             }), !tab.loading, tab.chromeStyle,
                let sheet = tab.nativeView.window, let chrome = tab.chromeWindow,
                chrome.parent === sheet, chrome.isVisible {
+                guard !sheet.preventsApplicationTerminationWhenModal else {
+                    throw ValidationError("The extension manager sheet prevents Quit from reaching Radius's application delegate.")
+                }
                 let expected = sheet.convertToScreen(tab.nativeView.convert(tab.nativeView.bounds.intersection(tab.nativeView.visibleRect), to: nil))
                 guard abs(chrome.frame.minX - expected.minX) < 2, abs(chrome.frame.minY - expected.minY) < 2,
                       abs(chrome.frame.width - expected.width) < 2, abs(chrome.frame.height - expected.height) < 2 else {

@@ -32,6 +32,9 @@ cleanup() {
     echo "Packaged-app smoke test exited with status $smoke_status." >&2
     cat dist/smoke-server.log >&2
     if [[ -f dist/smoke-sample.log ]]; then cat dist/smoke-sample.log >&2; fi
+    if [[ -f dist/smoke-sample.txt ]]; then
+      python3 -c 'import sys; sys.stderr.buffer.write(open(sys.argv[1], "rb").read(65536))' dist/smoke-sample.txt
+    fi
     if [[ "$smoke_status" -ge 128 ]]; then
       # ReportCrash can finish after the app exits. Collect only this launch's
       # Radius reports, with a short deadline and a bounded artifact size.
