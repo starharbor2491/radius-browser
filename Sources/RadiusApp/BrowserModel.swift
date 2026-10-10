@@ -208,11 +208,23 @@ final class BrowserModel: ObservableObject {
     }
     func selectTab(_ id: UUID) {
         guard !app.finalQuitDataFrozen, session.tabs.contains(where: { $0.id == id }) else { return }
+        let previousWindow = webTabs[session.selectedTabID]?.nativeView.window
         session.selectTab(id); address = selectedTab.url?.absoluteString ?? ""
-        // Both views remain mounted in a split. Keep native focus and toolbar context together.
-        if session.split != nil, let view = webTabs[id]?.nativeView, let window = view.window {
-            if let current = window.firstResponder as? NSView, current === view || current.isDescendant(of: view) { return }
-            webTabs[id]?.focus()
+        // A Chrome child can leave the parent's field responder in its other
+        // split pane. Explicit selection must release that stale page focus,
+        // including when the selected blank pane has no mounted native view.
+        guard session.split != nil else { return }
+        let tab = webTabs[id]
+        if let window = tab?.nativeView.window ?? previousWindow,
+           let current = window.firstResponder as? NSView,
+           webTabs.contains(where: { entry in
+               entry.key != id && (current === entry.value.nativeView || current.isDescendant(of: entry.value.nativeView))
+           }) {
+            window.makeFirstResponder(nil)
+        }
+        if let tab, let window = tab.nativeView.window {
+            if let current = window.firstResponder as? NSView, current === tab.nativeView || current.isDescendant(of: tab.nativeView) { return }
+            tab.focus()
         }
     }
     func closeTab(_ id: UUID) {

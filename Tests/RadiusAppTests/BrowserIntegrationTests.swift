@@ -297,6 +297,46 @@ struct BrowserIntegrationTests {
         #expect(browser.session.tabs.contains { $0.id == replacementID })
         browser.closeWindow(); #expect(await app.flush())
     }
+    @Test func aNewSplitPaneReleasesStaleParentPageFocusWithoutBlockingRealPaneFocus() async throws {
+        let (app, directory) = try await fixture()
+        let browser = BrowserModel(app: app, isPrivate: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400),
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer {
+            window.contentView = nil; window.close(); browser.closeWindow()
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let retainedID = browser.session.selectedTabID
+        let retained = browser.activeWebTab
+        browser.beginSplit(.sideBySide)
+        let outgoing = browser.activeWebTab
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        window.contentView = content
+        retained.nativeView.frame = NSRect(x: 0, y: 0, width: 300, height: 400)
+        outgoing.nativeView.frame = NSRect(x: 300, y: 0, width: 300, height: 400)
+        content.addSubview(retained.nativeView); content.addSubview(outgoing.nativeView)
+        window.orderFront(nil)
+        try #require(window.makeFirstResponder(retained.nativeView))
+        let responder = try #require(window.firstResponder as? NSView)
+        try #require(responder === retained.nativeView || responder.isDescendant(of: retained.nativeView))
+
+        // A Chrome child can be key while its parent remembers the other
+        // pane's WebKit responder. The new blank pane has no mounted view.
+        browser.newTab(engine: .webkit)
+        let blankID = browser.session.selectedTabID
+        #expect(browser.activeWebTab.nativeView.window == nil)
+        #expect(window.firstResponder !== responder)
+        browser.updateFocusedTab(window.firstResponder)
+        #expect(browser.session.selectedTabID == blankID)
+
+        try #require(window.makeFirstResponder(retained.nativeView))
+        browser.updateFocusedTab(window.firstResponder)
+        #expect(browser.session.selectedTabID == retainedID)
+        let focused = try #require(window.firstResponder as? NSView)
+        #expect(focused === retained.nativeView || focused.isDescendant(of: retained.nativeView))
+        #expect(await app.flush())
+    }
     @Test func profileReplacementResetsGeneratedPagesAndAddress() async throws {
         let (app, directory) = try await fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
