@@ -302,6 +302,8 @@ def main(restart):
         evidence.update(ownedAppProcessesExited=True, installedCopyRemoved=True, externalUserDataKept=True,
                         preservedUserLibrarySHA256=preserved, passed=True)
         print('Read-only DMG copy, installed launch, normal quit and removal passed.', flush=True)
+        print('Accepted installer: ' + name + ' | bytes=' + str(package['bytes'])
+              + ' | SHA-256=' + package['sha256'], flush=True)
     except BaseException as error:
         evidence['error'] = str(error)
         raise

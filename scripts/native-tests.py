@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """Run native tests with owned-process diagnostics and a finite CI deadline."""
 import os
+import re
 from pathlib import Path
 import signal
 import subprocess
@@ -76,4 +77,7 @@ except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
         process.wait(timeout=5)
     status = 1 if isinstance(error, subprocess.TimeoutExpired) else 130
 reader.join(timeout=5)
+if status == 0 and not re.search(r"Test run with [1-9][0-9]* tests passed", log_path.read_text()):
+    print("Native test process exited without a completed Swift Testing suite.", file=sys.stderr, flush=True)
+    status = 1
 sys.exit(status)

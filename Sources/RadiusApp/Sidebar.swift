@@ -89,7 +89,9 @@ struct DownloadRow: View {
             if item.active {
                 ProgressView(value: item.fraction)
                 Button("Cancel") { center.cancel(item) }
-            } else if let url = item.staging ?? (item.status == "Finished" ? item.destination : nil) {
+            } else if item.transferEnded,
+                      let url = item.staging ?? (item.status == "Finished" ? item.destination : nil),
+                      FileManager.default.fileExists(atPath: url.path) {
                 Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
             }
             Divider()

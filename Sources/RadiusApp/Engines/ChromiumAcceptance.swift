@@ -263,11 +263,21 @@ enum ChromiumAcceptance {
               blank.nativeView.window == nil, !blank.hasNativeNavigationChrome, !blank.focusAddressBar() else {
             throw ValidationError("A blank Chromium tab hid Radius's address field or claimed an unmounted Chrome toolbar.")
         }
-        ownerWindow.makeKeyAndOrderFront(nil)
-        try key("l", code: 37, modifiers: .command, window: ownerWindow)
-        try await Task.sleep(for: .milliseconds(100))
-        guard ownerWindow.firstResponder is NSTextView else {
-            throw ValidationError("Cmd-L on the Chromium start page did not focus Radius's native address field.")
+        // The new pane replaces a native Chrome child with SwiftUI's address
+        // field. Wait for the real owner window and field to acquire focus as
+        // that view transition finishes, using the actual Cmd-L event.
+        let addressFocusDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while true {
+            NSApp.activate()
+            ownerWindow.makeKeyAndOrderFront(nil)
+            if NSApp.keyWindow === ownerWindow {
+                try key("l", code: 37, modifiers: .command, window: ownerWindow)
+                if ownerWindow.firstResponder is NSTextView { break }
+            }
+            guard ContinuousClock.now < addressFocusDeadline else {
+                throw ValidationError("Cmd-L on the Chromium start page did not focus Radius's native address field.")
+            }
+            try await Task.sleep(for: .milliseconds(50))
         }
         components.fragment = "radius-native-blank-tab"
         guard let blankTarget = components.url else { throw ValidationError("The blank tab probe address is invalid.") }
@@ -740,20 +750,26 @@ enum ChromiumAcceptance {
             return 'requested';
         })()
         """)
-        var approved = false
+        var pressDispatched = false
+        var nextPress = ContinuousClock.now
         var lastPromptState = ""
         let deadline = ContinuousClock.now.advanced(by: .seconds(20))
         while ContinuousClock.now < deadline {
-            if !approved {
+            if ContinuousClock.now >= nextPress {
                 let response = try await manager.request("Radius.removeFixtureExtension", parameters: ["id": id])
-                approved = (try JSONSerialization.jsonObject(with: response) as? [String: Any])?["pressed"] as? Bool == true
+                let pressed = (try JSONSerialization.jsonObject(with: response) as? [String: Any])?["pressed"] as? Bool == true
+                pressDispatched = pressDispatched || pressed
+                // AX reports dispatch even when Chrome's 500 ms input protector
+                // rejects a press. A quiet interval allows the same owned
+                // fixture dialog to accept the next genuine native action.
+                nextPress = ContinuousClock.now.advanced(by: .seconds(1))
                 let promptState = String(decoding: response, as: UTF8.self)
                 if promptState != lastPromptState {
                     print("Radius Chromium native removal prompt: \(promptState)")
                     lastPromptState = promptState
                 }
             }
-            if approved {
+            if pressDispatched {
                 let state = try await evaluate(manager, "String(window.radiusFixtureRemoval)")
                 if state.hasPrefix("error:") { throw ValidationError(state) }
                 let remains = try await evaluate(manager, "String((await chrome.developerPrivate.getExtensionsInfo({includeDisabled:true,includeTerminated:true})).some(e => e.id === '\(id)'))")

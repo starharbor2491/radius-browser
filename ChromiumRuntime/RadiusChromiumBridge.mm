@@ -468,14 +468,15 @@ class Client final : public CefClient, public CefLifeSpanHandler,
     Emit(page_,RADIUS_CEF_STATE,capabilities);
     page_->pending_popup = false;
     page_->observer = browser->GetHost()->AddDevToolsMessageObserver(this);
-    if (owner->restoring && owner->awaiting_restore_browser && !owner->restore_urls.empty()) {
+    const bool restoring_browser=owner->restoring && owner->awaiting_restore_browser && !owner->restore_urls.empty();
+    if (restoring_browser) {
       page_->pending_url=owner->restore_urls.front();
       owner->restore_urls.erase(owner->restore_urls.begin());
       owner->restore_created=browser;
       owner->awaiting_restore_browser=false; page_->navigated=true;
     }
     if (owner->closing) browser->GetHost()->CloseBrowser(true);
-    else if (!page_->pending_url.empty()) browser->GetMainFrame()->LoadURL(page_->pending_url);
+    else if (!restoring_browser && !page_->pending_url.empty()) browser->GetMainFrame()->LoadURL(page_->pending_url);
     if (auto active=Active(owner)) State(active);
   }
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
@@ -854,11 +855,14 @@ void RestoreInnerPages(Page* owner) {
     owner->restore_urls.erase(owner->restore_urls.begin());
   }
   if (owner->awaiting_restore_browser) return;
-  // OnAfterCreated precedes Chrome's native tab-strip activation. Confirm the
-  // new tab became active before selecting another tab or finishing recovery.
+  // OnAfterCreated holds CEF's navigation lock. Load only after Chrome has
+  // inserted and activated this tab, outside that callback: a deferred LoadURL
+  // would later focus its browser and undo the final saved selection.
   if (owner->restore_created) {
     if (!member->browser->IsSame(owner->restore_created)) return;
     owner->restore_created=nullptr;
+    member->browser->GetMainFrame()->LoadURL(member->pending_url);
+    return;
   }
   if (!owner->restore_urls.empty()) {
     const int command=cef_id_for_command_id_name("IDC_NEW_TAB");
@@ -867,11 +871,11 @@ void RestoreInnerPages(Page* owner) {
     member->browser->GetHost()->ExecuteChromeCommand(command,CEF_WOD_CURRENT_TAB);
     return;
   }
-  // Focusing an inactive WebContents does not select its native Chrome tab.
-  // Use Chrome's real tab command and finish only after its public active
-  // browser query confirms the saved selection. Do not steal window focus.
+  // The saved selection occupies the fresh window's first tab; IDC_NEW_TAB
+  // appends the others. Select that fixed slot and finish only after the public
+  // active-browser query confirms its identity. Repeating this is idempotent.
   if (!member->browser->IsSame(owner->restore_selection)) {
-    const int command=cef_id_for_command_id_name("IDC_SELECT_PREVIOUS_TAB");
+    const int command=cef_id_for_command_id_name("IDC_SELECT_TAB_0");
     if (member->browser->GetHost()->CanExecuteChromeCommand(command))
       member->browser->GetHost()->ExecuteChromeCommand(command,CEF_WOD_CURRENT_TAB);
     return;
