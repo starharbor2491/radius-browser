@@ -119,6 +119,15 @@ def run_smoke(command, environment, timeout):
         raise
 
 
+def verify_normal_quit(log, acceptance):
+    content = log.read_text()
+    accepted_at = content.find(acceptance)
+    requested_at = content.find('Radius app delegate: applicationShouldTerminate entered', accepted_at)
+    replied_at = content.find('Radius app delegate: Sending termination reply: true', requested_at)
+    if accepted_at < 0 or requested_at < accepted_at or replied_at < requested_at:
+        raise ValueError('The installed app did not complete acceptance followed by its normal termination reply')
+
+
 class PerformanceObservation:
     """Optional CI observations; missing samples never alter acceptance."""
     def __init__(self, temporary):
@@ -278,14 +287,14 @@ def main(restart):
                            RADIUS_SMOKE_LAUNCH_RECORD=str(temporary / 'launch'), RADIUS_SMOKE_PID_RECORD=str(temporary / 'pid'))
         observation.thread.start()
         run_smoke(['bash', str(ROOT / 'scripts/smoke-app.sh')], environment, 500)
-        if 'Radius packaged-app smoke test passed.' not in (DIST / 'smoke-app.log').read_text():
-            raise ValueError('The installed launch did not finish its native acceptance checks')
-        evidence['normalQuit'] = True
+        verify_normal_quit(DIST / 'smoke-app.log', 'Radius packaged-app smoke test passed.')
+        evidence.update(normalQuit=True, applicationTerminationReplyAccepted=True)
         if restart:
             run_smoke(['python3', str(ROOT / 'scripts/smoke-chromium-restart.py')], environment, 100)
-            if 'Chromium real-process restart acceptance passed' not in (DIST / 'smoke-chromium-restart.log').read_text():
-                raise ValueError('The installed restart did not finish its extension persistence checks')
-            evidence['chromiumProcessRestartAndNormalQuit'] = True
+            verify_normal_quit(DIST / 'smoke-chromium-restart.log',
+                               'Chromium real-process restart acceptance passed')
+            evidence.update(chromiumProcessRestartAndNormalQuit=True,
+                            restartApplicationTerminationReplyAccepted=True)
         deadline = time.monotonic() + 5
         while owned_processes(copied):
             if time.monotonic() > deadline:

@@ -8,6 +8,7 @@ smoke_app_pid=""
 smoke_watchdog_pid=""
 smoke_started_at="$(date +%s)"
 smoke_deadline=90
+smoke_timeout_marker="$PWD/dist/smoke-timeout.txt"
 if [[ -n "${RADIUS_CHROMIUM_PACKAGE:-}" ]]; then smoke_deadline=420; fi
 cleanup() {
   smoke_status=$?
@@ -68,7 +69,7 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 : >dist/smoke-app.log
-rm -f dist/smoke-sample.txt dist/smoke-sample.log dist/smoke-port.txt
+rm -f dist/smoke-sample.txt dist/smoke-sample.log dist/smoke-port.txt "$smoke_timeout_marker"
 python3 -u scripts/smoke-server.py --port-file dist/smoke-port.txt >dist/smoke-server.log 2>&1 &
 smoke_server_pid=$!
 smoke_server_ready=false
@@ -135,6 +136,8 @@ fi
   wait "$timer_pid"
   timer_pid=""
   if kill -0 "$smoke_app_pid" 2>/dev/null; then
+    # TERM can produce exit status zero; record the timeout before signalling.
+    : >"$smoke_timeout_marker"
     echo "Radius exceeded the $smoke_deadline-second smoke-test deadline; sending TERM." >&2
     kill -TERM "$smoke_app_pid" 2>/dev/null || true
     sleep 5 &
@@ -147,6 +150,11 @@ fi
 smoke_watchdog_pid=$!
 if wait "$smoke_app_pid"; then smoke_status=0; else smoke_status=$?; fi
 smoke_app_pid=""
+# Join the watchdog before inspecting its marker, including the exit/deadline race.
+kill "$smoke_watchdog_pid" 2>/dev/null || true
+wait "$smoke_watchdog_pid" 2>/dev/null || true
+smoke_watchdog_pid=""
+if [[ -f "$smoke_timeout_marker" ]]; then smoke_status=124; fi
 if [[ "$smoke_status" -eq 0 ]]; then
   # Native acceptance records this path only after a real incomplete Chromium
   # download survives its inner-tab close and the owning pane reaches CLOSED.

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MPL-2.0
 set -euo pipefail
 cd "$(dirname "$0")/.."
+python3 scripts/test-installed-acceptance.py
 if [[ "$(uname -s)" == Darwin ]]; then
   configuration=debug
   previous_argument=""

@@ -29,7 +29,7 @@ enum AppSmokeTest {
                 try await ChromiumAcceptance.verifyStoreRestart(app: app)
                 guard await app.flush() else { throw ValidationError(app.notice ?? "Could not save restart acceptance data.") }
                 trace("Chromium real-process restart acceptance passed")
-                NSApp.perform(#selector(NSApplication.terminate(_:)), with: nil, afterDelay: 0)
+                NSApp.perform(#selector(NSApplication.terminate(_:)), with: nil, afterDelay: 0, inModes: [.common, .modalPanel])
                 return
             }
             trace("Browser window opened")
@@ -349,8 +349,9 @@ enum AppSmokeTest {
             trace("Saving browser data")
             guard await app.flush() else { throw ValidationError(app.notice ?? "App data could not be saved.") }
             trace("Radius packaged-app smoke test passed.")
-            // Let this actor job return before AppKit enters its deferred-termination loop.
-            NSApp.perform(#selector(NSApplication.terminate(_:)), with: nil, afterDelay: 0)
+            // Return this actor job before AppKit enters its deferred-termination loop.
+            // The extension-manager sheet can leave AppKit in modal-panel mode.
+            NSApp.perform(#selector(NSApplication.terminate(_:)), with: nil, afterDelay: 0, inModes: [.common, .modalPanel])
         } catch { fail(error.localizedDescription) }
     }
     private static func moduleSectionPicker(in root: NSView) -> NSSegmentedControl? {
