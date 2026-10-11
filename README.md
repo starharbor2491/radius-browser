@@ -6,7 +6,15 @@ Radius v1 includes Chrome extension management, a graphical module center, layou
 
 ## Install on a Mac
 
-Requires macOS 14 or later. Download the accepted installer listed in [AUDIT.md](docs/AUDIT.md); sign in to GitHub if prompted. Extract the artifact ZIP and open its DMG. Drag Radius to Applications, eject the disk image, and open Radius.
+Requires macOS 14 or later. Download a DMG from the [Radius 1.0.0 release](https://github.com/starharbor2491/radius-browser/releases/tag/v1.0.0), open it, drag Radius to Applications, eject the disk image, and open Radius.
+
+| Mac | Download |
+| --- | --- |
+| Apple Silicon (M-series), Chromium + WebKit | [Complete installer](https://github.com/starharbor2491/radius-browser/releases/download/v1.0.0/Radius-1.0.0-Chromium-arm64-development.dmg) |
+| Intel, Chromium + WebKit | [Complete installer](https://github.com/starharbor2491/radius-browser/releases/download/v1.0.0/Radius-1.0.0-Chromium-x86_64-development.dmg) |
+| Either CPU, WebKit only | [Smaller installer](https://github.com/starharbor2491/radius-browser/releases/download/v1.0.0/Radius-1.0.0-WebKit-universal-development.dmg) |
+
+The complete installers bundle Chromium's framework, sandbox helpers, resources, and all 18 modules. WebKit uses the framework supplied by macOS. No package manager, developer tools, or additional engine download is required. The release includes checksums and installation receipts; see [AUDIT.md](docs/AUDIT.md).
 
 Choose **WebKit universal** for either Apple Silicon or Intel, **Chromium arm64** for Apple Silicon, or **Chromium x86_64** for Intel. Chromium installers also contain WebKit; change the default in **Settings → Browsing engines** or reopen the active page with another engine. Website sign-ins and unsaved forms remain separate.
 

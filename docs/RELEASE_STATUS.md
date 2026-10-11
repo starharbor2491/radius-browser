@@ -2,6 +2,8 @@
 
 The v1 implementation combines a native WebKit browser, optional Chrome-style Chromium, 18 module packages, a graphical customization editor, and a verified complete-application installer. The accepted source, native checks, installer downloads and exact hashes are recorded in [AUDIT.md](AUDIT.md).
 
+The consolidated v1 branch is merged into `main`. [Radius 1.0.0](https://github.com/starharbor2491/radius-browser/releases/tag/v1.0.0) provides permanent DMG downloads for complete Chromium + WebKit installations on Apple Silicon and Intel, plus a smaller universal WebKit option. These are the exact accepted CI installers. The release is marked prerelease for its ad-hoc signing/notarization limitation.
+
 | Area | Implemented behavior |
 | --- | --- |
 | Browsing | Multiple windows/profiles, tabs on four edges, pin/reorder/reopen, native history/bookmarks/import, find, zoom, downloads, popup/dialog/media controls, and engine crash recovery |

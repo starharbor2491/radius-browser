@@ -1,0 +1,125 @@
+name: Publish accepted Radius 1.0.0 installers
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: radius-1.0.0-publish
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require the accepted executable source
+        run: |
+          test "$GH_REPO" = starharbor2491/radius-browser
+          git diff --exit-code f91a8c4c2779fd21795711438c4da0f2ea15c701 HEAD -- . ':!README.md' ':!docs' ':!.github/workflows/development-release.yml'
+      - name: Download exact accepted artifacts and workflow records
+        run: |
+          mkdir -p archives release
+          for run in 38089121425 38089121427; do
+            gh api "repos/$GH_REPO/actions/runs/$run" > "archives/run-$run.json"
+          done
+          for id in 11683717786 11683192133 11683913532; do
+            gh api "repos/$GH_REPO/actions/artifacts/$id" > "archives/$id.json"
+            gh api "repos/$GH_REPO/actions/artifacts/$id/zip" > "archives/$id.zip"
+          done
+      - name: Verify archive, installer, and native acceptance receipts
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, pathlib, shutil, zipfile
+          source = 'f91a8c4c2779fd21795711438c4da0f2ea15c701'
+          tested = 'f9a92a53145192904d233c4e144c7ed0a6ec10e8'
+          merge = '806abea5bd088f8aa03fbd6c2d534dd2669ac165'
+          root = pathlib.Path('release')
+          variants = [
+              (11683717786, 38089121425, 'universal', False, 19197160, 'fd4cb7ca3f0c8d93b600b969cc021ad4509456d9aac46239f2955cb6a8f6c7fa', 10388132, '09c24e9128c6f653104b2642246ef9237e2d80a385e8e415b39b49a10cfeae71'),
+              (11683192133, 38089121427, 'arm64', True, 468721784, 'bcfb52e90c3e667052337e1994171c1f3a7a093646c44cdad8424a9a4ae45fd6', 172578704, '77851aae7d71845f9e22b5addcdda4d2f8f7d58447e48f74baded8f480ec028e'),
+              (11683913532, 38089121427, 'x86_64', True, 502281763, '4be3ed9aa578354fa06cf3a82b102a202ef1af26111754570215643adc647e08', 184209895, '05343043802a75bc69ec82ce68599404e8f3e5fa0bcc2b54fc4d4d678cf07873'),
+          ]
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
+          def digest(path):
+              h = hashlib.sha256()
+              with path.open('rb') as f:
+                  for chunk in iter(lambda: f.read(1024 * 1024), b''):
+                      h.update(chunk)
+              return h.hexdigest()
+          receipts = []
+          for artifact, run, arch, chromium, zip_bytes, zip_sha, dmg_bytes, dmg_sha in variants:
+              record = json.loads(pathlib.Path(f'archives/run-{run}.json').read_text())
+              require(record['status'] == 'completed' and record['conclusion'] == 'success' and record['head_sha'] == source, 'Workflow is not the accepted successful source')
+              meta = json.loads(pathlib.Path(f'archives/{artifact}.json').read_text())
+              archive = pathlib.Path(f'archives/{artifact}.zip')
+              require(meta['id'] == artifact and meta['workflow_run']['id'] == run and meta['workflow_run']['head_sha'] == source and not meta['expired'], 'Unexpected artifact identity')
+              require(meta['size_in_bytes'] == zip_bytes == archive.stat().st_size and meta['digest'] == 'sha256:' + zip_sha and digest(archive) == zip_sha, 'Archive integrity failure')
+              with zipfile.ZipFile(archive) as z:
+                  packages = [n for n in z.namelist() if n.endswith('-package.json')]
+                  require(len(packages) == 1 and len(z.namelist()) == len(set(z.namelist())), 'Ambiguous archive')
+                  package = json.loads(z.read(packages[0]))
+                  smoke = json.loads(z.read('installed-smoke.json'))
+                  require(smoke['sourceCheckout'] == tested == smoke['workflowSource'] and smoke['workflowRun'] == str(run) and smoke['package'] == package, 'Unmatched installed receipt')
+                  for key in ['passed', 'readOnlyMount', 'sealedCopyVerified', 'detachedBeforeLaunch', 'normalQuit', 'applicationTerminationReplyAccepted', 'ownedAppProcessesExited', 'installedCopyRemoved', 'externalUserDataKept']:
+                      require(smoke[key] is True, 'Failed installed check: ' + key)
+                  if chromium:
+                      for key in ['chromiumProcessRestartAndNormalQuit', 'restartApplicationTerminationReplyAccepted']:
+                          require(smoke[key] is True, 'Failed Chromium check: ' + key)
+                  require(len(set(smoke['defaultModules'])) == 18 and set(smoke['codeDirectoryHashes']) == {'arm64', 'x86_64'}, 'Incomplete module or host architecture receipt')
+                  distribution = package['release']
+                  require(package['developerID'] is False and package['notarized'] is False, 'Signing status must be accurately labeled')
+                  require(distribution['chromium'] is chromium and distribution['architecture'] == arch and distribution['version'] == '1.0.0' and distribution['minimumMacOS'] == '14.0' and distribution['securityEpoch'] >= 154, 'Unexpected distribution')
+                  expected = 'Radius-1.0.0-' + ('Chromium-' + arch if chromium else 'WebKit-universal') + '-development.dmg'
+                  require(package['file'] == expected and package['bytes'] == dmg_bytes and package['sha256'] == dmg_sha, 'Unexpected installer')
+                  for name in [expected, packages[0]]:
+                      require(pathlib.PurePosixPath(name).name == name, 'Invalid payload name')
+                      with z.open(name) as src, (root / name).open('wb') as dest:
+                          shutil.copyfileobj(src, dest)
+              require((root / expected).stat().st_size == dmg_bytes and digest(root / expected) == dmg_sha, 'Installer integrity failure')
+              receipts.append({'artifact': meta, 'testedMerge': tested, 'workflowRun': run, 'archiveSHA256': zip_sha, 'package': package, 'nativeInstalledSmoke': smoke})
+          (root / 'Radius-1.0.0-installation-receipts.json').write_text(json.dumps({'format': 1, 'version': '1.0.0', 'executableSource': source, 'executableSourceTree': 'ca2376c0b731a1fae68e1cca53c34e8c44df8169', 'releaseMerge': merge, 'installers': receipts}, indent=2) + '\n')
+          shutil.copyfile('docs/RELEASE_NOTES_1.0.0.md', root / 'INSTALL.md')
+          (root / 'SHA256SUMS').write_text(''.join(digest(p) + '  ' + p.name + '\n' for p in sorted(root.iterdir()) if p.name != 'SHA256SUMS'))
+          PY
+          cd release
+          sha256sum -c SHA256SUMS
+      - name: Upload to the development draft
+        run: |
+          gh release view v1.0.0 --json isDraft,isPrerelease,targetCommitish > archives/draft.json
+          python3 - <<'PY'
+          import json
+          d = json.load(open('archives/draft.json'))
+          if not (d['isDraft'] and d['isPrerelease'] and d['targetCommitish'] == '806abea5bd088f8aa03fbd6c2d534dd2669ac165'):
+              raise SystemExit('Refusing to modify an unexpected or already public release')
+          PY
+          gh release upload v1.0.0 release/* --clobber
+      - name: Verify uploaded bytes before publication
+        run: |
+          gh api "repos/$GH_REPO/releases/409346567/assets?per_page=100" > archives/assets.json
+          python3 - <<'PY'
+          import hashlib, json, pathlib
+          assets = json.load(open('archives/assets.json'))
+          files = {p.name: p for p in pathlib.Path('release').iterdir()}
+          if len(assets) != len(files) or {a['name'] for a in assets} != set(files):
+              raise SystemExit('Release has missing or extra payloads')
+          for asset in assets:
+              p = files[asset['name']]
+              h = hashlib.sha256()
+              with p.open('rb') as f:
+                  for b in iter(lambda: f.read(1024 * 1024), b''):
+                      h.update(b)
+              if asset['state'] != 'uploaded' or asset['size'] != p.stat().st_size or asset.get('digest') != 'sha256:' + h.hexdigest():
+                  raise SystemExit('Uploaded bytes do not match: ' + p.name)
+          PY
+      - name: Publish complete unnotarized installers
+        run: gh release edit v1.0.0 --draft=false --prerelease --latest=false --notes-file docs/RELEASE_NOTES_1.0.0.md

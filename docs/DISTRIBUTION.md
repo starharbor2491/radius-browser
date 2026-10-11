@@ -24,7 +24,9 @@ Each CPU architecture has its own separately signed updater executable. Candidat
 
 Development builds have ad-hoc code integrity but no authenticated Developer ID publisher. Their consumer installation controls remain unavailable. There is no user-facing trust override or test verifier in the installation service.
 
-For a development DMG, download the accepted artifact linked in [AUDIT.md](AUDIT.md); sign in to GitHub if prompted. Extract its ZIP, open the disk image, drag Radius into Applications, eject the image, and open that copy. If macOS blocks the unnotarized app, review the source and the SHA-256 in [AUDIT.md](AUDIT.md), then use **System Settings → Privacy & Security → Open Anyway** and confirm **Open** for this app. Choose the Chromium installer matching the Mac's native CPU; the WebKit installer supports both architectures.
+For a development DMG, download the installer directly from the [Radius 1.0.0 release](https://github.com/starharbor2491/radius-browser/releases/tag/v1.0.0). Open the disk image, drag Radius into Applications, eject the image, and open that copy. If macOS blocks the unnotarized app, review the source and the SHA-256 in [AUDIT.md](AUDIT.md), then use **System Settings → Privacy & Security → Open Anyway** and confirm **Open** for this app. Choose the Chromium installer matching the Mac's native CPU; the WebKit installer supports both architectures.
+
+Both Chromium installers include the native CEF framework, five sandbox helper variants, Chromium resources/locales and license notices, universal module workers, updater helpers, and all 18 factory modules. WebKit is supplied by macOS and is available in every variant. Installing the app requires no Homebrew, Xcode, package manager, or separate runtime download. The development release is marked prerelease because publisher signing and notarization are unavailable.
 
 ## Production build pipeline
 

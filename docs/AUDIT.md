@@ -29,13 +29,13 @@ The real worker regression stops an owned process and exercises run-loop reentry
 
 ## Downloads
 
-Accepted artifacts contain the DMG and its package/installation receipts. Sign in to GitHub if prompted, download the ZIP, extract it, open the DMG, and drag Radius to Applications. [Installation instructions](DISTRIBUTION.md) describe the architecture choices and development-build opening behavior.
+The [Radius 1.0.0 release](https://github.com/starharbor2491/radius-browser/releases/tag/v1.0.0) publishes the exact accepted DMGs with their package metadata, installation receipts, and `SHA256SUMS`. Download the matching DMG directly, open it, and drag Radius to Applications. [Installation instructions](DISTRIBUTION.md) describe the architecture choices and development-build opening behavior.
 
-| Variant | Installer download | DMG inside the ZIP | DMG bytes |
+| Variant | Installer download | DMG | DMG bytes |
 | --- | --- | --- | --- |
-| WebKit universal (Apple Silicon or Intel) | [Download ZIP](https://github.com/starharbor2491/radius-browser/actions/runs/38089121425/artifacts/11683717786) | `Radius-1.0.0-WebKit-universal-development.dmg` | 10,388,132 |
-| Chromium + WebKit (Apple Silicon) | [Download ZIP](https://github.com/starharbor2491/radius-browser/actions/runs/38089121427/artifacts/11683192133) | `Radius-1.0.0-Chromium-arm64-development.dmg` | 172,578,704 |
-| Chromium + WebKit (Intel) | [Download ZIP](https://github.com/starharbor2491/radius-browser/actions/runs/38089121427/artifacts/11683913532) | `Radius-1.0.0-Chromium-x86_64-development.dmg` | 184,209,895 |
+| WebKit universal (Apple Silicon or Intel) | [Download DMG](https://github.com/starharbor2491/radius-browser/releases/download/v1.0.0/Radius-1.0.0-WebKit-universal-development.dmg) | `Radius-1.0.0-WebKit-universal-development.dmg` | 10,388,132 |
+| Chromium + WebKit (Apple Silicon) | [Download DMG](https://github.com/starharbor2491/radius-browser/releases/download/v1.0.0/Radius-1.0.0-Chromium-arm64-development.dmg) | `Radius-1.0.0-Chromium-arm64-development.dmg` | 172,578,704 |
+| Chromium + WebKit (Intel) | [Download DMG](https://github.com/starharbor2491/radius-browser/releases/download/v1.0.0/Radius-1.0.0-Chromium-x86_64-development.dmg) | `Radius-1.0.0-Chromium-x86_64-development.dmg` | 184,209,895 |
 
 | DMG | SHA-256 |
 | --- | --- |
@@ -43,7 +43,7 @@ Accepted artifacts contain the DMG and its package/installation receipts. Sign i
 | `Radius-1.0.0-Chromium-arm64-development.dmg` | `77851aae7d71845f9e22b5addcdda4d2f8f7d58447e48f74baded8f480ec028e` |
 | `Radius-1.0.0-Chromium-x86_64-development.dmg` | `05343043802a75bc69ec82ce68599404e8f3e5fa0bcc2b54fc4d4d678cf07873` |
 
-These CI artifact downloads expire on **January 8, 2027**. Retain the extracted DMGs for later installation. The checksum above covers the DMG, not its containing artifact ZIP.
+Release assets have no automatic CI artifact expiry. The original [WebKit CI archive](https://github.com/starharbor2491/radius-browser/actions/runs/38089121425/artifacts/11683717786), [Apple Silicon CI archive](https://github.com/starharbor2491/radius-browser/actions/runs/38089121427/artifacts/11683192133), and [Intel CI archive](https://github.com/starharbor2491/radius-browser/actions/runs/38089121427/artifacts/11683913532) expire on **January 8, 2027**. The checksums above cover the DMGs, not those original artifact ZIPs.
 
 Each receipt identifies the workflow, tested checkout, installer bytes, architecture, signing status, and all 18 actual module payloads. The host and three native workers are universal; the package includes an updater helper for each architecture. Chromium payloads match the chosen native CPU. Failed diagnostics are retained separately and are not accepted installers.
 
