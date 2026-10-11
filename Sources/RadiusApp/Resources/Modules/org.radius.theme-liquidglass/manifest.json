@@ -1,0 +1,12 @@
+{
+  "id": "org.radius.theme-liquidglass",
+  "name": "Liquid Glass Theme",
+  "version": 1,
+  "summary": "Translucent glass surfaces that follow your Mac’s light or dark appearance.",
+  "publisher": "Radius",
+  "source": "https://github.com/starharbor2491/radius-browser",
+  "capability": "theme",
+  "dependencies": [],
+  "defaultInstalled": false,
+  "runtime": "declarative"
+}

@@ -1,0 +1,53 @@
+// SPDX-License-Identifier: MPL-2.0
+#ifndef RADIUS_ENGINE_ABI_H
+#define RADIUS_ENGINE_ABI_H
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+void RadiusBootstrapApplication(void);
+typedef void (*radius_cef_event_callback)(void *context, int event, const char *json);
+typedef int (*radius_cef_popup_callback)(void *context, void *child, const char *url);
+
+enum { RADIUS_CEF_STATE = 1, RADIUS_CEF_FINISHED, RADIUS_CEF_ERROR,
+       RADIUS_CEF_CLOSED, RADIUS_CEF_RESULT, RADIUS_CEF_NOTICE,
+       RADIUS_CEF_READER_CONTEXT, RADIUS_CEF_DOWNLOAD_BEGIN, RADIUS_CEF_DOWNLOAD_UPDATE,
+       RADIUS_CEF_ACTIVATE, RADIUS_CEF_BROWSER_COMMAND };
+enum { RADIUS_CEF_LOAD = 1, RADIUS_CEF_RELOAD, RADIUS_CEF_STOP,
+       RADIUS_CEF_BACK, RADIUS_CEF_FORWARD, RADIUS_CEF_ZOOM,
+       RADIUS_CEF_FIND, RADIUS_CEF_POPUPS, RADIUS_CEF_FOCUS,
+       RADIUS_CEF_EXTENSIONS, RADIUS_CEF_FOCUS_LOCATION, RADIUS_CEF_DOWNLOAD_PATH, RADIUS_CEF_DOWNLOAD_CANCEL,
+       RADIUS_CEF_HOME, RADIUS_CEF_RESTORE_TABS, RADIUS_CEF_SYNC_ACTIVE,
+       RADIUS_CEF_NEW_TAB, RADIUS_CEF_CLOSE_TAB, RADIUS_CEF_CLOSE_WINDOW, /* Reserved. */
+       RADIUS_CEF_STOP_ADMISSION,
+       RADIUS_CEF_REOPEN_TAB, RADIUS_CEF_PREVIOUS_TAB, RADIUS_CEF_NEXT_TAB };
+
+/// Versioned ABI loaded only from an explicitly installed engine package.
+typedef struct radius_cef_api {
+    uint32_t version;
+    int (*initialize)(const char *package_path, const char *data_path, const char *main_bundle_path);
+    const char *(*last_error)(void);
+    void *(*create_page)(const char *profile_id, const char *private_window_id);
+    void *(*native_view)(void *page);
+    void (*set_callbacks)(void *page, void *context, radius_cef_event_callback event, radius_cef_popup_callback popup);
+    void (*command)(void *page, int command, const char *text, double value);
+    void (*devtools)(void *page, int request_id, const char *method, const char *parameters);
+    void (*close_page)(void *page);
+    int (*live_pages)(void);
+    int (*shutdown)(void);
+    /// Release private context ownership for one window and/or profile. Empty
+    /// fields are wildcards; at least one field must be nonempty.
+    void (*release_private_contexts)(const char *private_window_id, const char *profile_id);
+    /// Execute a supported normal Chrome tab command; zero means unavailable.
+    int (*native_tab_command)(void *page, int command);
+    /// Freeze user commands/adoption while the final quit snapshot is saved.
+    void (*set_final_quit_frozen)(int frozen);
+} radius_cef_api;
+typedef const radius_cef_api *(*radius_cef_get_api_function)(void);
+
+#ifdef __cplusplus
+}
+#endif
+#endif

@@ -1,0 +1,21 @@
+{
+  "formatVersion": 1,
+  "menu": [
+    {
+      "title": "New tab",
+      "action": "newTab"
+    },
+    {
+      "title": "Bookmarks",
+      "action": "bookmarks"
+    },
+    {
+      "title": "Customize",
+      "action": "customize"
+    },
+    {
+      "title": "Modules",
+      "action": "modules"
+    }
+  ]
+}

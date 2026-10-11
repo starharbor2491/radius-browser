@@ -1,0 +1,12 @@
+{
+  "formatVersion": 1,
+  "layout": {
+    "tabs": "bottom",
+    "navigation": "bottom",
+    "sidebar": "hidden",
+    "sidebarWidth": 240,
+    "bookmarksBar": false,
+    "statusBar": true,
+    "treeTabs": false
+  }
+}

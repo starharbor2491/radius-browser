@@ -1,0 +1,12 @@
+{
+  "id": "org.radius.icons-filled",
+  "name": "Filled Icons",
+  "version": 1,
+  "summary": "Solid icons for navigation, bookmarks, history, and modules.",
+  "publisher": "Radius",
+  "source": "https://github.com/starharbor2491/radius-browser",
+  "capability": "icons",
+  "dependencies": [],
+  "defaultInstalled": false,
+  "runtime": "declarative"
+}

@@ -1,0 +1,37 @@
+{
+  "formatVersion": 1,
+  "entrypoints": {
+    "enter": {
+      "op": "object",
+      "fields": {
+        "active": {
+          "op": "input",
+          "key": "hideChrome"
+        },
+        "hiddenComponents": {
+          "op": "literal",
+          "value": [
+            "tabs",
+            "navigation",
+            "sidebar",
+            "bookmarks",
+            "status"
+          ]
+        }
+      }
+    },
+    "exit": {
+      "op": "object",
+      "fields": {
+        "active": {
+          "op": "literal",
+          "value": false
+        },
+        "hiddenComponents": {
+          "op": "literal",
+          "value": []
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,732 @@
+// SPDX-License-Identifier: MPL-2.0
+import AppKit
+import SwiftUI
+@preconcurrency import WebKit
+import RadiusCore
+
+@MainActor
+final class AppState: ObservableObject {
+    @Published var library = LibraryState() {
+        didSet {
+            guard !restoringFrozenLibrary else { return }
+            if finalQuitDataFrozen && !updatingQuitCleanup {
+                restoringFrozenLibrary = true
+                library = oldValue
+                restoringFrozenLibrary = false
+                return
+            }
+            if ready { scheduleSave() }
+        }
+    }
+    private var restoringFrozenLibrary = false
+    @Published var ready = false
+    @Published var startupError: String?
+    @Published var notice: String?
+    @Published var installedModules: [InstalledModule] = [] { didSet { resourceWorkerGeneration = UUID(); synchronizeModuleContributions(previous: oldValue) } }
+    @Published private(set) var resourceWorkerGeneration = UUID()
+    @Published var previewConfiguration: Configuration? { didSet { if previewConfiguration == nil { previewOwnerID = nil } } }
+    @Published private(set) var previewOwnerID: UUID?
+    @Published var deletingProfileIDs = Set<UUID>()
+    @Published var profilesAwaitingWebsiteDataRemoval = Set<UUID>()
+    let dataDirectory: URL
+    @Published var catalog: [ModuleManifest] = []
+    @Published var communityCatalogNames: [String] = []
+    var bundledModuleIDs = Set<String>()
+    var suspendingModuleContributions = false
+    var stoppingModuleWorkers = false
+    var moduleConfigurationBeforeMutation: Configuration?
+    var modulePayloads: [String: Data] = [:]
+    private var readerRequests: [UUID: (moduleID: String, task: Task<String, any Error>)] = [:]
+    private var startupTask: Task<Void, Never>?
+    private var database: LibraryDatabase?
+    var repository: ModuleRepository?
+    private var saveTask: Task<Void, Never>?
+    private var revision: UInt64 = 0
+    private var libraryChangedDuringTermination = false
+    @Published private(set) var finalQuitDataFrozen = false
+    private var updatingQuitCleanup = false
+    private var claimedSessions = Set<UUID>()
+    @Published var terminating = false {
+        didSet { if oldValue && !terminating && ready { scheduleSave() } }
+    }
+    var saveWithoutChromiumOnQuit = false
+    var savingWebsiteDataClearRequest = false
+    var webKitDataStores: [UUID: WKWebsiteDataStore] = [:]
+    private(set) var windows: [UUID: BrowserReference] = [:]
+    var configuration: Configuration { previewConfiguration ?? library.preferences.configuration }
+
+    func beginConfigurationPreview(_ configuration: Configuration, owner: UUID) {
+        previewOwnerID = owner; previewConfiguration = configuration
+    }
+    func updateConfigurationPreview(_ configuration: Configuration, owner: UUID) {
+        guard previewOwnerID == owner else { return }
+        previewConfiguration = configuration
+    }
+    func endConfigurationPreview(owner: UUID) {
+        guard previewOwnerID == owner else { return }
+        previewConfiguration = nil
+    }
+
+    init(directory: URL? = nil) {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let smokeDirectory = CommandLine.arguments.contains("--smoke-test") ? ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_DATA"].map { URL(fileURLWithPath: $0, isDirectory: true) } : nil
+        dataDirectory = directory ?? smokeDirectory ?? support.appendingPathComponent("org.radius.browser", isDirectory: true)
+        AppDelegate.state = self
+    }
+    func load() async {
+        guard !ready else { return }
+        if let startupTask { await startupTask.value; return }
+        let task = Task { await self.loadInternal() }
+        startupTask = task
+        await task.value
+        startupTask = nil
+    }
+    private func loadInternal() async {
+        startupError = nil
+        do {
+            try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700])
+            let db = try LibraryDatabase(url: dataDirectory.appendingPathComponent("library.sqlite"))
+            let state = try await db.load()
+            database = db; library = state
+            if !state.preferences.restoreSession { library.sessions = [] }
+            try loadCatalog()
+            do {
+                try requireModuleMutationAllowed()
+                let repo = try ModuleRepository(root: dataDirectory.appendingPathComponent("Modules", isDirectory: true))
+                repository = repo
+                let available = catalog.filter { $0.runtime == nil || modulePayloads[$0.id] != nil }
+                try repo.seedDefaults(available, payloads: modulePayloads)
+                installedModules = try repo.installed()
+                try refreshBundledNativePackages()
+                try loadCommunityCatalogs()
+            } catch { notice = "Optional modules could not load: \(error.localizedDescription). Open Recovery to repair them." }
+            await finishPendingProfileDeletions()
+            DistributionManager.shared.configure(dataDirectory: dataDirectory)
+            ready = true; startupError = nil
+        } catch { startupError = error.localizedDescription }
+    }
+    private func loadCatalog() throws {
+        let directory: URL
+        let developmentWorkerDirectory: URL?
+        if let packaged = Bundle.main.url(forResource: "Modules", withExtension: nil) { directory = packaged; developmentWorkerDirectory = nil }
+        else if let resources = Bundle.module.url(forResource: "Resources", withExtension: nil) {
+            directory = resources.appendingPathComponent("Modules")
+            developmentWorkerDirectory = Bundle.module.bundleURL.deletingLastPathComponent()
+        }
+        else { throw ValidationError("The application is missing its bundled resources. Rebuild or reinstall Radius.") }
+        catalog = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { $0.hasDirectoryPath }.map { try ModuleManifest.decode(Data(contentsOf: $0.appendingPathComponent("manifest.json"))) }
+            .sorted { $0.name < $1.name }
+        bundledModuleIDs = Set(catalog.map(\.id))
+        modulePayloads = [:]
+        let workers = ["org.radius.resource-monitor": "RadiusResourceMonitor", "org.radius.memory-monitor": "RadiusMemoryMonitor", "org.radius.reader": "RadiusReaderWorker"]
+        for manifest in catalog where manifest.runtime != nil {
+            do {
+                if manifest.runtime == .behaviorProgram || manifest.runtime == .declarative {
+                    let url = directory.appendingPathComponent(manifest.id).appendingPathComponent(manifest.runtime == .behaviorProgram ? "program.json" : "definition.json")
+                    let size = try url.resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey])
+                    guard size.isSymbolicLink != true, (size.fileSize ?? 0) > 0, (size.fileSize ?? 0) <= 128 * 1024 else { throw ValidationError("Invalid bundled module payload.") }
+                    let bytes = try Data(contentsOf: url)
+                    if manifest.runtime == .behaviorProgram { try ModuleProgram.decode(bytes).validate(capability: manifest.capability) }
+                    else { try validateDefinitionForPlatform(ModuleDefinition.decode(bytes, capability: manifest.capability)) }
+                    modulePayloads[manifest.id] = bytes
+                    continue
+                }
+                guard let product = workers[manifest.id] else { throw ValidationError("An unrecognized native worker is bundled with Radius.") }
+                let packaged = directory.appendingPathComponent(manifest.id).appendingPathComponent("worker")
+                // SwiftPM development builds put executable products beside their resource bundle.
+                let executable = developmentWorkerDirectory?.appendingPathComponent(product) ?? packaged
+                let size = try executable.resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey])
+                guard size.isSymbolicLink != true, (size.fileSize ?? 0) > 0, (size.fileSize ?? 0) <= 8 * 1024 * 1024 else { throw ValidationError("Invalid bundled worker payload.") }
+                modulePayloads[manifest.id] = try Data(contentsOf: executable)
+            } catch { notice = "\(manifest.name) is unavailable because its bundled package could not load. Rebuild or reinstall Radius to use it. Browsing is still available." }
+        }
+    }
+    func enabled(_ capability: ModuleCapability) -> Bool {
+        installedModules.contains {
+            guard $0.enabled && $0.manifest.capability == capability else { return false }
+            switch capability {
+            case .reader: return $0.manifest.runtime == .nativeReaderWorker
+            case .resourceMonitor: return $0.manifest.runtime == .nativeResourceWorker
+            case .notes, .screenshot, .focusMode: return $0.manifest.runtime == .behaviorProgram
+            default: return $0.manifest.runtime == .declarative
+            }
+        }
+    }
+    func resourceWorkerPackage() throws -> (id: String, url: URL) {
+        guard let module = installedModules.first(where: { $0.enabled && $0.manifest.capability == .resourceMonitor }) else {
+            throw ValidationError("Enable a resource provider in Modules.")
+        }
+        guard module.manifest.runtime == .nativeResourceWorker else {
+            throw ValidationError("Update Resource Monitor in Modules to install its removable worker package.")
+        }
+        return try validatedWorkerPackage(id: module.id)
+    }
+    func validatedWorkerPackage(id: String, requireEnabled: Bool = true) throws -> (id: String, url: URL) {
+        try requireModuleMutationAllowed()
+        guard let module = installedModules.first(where: { $0.id == id }), module.manifest.runtime?.isNative == true,
+              let repository, let trusted = modulePayloads[id],
+              catalog.contains(module.manifest) else { throw ValidationError("This worker is not a trusted package from this Radius build. Update it in Modules.") }
+        let url = try repository.workerURL(for: id, requireEnabled: requireEnabled)
+        let file = try FileHandle(forReadingFrom: url)
+        defer { try? file.close() }
+        let limit = 8 * 1024 * 1024
+        var payload = Data()
+        while let chunk = try file.read(upToCount: min(64 * 1024, limit + 1 - payload.count)), !chunk.isEmpty {
+            payload.append(chunk)
+            guard payload.count <= limit else { throw ValidationError("This worker exceeds the package size limit. Reinstall it in Modules.") }
+        }
+        guard payload == trusted else {
+            throw ValidationError("This worker's code differs from the bundled first-party package. Reinstall it in Modules.")
+        }
+        return (module.id, url)
+    }
+    func readerText(from tab: BrowserEngineTab) async throws -> String {
+        try Task.checkCancellation()
+        guard let module = installedModules.first(where: { $0.enabled && $0.manifest.runtime == .nativeReaderWorker }) else {
+            throw ValidationError("Install or update Reader in Modules to read this page.")
+        }
+        let generation = resourceWorkerGeneration
+        let navigation = tab.navigationRevision
+        _ = try validatedWorkerPackage(id: module.id)
+        let id = UUID()
+        let task = Task {
+            try Task.checkCancellation()
+            guard self.resourceWorkerGeneration == generation, tab.navigationRevision == navigation, !self.terminating else { throw CancellationError() }
+            let html = try await tab.pageHTML()
+            try Task.checkCancellation()
+            guard self.resourceWorkerGeneration == generation, tab.navigationRevision == navigation, !self.terminating else { throw CancellationError() }
+            let package = try self.validatedWorkerPackage(id: module.id)
+            let text = try await ReaderWorker().extract(html: html, executable: package.url, moduleID: package.id)
+            try Task.checkCancellation()
+            guard self.resourceWorkerGeneration == generation, tab.navigationRevision == navigation, !self.terminating else { throw CancellationError() }
+            return text
+        }
+        readerRequests[id] = (module.id, task)
+        defer { readerRequests.removeValue(forKey: id) }
+        let text = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+        try Task.checkCancellation()
+        guard resourceWorkerGeneration == generation, tab.navigationRevision == navigation, !terminating else { throw CancellationError() }
+        return text
+    }
+    func cancelReaderRequests(moduleID: String? = nil) {
+        for request in readerRequests.values where moduleID == nil || request.moduleID == moduleID { request.task.cancel() }
+        ReaderWorker.stopAll(moduleID: moduleID)
+    }
+    func resumeResourceWorkerAfterCancelledQuit() { resourceWorkerGeneration = UUID() }
+    func invalidateModuleExecution() { resourceWorkerGeneration = UUID() }
+    func install(_ id: String) {
+        perform {
+            guard let repository else { throw ValidationError("Open Recovery to repair module storage first.") }
+            let activate = installedModules.first(where: { $0.id == id })?.enabled ?? true
+            let requirements = try validateModuleRequirements(for: [id], replacingRootProviders: false, preparingActivation: activate)
+            let approval = try captureModuleApproval(requirements, rootIDs: [id])
+            let plan = try repository.installationPlan(for: id, catalog: catalog)
+            if !approveModules(plan, activateDependencies: activate) { return }
+            try installApprovedModule(id, approval: approval)
+        }
+    }
+    /// Called after the install dialog approves the bundled package and any dependencies.
+    func installApprovedModule(_ id: String, repairing: Bool = false, approval: ModuleApprovalSnapshot? = nil) throws {
+        try requireModuleMutationAllowed()
+        guard let repository else { throw ValidationError("Open Recovery to repair module storage first.") }
+        if repairing { _ = try compatibleReinstallationManifest(for: id) }
+        let activate = installedModules.first { $0.id == id }?.enabled ?? true
+        let requirements = try validateModuleRequirements(for: [id], replacingRootProviders: false, preparingActivation: activate, repairingIDs: repairing ? [id] : [])
+        if let approval { try validateModuleApproval(approval, requirements: requirements) }
+        try withAtomicModuleChanges(for: requirements.map(\.id)) {
+            // Install every code candidate before activating dependency roles. An
+            // updated dependent must release its old provider before replacement.
+            try installApprovedModuleCode(requirements, repairingIDs: repairing ? [id] : [])
+            if activate {
+                try activateApprovedModuleRequirements(requirements.filter { $0.id != id })
+                if let target = installedModules.first(where: { $0.id == id }), !target.enabled,
+                   !target.manifest.capability.isExclusive || !installedModules.contains(where: { $0.enabled && $0.manifest.capability == target.manifest.capability && $0.id != id }) {
+                    try repository.setEnabled(id, true)
+                }
+            }
+            installedModules = try repository.installed()
+        }
+    }
+    func reinstallWorker(_ module: InstalledModule) {
+        perform {
+            _ = try compatibleReinstallationManifest(for: module.id)
+            let requirements = try validateModuleRequirements(for: [module.id], replacingRootProviders: false, preparingActivation: module.enabled, repairingIDs: [module.id])
+            let approval = try captureModuleApproval(requirements, rootIDs: [module.id])
+            guard approveModules(requirements, activateDependencies: module.enabled) else { return }
+            try reinstallApprovedWorker(module.id, approval: approval)
+        }
+    }
+    func reinstallApprovedWorker(_ id: String, approval: ModuleApprovalSnapshot? = nil) throws {
+        try installApprovedModule(id, repairing: true, approval: approval)
+    }
+    func importModule() {
+        let panel = NSOpenPanel(); panel.allowedContentTypes = [.json]; panel.canChooseDirectories = false
+        panel.message = "Choose a Radius data package containing a manifest and its program or definition. Native code must come from the bundled official catalog."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        perform {
+            try requireModuleMutationAllowed()
+            guard let repository else { throw ValidationError("Repair module storage before importing packages.") }
+            let package = try DeclarativeModulePackage.decode(readModuleFile(url, limit: 192 * 1024))
+            let catalogs = try repository.communityCatalogs()
+            let previous = catalogs.first { $0.sourceURL == nil && $0.name.hasPrefix("Local · ") && $0.packages.count == 1 && $0.packages[0].manifest.id == package.manifest.id }
+            let name = "Local · " + String(package.manifest.name.prefix(89 - package.manifest.id.count)) + " · " + package.manifest.id
+            let local = DeclarativeModuleCatalog(formatVersion: 1, name: previous?.name ?? name, packages: [package])
+            try repository.addCommunityCatalog(local, reservedIDs: bundledModuleIDs, replaceExisting: previous != nil)
+            try loadCommunityCatalogs()
+            install(package.manifest.id)
+        }
+    }
+    func approveModules(_ manifests: [ModuleManifest], local: Bool = false, activateDependencies: Bool = true, activateRequirements: Bool = false, activationTitle: String? = nil) -> Bool {
+        guard !manifests.isEmpty else { return true }
+        let alert = NSAlert()
+        alert.messageText = activateRequirements ? activationTitle ?? "Apply this setup's modules?" : manifests.count == 1 ? "Install or update \(manifests[0].name)?" : "Install or update \(manifests.count) packages?"
+        let permissions = Set(manifests.compactMap { $0.capability.permission }).sorted()
+        let unverified = local || manifests.contains { !bundledModuleIDs.contains($0.id) }
+        let requiredIDs = Set(manifests.flatMap(\.dependencies))
+        alert.informativeText = (unverified ? "Community publisher information is self-reported. Data programs cannot access the network, filesystem, or arbitrary native code.\n\n" : "Official packages are sealed into this Radius application.\n\n") +
+            (permissions.isEmpty ? "No website or system permissions are requested." : permissions.joined(separator: "\n\n"))
+        var packageDetails = ""
+        for manifest in manifests {
+            packageDetails += "\(manifest.name) v\(manifest.version) · \(manifest.publisher)\n"
+            if !manifest.dependencies.isEmpty { packageDetails += "Requires: " + manifest.dependencies.joined(separator: ", ") + "\n" }
+            if !activateRequirements && !activateDependencies && !installedModules.contains(where: { $0.id == manifest.id }) {
+                packageDetails += "Installs disabled while the requested module remains disabled.\n"
+            }
+            if let current = installedModules.first(where: { $0.id == manifest.id }), !current.enabled {
+                packageDetails += activateRequirements ? "Approval enables this required module.\n" : requiredIDs.contains(manifest.id) && activateDependencies ? "This required dependency is currently disabled; approving enables it.\n" : "Your disabled choice will be kept.\n"
+            }
+            if manifest.capability.isExclusive, let active = installedModules.first(where: { $0.enabled && $0.manifest.capability == manifest.capability && $0.id != manifest.id }) {
+                packageDetails += activateRequirements ? "Approval replaces \(active.manifest.name) immediately. Browser data is kept.\n" : requiredIDs.contains(manifest.id) && activateDependencies ? "Required dependency replaces \(active.manifest.name). Browser data is kept.\n" : "Installs alongside \(active.manifest.name). Choose Replace before it becomes active.\n"
+            }
+            packageDetails += "\n"
+        }
+        if manifests.contains(where: { $0.runtime?.isNative == true }) {
+            alert.informativeText += "\n\nFirst-party native workers run with the same macOS user access as Radius. Reader runs for one extraction; resources run while their panel is open. Native code is not sandboxed by these permission descriptions."
+        }
+        alert.informativeText += "\n\nSaved browser data is kept. Application updates preserve removed modules. Missing dependencies listed here install only with your approval."
+        let scrollHeight = CGFloat(min(220, max(90, manifests.count * 55)))
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 520, height: scrollHeight))
+        scroll.hasVerticalScroller = true; scroll.borderType = .bezelBorder
+        let details = NSTextView(frame: NSRect(x: 0, y: 0, width: 500, height: 220))
+        details.isEditable = false; details.isSelectable = true; details.font = .systemFont(ofSize: 12); details.textColor = .labelColor
+        details.textContainer?.widthTracksTextView = true; details.isHorizontallyResizable = false; details.isVerticallyResizable = true
+        details.autoresizingMask = [.width]; details.string = packageDetails
+        details.textContainerInset = NSSize(width: 8, height: 8)
+        if let container = details.textContainer, let manager = details.layoutManager {
+            manager.ensureLayout(for: container); details.setFrameSize(NSSize(width: 500, height: max(scrollHeight, manager.usedRect(for: container).height + 16)))
+        }
+        scroll.documentView = details; alert.accessoryView = scroll
+        alert.addButton(withTitle: activateRequirements ? activationTitle == nil ? "Approve and apply" : "Approve and activate" : "Approve and install"); alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+    func toggleModule(_ module: InstalledModule) {
+        if module.enabled && module.manifest.capability == .tabSystem {
+            presentTabReplacementBeforeRemoval(module, removeAfterReplacement: false)
+            return
+        }
+        perform {
+            guard let repository else { throw ValidationError("Repair module storage first.") }
+            if !module.enabled {
+                try validateModulePayload(module, requireEnabled: false)
+                let approval = try captureModuleApproval([module.manifest], rootIDs: [module.id])
+                if module.manifest.capability.isExclusive,
+                   let active = installedModules.first(where: { $0.enabled && $0.manifest.capability == module.manifest.capability && $0.id != module.id }) {
+                    let dependents = installedModules.filter { $0.enabled && $0.manifest.dependencies.contains(active.id) }
+                    let alert = NSAlert(); alert.messageText = "Replace \(active.manifest.name) with \(module.manifest.name)?"
+                    alert.informativeText = "Your tabs and saved browser data are kept. " + (dependents.isEmpty ? "The replacement takes effect immediately." : "Disable dependent modules first: " + dependents.map { $0.manifest.name }.joined(separator: ", "))
+                    if let permission = module.manifest.capability.permission { alert.informativeText += "\n\n" + permission }
+                    alert.addButton(withTitle: "Replace"); alert.addButton(withTitle: "Cancel")
+                    guard alert.runModal() == .alertFirstButtonReturn else { return }
+                    try validateModuleApproval(approval, requirements: [module.manifest])
+                    if module.manifest.capability == .resourceMonitor { try replaceResourceProvider(with: module.id) }
+                    else { try repository.replaceProvider(role: module.manifest.capability, with: module.id); installedModules = try repository.installed() }
+                    return
+                }
+                if let permission = module.manifest.capability.permission {
+                    let alert = NSAlert(); alert.messageText = "Enable \(module.manifest.name)?"; alert.informativeText = permission
+                    alert.addButton(withTitle: "Approve and enable"); alert.addButton(withTitle: "Cancel")
+                    guard alert.runModal() == .alertFirstButtonReturn else { return }
+                    try validateModuleApproval(approval, requirements: [module.manifest])
+                }
+            }
+            try setModuleEnabledApproved(module.id, enabled: !module.enabled)
+        }
+    }
+    /// Mutation after the graphical permission preview, also used by native
+    /// integration tests to avoid interacting with a modal approval dialog.
+    func setModuleEnabledApproved(_ id: String, enabled: Bool) throws {
+        try requireModuleMutationAllowed()
+        guard let repository, let module = installedModules.first(where: { $0.id == id }) else { throw ValidationError("This module is not installed.") }
+        if enabled { try validateModulePayload(module, requireEnabled: false) }
+        defer { resourceWorkerGeneration = UUID() }
+        try stopWorkersForModuleMutation(moduleID: id)
+        try repository.setEnabled(id, enabled); installedModules = try repository.installed()
+    }
+    func replaceResourceProvider(with id: String) throws {
+        try requireModuleMutationAllowed()
+        guard let repository else { throw ValidationError("Repair module storage first.") }
+        guard installedModules.contains(where: { $0.id == id && $0.manifest.runtime == .nativeResourceWorker }) else { throw ValidationError("Choose an installed resource provider.") }
+        _ = try validatedWorkerPackage(id: id, requireEnabled: false)
+        defer { resourceWorkerGeneration = UUID() }
+        try stopWorkersForModuleMutation(stoppingReader: false)
+        try repository.replaceResourceProvider(with: id)
+        installedModules = try repository.installed()
+    }
+    func removeModule(_ id: String) throws {
+        try requireModuleMutationAllowed()
+        guard let repository else { throw ValidationError("Repair module storage first.") }
+        defer { resourceWorkerGeneration = UUID() }
+        try stopWorkersForModuleMutation(moduleID: id)
+        try repository.uninstall(id)
+        installedModules = try repository.installed()
+    }
+    func uninstall(_ module: InstalledModule) {
+        if module.enabled && module.manifest.capability == .tabSystem {
+            presentTabReplacementBeforeRemoval(module)
+            return
+        }
+        let dependents = installedModules.filter { $0.manifest.dependencies.contains(module.id) }
+        guard dependents.isEmpty else {
+            notice = "Remove these dependent modules first: " + dependents.map { $0.manifest.name }.joined(separator: ", ")
+            return
+        }
+        let alert = NSAlert(); alert.messageText = "Uninstall \(module.manifest.name)?"
+        alert.informativeText = "The module stops and its installed package payload is deleted. Your tabs and browser data are kept. " +
+            (module.manifest.capability == .notes ? "Deleting data also permanently removes all saved notes in every profile." : "Choose whether to retain its settings.")
+        alert.addButton(withTitle: "Uninstall and keep data"); alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: module.manifest.capability == .notes ? "Uninstall and delete all notes" : "Uninstall and delete module data")
+        let response = alert.runModal()
+        guard response != .alertSecondButtonReturn else { return }
+        perform {
+            try removeModule(module.id)
+            if response == .alertThirdButtonReturn {
+                try requireModuleMutationAllowed()
+                try repository?.deleteSettings(for: module.id)
+                if module.manifest.capability == .notes { library.notes.removeAll() }
+            }
+        }
+    }
+    func claimSession(privateBrowsing: Bool) -> WindowSession {
+        if !privateBrowsing, let saved = library.sessions.first(where: { !claimedSessions.contains($0.id) }) {
+            claimedSessions.insert(saved.id); return saved
+        }
+        let session = WindowSession(profileID: library.profiles[0].id, tabs: [BrowserTab(engineID: library.profiles[0].engineID ?? .webkit)])
+        if !privateBrowsing { claimedSessions.insert(session.id); library.sessions.append(session) }
+        return session
+    }
+    func updateSession(_ session: WindowSession) {
+        guard ready, !deletingProfileIDs.contains(session.profileID), library.profiles.contains(where: { $0.id == session.profileID }) else { return }
+        if let index = library.sessions.firstIndex(where: { $0.id == session.id }) { library.sessions[index] = session }
+    }
+    func registerWindow(_ model: BrowserModel) { windows[model.session.id] = BrowserReference(model) }
+    func unregisterWindow(_ id: UUID) { windows.removeValue(forKey: id) }
+    func closeSession(_ id: UUID) {
+        if !terminating { library.sessions.removeAll { $0.id == id }; claimedSessions.remove(id) }
+    }
+    func addHistory(url: URL, title: String, profileID: UUID) {
+        guard AddressResolver.isWebURL(url), !deletingProfileIDs.contains(profileID), library.profiles.contains(where: { $0.id == profileID }) else { return }
+        if let last = library.history.last, last.url == url, last.profileID == profileID,
+           Date().timeIntervalSince(last.visitedAt) < 2 { return }
+        library.history.append(HistoryEntry(profileID: profileID, title: boundedPageTitle(title), url: url))
+        if library.history.count > 10_000 { library.history.removeFirst(library.history.count - 10_000) }
+    }
+    func toggleBookmark(url: URL, title: String, profileID: UUID) {
+        guard !deletingProfileIDs.contains(profileID), library.profiles.contains(where: { $0.id == profileID }) else { notice = "This profile is unavailable."; return }
+        guard AddressResolver.isWebURL(url) else { notice = "Only HTTP and HTTPS pages can be saved as bookmarks."; return }
+        if library.bookmarks.contains(where: { $0.url == url && $0.profileID == profileID }) {
+            library.bookmarks.removeAll { $0.url == url && $0.profileID == profileID }
+            notice = "Removed from Radius bookmarks."
+        } else {
+            library.bookmarks.append(Bookmark(profileID: profileID, title: title, url: url))
+            notice = "Saved in Radius bookmarks."
+        }
+    }
+    @discardableResult
+    func importBookmarks(profileID: UUID) -> Bool {
+        let panel = NSOpenPanel(); panel.allowedContentTypes = [.html]; panel.message = "Choose bookmarks exported from Safari, Chrome, or Firefox."
+        guard panel.runModal() == .OK, let url = panel.url else { return false }
+        guard !finalQuitDataFrozen else { notice = "Wait for Radius to finish saving before importing bookmarks."; return false }
+        guard !deletingProfileIDs.contains(profileID), library.profiles.contains(where: { $0.id == profileID }) else { notice = "This profile is unavailable."; return false }
+        do {
+            let imported = try BookmarkExchange.parse(BoundedImportFile.read(url, maximumBytes: 10 * 1024 * 1024, kind: .bookmarks), profileID: profileID)
+            var urls = Set(library.bookmarks.filter { $0.profileID == profileID }.map(\.url))
+            let additions = imported.filter { urls.insert($0.url).inserted }
+            library.bookmarks.append(contentsOf: additions)
+            notice = "Imported \(additions.count) bookmarks."
+            return true
+        } catch { notice = error.localizedDescription; return false }
+    }
+    func exportBookmarks(profileID: UUID) {
+        saveFile(BookmarkExchange.export(library.bookmarks.filter { $0.profileID == profileID }), name: "Radius Bookmarks.html", type: .html)
+    }
+    func applyConfiguration(_ configuration: Configuration) {
+        var checked = configuration; checked.normalize()
+        if suspendingModuleContributions && !stoppingModuleWorkers && moduleConfigurationBeforeMutation == nil {
+            moduleConfigurationBeforeMutation = library.preferences.configuration
+        }
+        let splitChanged = checked.layout.split != library.preferences.configuration.layout.split
+        library.preferences.configuration = checked; previewConfiguration = nil
+        windows.values.compactMap(\.model).forEach { $0.synchronizeSplit(force: splitChanged) }
+    }
+    func resetModules() {
+        perform {
+            try requireModuleMutationAllowed()
+            defer { resourceWorkerGeneration = UUID() }
+            try stopWorkersForModuleMutation()
+            let old = dataDirectory.appendingPathComponent("Modules", isDirectory: true)
+            if FileManager.default.fileExists(atPath: old.path) {
+                try FileManager.default.moveItem(at: old, to: dataDirectory.appendingPathComponent("Modules-backup-" + UUID().uuidString))
+            }
+            let repo = try ModuleRepository(root: old)
+            // An initialized empty catalog preserves removals and leaves all optional behavior stopped.
+            try Data("1".utf8).write(to: old.appendingPathComponent(".initialized"), options: .atomic)
+            repository = repo; installedModules = []; notice = "Modules reset. Reinstall the features you want in Modules."
+        }
+    }
+    func resetLibrary() async {
+        guard !ready, !terminating, startupTask == nil else {
+            notice = "Wait for startup recovery to finish before resetting the library."
+            return
+        }
+        database = nil; saveTask?.cancel()
+        do {
+            let backup = dataDirectory.appendingPathComponent("Recovery-" + UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: backup, withIntermediateDirectories: true)
+            for name in ["library.sqlite", "library.sqlite-wal", "library.sqlite-shm"] {
+                let file = dataDirectory.appendingPathComponent(name)
+                if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.moveItem(at: file, to: backup.appendingPathComponent(name)) }
+            }
+            ready = false; claimedSessions = []; revision = 0
+            await load()
+        } catch { startupError = "Recovery could not finish: \(error.localizedDescription). The original files remain in Application Support." }
+    }
+    func flush() async -> Bool {
+        saveTask?.cancel()
+        guard let database else { return false }
+        libraryChangedDuringTermination = false
+        revision += 1
+        var snapshot = saveWithoutChromiumOnQuit ? libraryPreparedForChromiumRemoval() : library
+        snapshot.normalize()
+        do { try await database.save(snapshot, revision: revision) }
+        catch { notice = "Could not save Radius data: \(error.localizedDescription)"; return false }
+        // COMMIT is durable with SQLite synchronous=FULL. A maintenance failure
+        // must not report an uncommitted deletion and roll back only memory.
+        do { try await database.checkpoint() }
+        catch { notice = "Your changes were saved. Database maintenance will retry: \(error.localizedDescription)" }
+        return true
+    }
+    func flushForTermination() async -> Bool {
+        // Async engine/update cleanup can finish after the first quit snapshot.
+        // Save any intervening edits before replying to AppKit, then stop if the
+        // data keeps changing rather than silently exiting with an older copy.
+        for _ in 0..<3 {
+            guard libraryChangedDuringTermination else { return true }
+            guard await flush() else { return false }
+        }
+        guard !libraryChangedDuringTermination else {
+            notice = "Browser data is still changing. Keep Radius open and retry quitting."
+            return false
+        }
+        return true
+    }
+    func freezeQuitData() {
+        windows.values.compactMap(\.model).forEach { $0.captureChromiumSessions() }
+        ChromiumRuntime.shared.setFinalQuitFrozen(true)
+        finalQuitDataFrozen = true
+    }
+    func unfreezeQuitData() {
+        ChromiumRuntime.shared.setFinalQuitFrozen(false)
+        finalQuitDataFrozen = false
+    }
+    func updateQuitCleanup(_ mutation: (inout LibraryState) -> Void) {
+        // Only synchronous tombstone bookkeeping bypasses the final snapshot.
+        // Never allow unrelated mutations while cleanup awaits an engine/store.
+        updatingQuitCleanup = true
+        defer { updatingQuitCleanup = false }
+        mutation(&library)
+    }
+    private func scheduleSave() {
+        guard !terminating else { libraryChangedDuringTermination = true; return }
+        libraryChangedDuringTermination = false
+        revision += 1; let currentRevision = revision; var snapshot = library; snapshot.normalize()
+        saveTask?.cancel()
+        saveTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(250))
+                guard let self, let database = self.database, !Task.isCancelled else { return }
+                try await database.save(snapshot, revision: currentRevision)
+            } catch is CancellationError { }
+            catch { self?.notice = "Could not save your changes: \(error.localizedDescription). Retry saving in Recovery." }
+        }
+    }
+    func perform(_ operation: () throws -> Void) {
+        do { try operation() } catch { notice = error.localizedDescription }
+    }
+    func saveFile(_ data: Data, name: String, type: UTType) {
+        let panel = NSSavePanel(); panel.nameFieldStringValue = name; panel.allowedContentTypes = [type]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        perform { try data.write(to: url, options: .atomic) }
+    }
+}
+
+import UniformTypeIdentifiers
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    static weak var state: AppState?
+    private let nativeTabCommands = NativeTabCommands()
+    func applicationDidUpdate(_ notification: Notification) {
+        nativeTabCommands.install(in: NSApp.mainMenu)
+    }
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        nativeTabCommands.install(in: NSApp.mainMenu)
+        smokeTrace("applicationDidFinishLaunching: setting activation policy")
+        NSApp.setActivationPolicy(.regular)
+        smokeTrace("applicationDidFinishLaunching: activating application")
+        NSApp.activate(ignoringOtherApps: true)
+        smokeTrace("applicationDidFinishLaunching: activation returned")
+        if CommandLine.arguments.contains("--smoke-test") { Task { await AppSmokeTest.run() } }
+    }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        smokeTrace("applicationShouldTerminate entered")
+        guard let state = Self.state else {
+            smokeTrace("No application state; returning terminateNow")
+            return .terminateNow
+        }
+        guard !state.stoppingModuleWorkers, !state.suspendingModuleContributions else {
+            state.notice = "Wait for the current module operation to finish before quitting."
+            DistributionManager.shared.cancelledQuit()
+            return .terminateCancel
+        }
+        guard state.deletingProfileIDs.isEmpty, !state.savingWebsiteDataClearRequest else {
+            state.notice = "Wait for the current privacy operation to finish before quitting."
+            DistributionManager.shared.cancelledQuit()
+            return .terminateCancel
+        }
+        // Active centers outlive closed windows and include manager/auxiliary
+        // pages. The registry also sees arrivals during the modal alert.
+        let downloads = DownloadAdmission.shared
+        if !downloads.activeCenters.isEmpty {
+            let alert = NSAlert(); alert.messageText = "Cancel active downloads and quit Radius?"
+            alert.informativeText = "There are unfinished downloads. Their temporary files are removed after the engine confirms cancellation."
+            alert.addButton(withTitle: "Keep Radius open"); alert.addButton(withTitle: "Cancel downloads and quit")
+            guard alert.runModal() == .alertSecondButtonReturn else {
+                DistributionManager.shared.cancelledQuit()
+                return .terminateCancel
+            }
+        }
+        // Modal download confirmation can run already queued privacy work.
+        guard !state.stoppingModuleWorkers, !state.suspendingModuleContributions else {
+            state.notice = "Wait for the current module operation to finish before quitting."
+            DistributionManager.shared.cancelledQuit()
+            return .terminateCancel
+        }
+        guard state.deletingProfileIDs.isEmpty, !state.savingWebsiteDataClearRequest else {
+            state.notice = "Wait for the current privacy operation to finish before quitting."
+            DistributionManager.shared.cancelledQuit()
+            return .terminateCancel
+        }
+        downloads.freeze()
+        state.terminating = true
+        Task {
+            self.smokeTrace("Termination task started; cancelling active downloads")
+            do { try await downloads.cancelAllAndWait() }
+            catch {
+                state.notice = error.localizedDescription; state.terminating = false
+                downloads.resume()
+                DistributionManager.shared.cancelledQuit()
+                sender.reply(toApplicationShouldTerminate: false); return
+            }
+            // A download or offline copy may still own a staging directory.
+            // Finish its cancellation cleanup before saving or arming an update.
+            await DistributionManager.shared.cancelAndWaitForOperation()
+            guard !state.stoppingModuleWorkers, !state.suspendingModuleContributions else {
+                state.notice = "Wait for the current module operation to finish before quitting."
+                state.terminating = false; downloads.resume()
+                DistributionManager.shared.cancelledQuit()
+                sender.reply(toApplicationShouldTerminate: false); return
+            }
+            self.smokeTrace("Flushing application data before termination")
+            let saved = await state.flush()
+            self.smokeTrace("Termination flush completed: \(saved)")
+            var quit = saved
+            var stoppedWorkersForQuit = false
+            if !saved {
+                quit = self.offerQuitWithoutSaving(state)
+            }
+            if quit {
+                // The updater waits for this process to exit. Start and validate
+                // it before irreversible CefShutdown; a cancelled quit stops it.
+                do { try await DistributionManager.shared.launchPendingInstaller() }
+                catch { quit = false; state.notice = error.localizedDescription }
+            }
+            if quit, DistributionManager.shared.isRestartRequested,
+               DistributionManager.shared.pending?.chromium == false {
+                // Prepare only the restart's durable metadata after READY.
+                // A refused quit must keep live Chromium pages and choices.
+                state.saveWithoutChromiumOnQuit = true
+                quit = await state.flush()
+            }
+            if quit && (state.stoppingModuleWorkers || state.suspendingModuleContributions) {
+                quit = false
+                state.notice = "Wait for the current module operation to finish before quitting."
+            }
+            if quit {
+                state.freezeQuitData()
+                if saved {
+                    let savedLatest = await state.flushForTermination()
+                    if !savedLatest { quit = self.offerQuitWithoutSaving(state) }
+                }
+                if quit {
+                    state.cancelReaderRequests()
+                    ResourceWorker.stopAll()
+                    stoppedWorkersForQuit = true
+                    for browser in state.windows.values.compactMap(\.model) { browser.disposeEngineTabs() }
+                    quit = await ChromiumRuntime.shared.shutdown()
+                    if !quit { state.notice = ChromiumRuntime.shared.status }
+                    if quit { await state.finishPendingProfileDeletions() }
+                }
+            }
+            self.smokeTrace("Sending termination reply: \(quit)")
+            if !quit {
+                state.unfreezeQuitData()
+                for browser in state.windows.values.compactMap(\.model) { browser.resynchronizeCachedPages() }
+            }
+            state.terminating = quit
+            if !quit {
+                downloads.resume()
+                if state.saveWithoutChromiumOnQuit {
+                    state.saveWithoutChromiumOnQuit = false
+                    _ = await state.flush()
+                }
+                DistributionManager.shared.cancelledQuit()
+                if stoppedWorkersForQuit { state.resumeResourceWorkerAfterCancelledQuit() }
+            }
+            sender.reply(toApplicationShouldTerminate: quit)
+        }
+        smokeTrace("Returning terminateLater")
+        return .terminateLater
+    }
+    private func offerQuitWithoutSaving(_ state: AppState) -> Bool {
+        guard !state.stoppingModuleWorkers, !state.suspendingModuleContributions else {
+            state.notice = "Wait for the current module operation to finish before quitting."
+            return false
+        }
+        let alert = NSAlert(); alert.messageText = "Your latest changes could not be saved."
+        alert.informativeText = state.notice ?? "Retry saving from Recovery."
+        alert.addButton(withTitle: "Keep Radius open"); alert.addButton(withTitle: "Quit without saving")
+        return alert.runModal() == .alertSecondButtonReturn
+    }
+    private func smokeTrace(_ message: String) {
+        guard CommandLine.arguments.contains("--smoke-test") else { return }
+        FileHandle.standardOutput.write(Data(("Radius app delegate: " + message + "\n").utf8))
+    }
+}
+
+@MainActor
+final class BrowserReference {
+    weak var model: BrowserModel?
+    init(_ model: BrowserModel) { self.model = model }
+}

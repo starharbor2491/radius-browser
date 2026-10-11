@@ -1,0 +1,480 @@
+// SPDX-License-Identifier: MPL-2.0
+import AppKit
+import RadiusCore
+import RadiusEngineABI
+import UniformTypeIdentifiers
+
+@MainActor
+final class ChromiumTab: BrowserEngineTab {
+    private let runtime: ChromiumRuntime
+    private let downloads: DownloadCenter
+    let profileID: UUID
+    let privateSessionID: UUID?
+    let isAuxiliary: Bool
+    var downloadCenter: DownloadCenter { downloads }
+    func cancelDownloads() async throws { try await downloads.cancelChromiumAndWait(ids: downloadIDs) }
+    private let downloadPrefix = UUID().uuidString
+    private var downloadIDs = Set<String>()
+    private var disposing = false
+    private var closeTask: Task<Void, Never>?
+    private var chromeFocusObservers: [NSObjectProtocol] = []
+    private var chromeKeyMonitor: Any?
+    @Published private(set) var chromeStyle = false
+    @Published private(set) var navigationChrome = false
+    @Published private(set) var navigationChromeVisible = false
+    override var hasNativeNavigationChrome: Bool {
+        guard chromeStyle, navigationChrome, navigationChromeVisible,
+              let parent = hostView.window, let chrome = chromeWindow else { return false }
+        return chrome.isVisible && chrome.parent === parent
+    }
+    override func focusAddressBar() -> Bool {
+        guard hasNativeNavigationChrome else { return false }
+        command(Int(RADIUS_CEF_FOCUS_LOCATION)); return true
+    }
+    private var page: UnsafeMutableRawPointer?
+    private let hostView: NSView
+    private var pageURL: URL?
+    private var activePristine = true
+    private var failedURL: URL?
+    private var pageTitle: String?
+    private var restoringPages = false
+    private var sessionPages: [ChromiumSessionPage] = []
+    private var nextRequest = 1
+    private struct PendingRequest {
+        let continuation: CheckedContinuation<Data, any Error>
+        let timeout: Task<Void, Never>
+    }
+    private var pending: [Int: PendingRequest] = [:]
+    private var readerContexts: [Int: String] = [:]
+    override var nativeView: NSView { hostView }
+    var chromeWindow: NSWindow? { hostView.value(forKey: "browserWindow") as? NSWindow }
+    override var url: URL? { activeContentKnown ? failedURL ?? pageURL : nil }
+    override var title: String? { activeContentKnown ? pageTitle : nil }
+    override var isShowingStartPage: Bool { !restoringPages && activeContentKnown && activePristine }
+    private var activeContentKnown: Bool { hostView.value(forKey: "activeContentKnown") as? Bool == true }
+    private var refreshingActiveContent = false
+    override func refreshActiveContent() {
+        guard !refreshingActiveContent, !restoringPages else { return }
+        refreshingActiveContent = true
+        defer { refreshingActiveContent = false }
+        command(Int(RADIUS_CEF_SYNC_ACTIVE))
+    }
+    var isReadyForEngineSwitch: Bool { !restoringPages && activeContentKnown }
+    override var chromiumSessionPages: [ChromiumSessionPage]? {
+        restoringPages || !activeContentKnown || sessionPages.isEmpty ? nil : sessionPages
+    }
+    override func restoreChromiumSessionPages(_ pages: [ChromiumSessionPage]) {
+        guard !pages.isEmpty, pages.count <= 200 else { return }
+        restoringPages = true
+        let addresses = pages.map { page in page.url.flatMap { AddressResolver.isWebURL($0) && $0.absoluteString.utf8.count <= 8192 ? $0.absoluteString : nil } ?? "" }
+        guard let data = try? JSONSerialization.data(withJSONObject: addresses, options: [.withoutEscapingSlashes]) else { return }
+        command(Int(RADIUS_CEF_RESTORE_TABS), text: String(decoding: data, as: UTF8.self))
+    }
+    override var engineID: BrowserEngineID { .chromium }
+
+    init(runtime: ChromiumRuntime, page: UnsafeMutableRawPointer, downloads: DownloadCenter, profileID: UUID, privateSessionID: UUID?) {
+        self.runtime = runtime; self.page = page; self.downloads = downloads
+        self.profileID = profileID; self.privateSessionID = privateSessionID
+        hostView = Unmanaged<NSView>.fromOpaque(runtime.api!.native_view(page)!).takeUnretainedValue()
+        isAuxiliary = hostView.value(forKey: "auxiliary") as? Bool == true
+        super.init()
+        chromeStyle = hostView.value(forKey: "chromeStyle") as? Bool == true
+        navigationChrome = hostView.value(forKey: "navigationChrome") as? Bool == true
+        runtime.register(self)
+        runtime.api!.set_callbacks(page, Unmanaged.passUnretained(self).toOpaque(), { context, event, json in
+            guard let context, let json else { return }
+            MainActor.assumeIsolated {
+                Unmanaged<ChromiumTab>.fromOpaque(context).takeUnretainedValue().receive(event, json: String(cString: json))
+            }
+        }, { context, child, url in
+            guard let context, let child else { return 0 }
+            return MainActor.assumeIsolated {
+                let parent = Unmanaged<ChromiumTab>.fromOpaque(context).takeUnretainedValue()
+                // A download can keep the native source alive after its Radius
+                // owner closes. Reject before constructing a Swift child; the
+                // native callback contract owns destruction of rejected pages.
+                guard !parent.disposing,
+                      parent.runtime.canAdoptPage(profileID: parent.profileID, privateSessionID: parent.privateSessionID) else { return 0 }
+                let tab = ChromiumTab(runtime: parent.runtime, page: child, downloads: parent.downloads, profileID: parent.profileID, privateSessionID: parent.privateSessionID)
+                if tab.isAuxiliary {
+                    tab.onNotice = parent.onNotice
+                    tab.onBrowserCommand = { [weak tab] command in
+                        switch command {
+                        case "quit": NSApp.terminate(nil)
+                        case "closeTab", "closeWindow": tab?.dispose()
+                        case "newWindow": ChromiumTab.performApplicationMenuItem("New window")
+                        case "privateWindow": ChromiumTab.performApplicationMenuItem("New private window")
+                        case "downloads": tab?.downloads.showWindow()
+                        default: break
+                        }
+                    }
+                    tab.allowPopups = parent.allowPopups
+                    tab.updatePopupPolicy()
+                    return 1
+                }
+                let target = url.flatMap { URL(string: String(cString: $0)) }
+                let accepted = parent.onCreateWindow?(tab, target) == true
+                if !accepted { tab.dispose() }
+                return accepted ? 1 : 0
+            }
+        })
+        // AppKit can change an attached child's key status without a distinct
+        // Views activation transition. Use the actual owned NSWindow event to
+        // keep Radius's selected split pane and native commands synchronized.
+        chromeFocusObservers = [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification].map { name in
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
+                guard let window = notification.object as? NSWindow else { return }
+                let windowID = ObjectIdentifier(window)
+                let becameKey = notification.name == NSWindow.didBecomeKeyNotification
+                MainActor.assumeIsolated {
+                    guard let self, let chrome = self.chromeWindow,
+                          windowID == ObjectIdentifier(chrome) else { return }
+                    self.runtime.objectWillChange.send()
+                    guard becameKey else { return }
+                    if let owner = self.hostView.window, owner.isVisible, owner.canBecomeMain {
+                        owner.makeMain()
+                    }
+                    self.onActivate?()
+                }
+            }
+        }
+        // An intact Chrome child is a separate key window, outside SwiftUI's
+        // focused-scene responder chain. Route Radius's tab shortcuts and the
+        // visible Chrome omnibox before the parent menu can consume them.
+        chromeKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            let windowID = event.window.map(ObjectIdentifier.init)
+            let key = event.charactersIgnoringModifiers?.lowercased()
+            let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control]).rawValue
+            let handled = MainActor.assumeIsolated {
+                guard let self, !self.isAuxiliary, self.hasNativeNavigationChrome,
+                      let chrome = self.chromeWindow, windowID == ObjectIdentifier(chrome), chrome.isKeyWindow else { return false }
+                if self.runtime.finalQuitFrozen { return true }
+                if modifiers == NSEvent.ModifierFlags.command.rawValue, key == "l" {
+                    self.onActivate?()
+                    return self.focusAddressBar()
+                }
+                if modifiers == NSEvent.ModifierFlags.command.union(.shift).rawValue, key == "w" {
+                    self.onActivate?(); self.onBrowserCommand?("closeWindow"); return true
+                }
+                let nativeCommand: NativeTabCommand
+                if modifiers == NSEvent.ModifierFlags.command.rawValue, key == "t" { nativeCommand = .new }
+                else if modifiers == NSEvent.ModifierFlags.command.rawValue, key == "w" { nativeCommand = .close }
+                else if modifiers == NSEvent.ModifierFlags.command.union(.shift).rawValue, key == "t" { nativeCommand = .reopen }
+                else if modifiers == NSEvent.ModifierFlags.command.union(.shift).rawValue, key == "[" || key == "{" { nativeCommand = .previous }
+                else if modifiers == NSEvent.ModifierFlags.command.union(.shift).rawValue, key == "]" || key == "}" { nativeCommand = .next }
+                else { return false }
+                self.onActivate?()
+                return self.performNativeTabCommand(nativeCommand)
+            }
+            return handled ? nil : event
+        }
+    }
+    private static func performApplicationMenuItem(_ title: String) {
+        func perform(in menu: NSMenu) -> Bool {
+            for (index, item) in menu.items.enumerated() {
+                if item.title == title, item.isEnabled { menu.performActionForItem(at: index); return true }
+                if let submenu = item.submenu, perform(in: submenu) { return true }
+            }
+            return false
+        }
+        // Dispatch the app's existing File command, which remains available
+        // after the originating SwiftUI browser window has closed.
+        if let menu = NSApp.mainMenu { _ = perform(in: menu) }
+    }
+    private func command(_ command: Int, text: String = "", value: Double = 0) {
+        guard let page, let api = runtime.api else { return }
+        text.withCString { api.command(page, Int32(command), $0, value) }
+    }
+    override func load(_ url: URL) {
+        guard AddressResolver.isWebURL(url) else { errorMessage = "Only HTTP and HTTPS addresses are supported."; return }
+        failedURL = nil; activePristine = false
+        errorMessage = nil; pageURL = url; loading = true
+        command(Int(RADIUS_CEF_LOAD), text: url.absoluteString)
+    }
+    override func performNativeTabCommand(_ command: NativeTabCommand) -> Bool {
+        guard !disposing, let page, let api = runtime.api,
+              hasNativeNavigationChrome || (isAuxiliary && chromeWindow?.isVisible == true) else { return false }
+        if runtime.finalQuitFrozen { return true }
+        let native: Int
+        switch command {
+        case .new: native = Int(RADIUS_CEF_NEW_TAB)
+        case .close: native = Int(RADIUS_CEF_CLOSE_TAB)
+        case .reopen: native = Int(RADIUS_CEF_REOPEN_TAB)
+        case .previous: native = Int(RADIUS_CEF_PREVIOUS_TAB)
+        case .next: native = Int(RADIUS_CEF_NEXT_TAB)
+        }
+        if api.native_tab_command(page, Int32(native)) == 0 {
+            onNotice?("This Chrome tab action is not available yet.")
+        }
+        // This visible native Chrome window owns the command even while Chrome
+        // disables it. Never fall through to an unrelated outer Radius tab.
+        return true
+    }
+    override func showStartPage() {
+        // A browsing Chromium pane keeps Chrome's own tab strip and new-tab
+        // surface. Its selected WebContents and siblings remain the same.
+        failedURL = nil; errorMessage = nil; didStartNavigation()
+        activePristine = false; pageURL = URL(string: "chrome://newtab/"); pageTitle = "New tab"; loading = true
+        command(Int(RADIUS_CEF_HOME))
+    }
+    func showExtensions() { failedURL = nil; activePristine = false; command(Int(RADIUS_CEF_EXTENSIONS)) }
+    override func reload() {
+        // Provisional failures do not commit a new CEF document. Retry the
+        // reported web address instead of reloading the previous Home entry.
+        if let failedURL { load(failedURL) }
+        else { errorMessage = nil; command(Int(RADIUS_CEF_RELOAD)) }
+    }
+    override func stop() { command(Int(RADIUS_CEF_STOP)) }
+    override func goBack() { failedURL = nil; errorMessage = nil; command(Int(RADIUS_CEF_BACK)) }
+    override func goForward() { failedURL = nil; errorMessage = nil; command(Int(RADIUS_CEF_FORWARD)) }
+    override func setZoom(_ value: Double) {
+        guard value.isFinite, !disposing, !restoringPages else { return }
+        refreshActiveContent()
+        guard activeContentKnown else { return }
+        zoom = min(5, max(0.25, value))
+        command(Int(RADIUS_CEF_ZOOM), value: zoom)
+    }
+    override func updatePopupPolicy() { command(Int(RADIUS_CEF_POPUPS), value: allowPopups?() == true ? 1 : 0) }
+    override func focus() {
+        command(Int(RADIUS_CEF_FOCUS))
+        // Re-selecting the native pane while this child is already key emits
+        // no AppKit key-window notification, but still changes command context.
+        if chromeWindow?.isKeyWindow == true { onActivate?() }
+    }
+    override func find(_ text: String, backwards: Bool = false) { command(Int(RADIUS_CEF_FIND), text: text, value: backwards ? 1 : 0) }
+    override func pageHTML() async throws -> String {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(8))
+        func remaining() throws -> Duration {
+            let duration = clock.now.duration(to: deadline)
+            guard duration > .zero else { throw ValidationError("Chromium did not capture the page before the snapshot timed out.") }
+            return duration
+        }
+        _ = try await request("Runtime.enable", parameters: [:], timeout: remaining())
+        let treeData = try await request("Page.getFrameTree", parameters: [:], timeout: remaining())
+        guard let tree = try JSONSerialization.jsonObject(with: treeData) as? [String: Any],
+              let frameTree = tree["frameTree"] as? [String: Any],
+              let frame = frameTree["frame"] as? [String: Any], let frameID = frame["id"] as? String else {
+            throw ValidationError("Chromium could not find the page to capture.")
+        }
+        // Page JavaScript cannot replace this world's native XMLSerializer or
+        // document accessors. No cross-origin access is granted to the world.
+        let worldData = try await request("Page.createIsolatedWorld", parameters: ["frameId": frameID, "worldName": "org.radius.reader"], timeout: remaining())
+        guard let world = try JSONSerialization.jsonObject(with: worldData) as? [String: Any],
+              let contextID = world["executionContextId"] as? Int,
+              let uniqueContextID = readerContexts[contextID] else {
+            throw ValidationError("Chromium could not isolate the page snapshot.")
+        }
+        let expression = "(() => { const html = document.documentElement ? new XMLSerializer().serializeToString(document.documentElement) : ''; if (html.length > 1048576) throw new Error('Page snapshot exceeds 1 MB.'); return html; })()"
+        let budget = try remaining()
+        let components = budget.components
+        let milliseconds = Double(components.seconds) * 1000 + Double(components.attoseconds) / 1e15
+        // Numeric context IDs can be reused after a process-changing navigation.
+        // A vanished unique context fails safely instead of evaluating page code.
+        let data = try await request("Runtime.evaluate", parameters: ["expression": expression, "returnByValue": true, "uniqueContextId": uniqueContextID, "timeout": milliseconds], timeout: budget)
+        guard let response = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let result = response["result"] as? [String: Any], let html = result["value"] as? String,
+              html.utf8.count <= ReaderRequest.maximumHTMLBytes else {
+            throw ValidationError("Chromium could not capture this page within the 1 MB snapshot limit.")
+        }
+        return html
+    }
+    override func capturePNG() async throws -> Data {
+        let data = try await request("Page.captureScreenshot", parameters: ["format": "png", "captureBeyondViewport": false])
+        guard let result = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let encoded = result["data"] as? String, encoded.utf8.count <= 45 * 1024 * 1024,
+              let image = Data(base64Encoded: encoded), image.count <= 32 * 1024 * 1024,
+              image.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]) else {
+            throw ValidationError("Chromium returned an invalid or oversized page capture.")
+        }
+        return image
+    }
+    /// Internal DevTools transport, never a listening debugging port.
+    func request(_ method: String, parameters: [String: Any], timeout: Duration = .seconds(15)) async throws -> Data {
+        try Task.checkCancellation()
+        guard !restoringPages else { throw ValidationError("This Chromium pane is still restoring its saved tabs.") }
+        command(Int(RADIUS_CEF_SYNC_ACTIVE))
+        guard let page, let api = runtime.api else { throw ValidationError("This Chromium page is closed.") }
+        let json = String(decoding: try JSONSerialization.data(withJSONObject: parameters), as: UTF8.self)
+        let id = nextRequest; nextRequest += 1
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                guard !Task.isCancelled else { continuation.resume(throwing: CancellationError()); return }
+                let timer = Task { [weak self] in
+                    do { try await Task.sleep(for: timeout) } catch { return }
+                    self?.completeRequest(id, result: .failure(ValidationError("Chromium did not respond before the request timed out.")))
+                }
+                pending[id] = PendingRequest(continuation: continuation, timeout: timer)
+                method.withCString { method in json.withCString { api.devtools(page, Int32(id), method, $0) } }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in self?.completeRequest(id, result: .failure(CancellationError())) }
+        }
+    }
+    private func completeRequest(_ id: Int, result: Result<Data, any Error>) {
+        guard let request = pending.removeValue(forKey: id) else { return }
+        request.timeout.cancel()
+        request.continuation.resume(with: result)
+    }
+    private func receive(_ event: Int32, json: String) {
+        guard let data = json.data(using: .utf8), let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        if CommandLine.arguments.contains("--smoke-test"), ProcessInfo.processInfo.environment["RADIUS_SMOKE_TEST_DATA"] != nil,
+           event == Int32(RADIUS_CEF_ERROR) || value["committedURL"] != nil {
+            print("Radius Chromium navigation event=\(event) known=\(activeContentKnown) committed=\(value["committedURL"] as? String ?? "nil") failed=\(value["failedURL"] as? String ?? "nil") error=\(value["message"] as? String ?? "nil")")
+        }
+        switch event {
+        case Int32(RADIUS_CEF_STATE), Int32(RADIUS_CEF_FINISHED):
+            if value["activeContentChanged"] as? Bool == true {
+                cancelRequests(); didStartNavigation(); failedURL = nil; errorMessage = nil; pageURL = nil; pageTitle = nil
+            }
+            if let pristine = value["pristine"] as? Bool { activePristine = pristine }
+            if let restoring = value["restoring"] as? Bool { restoringPages = restoring }
+            if let pages = value["innerPages"] as? [[String: Any]], pages.count <= 200 {
+                let ordered = pages.filter { $0["selected"] as? Bool == true } + pages.filter { $0["selected"] as? Bool != true }
+                sessionPages = ordered.map { item in
+                    let candidate = (item["url"] as? String).flatMap(URL.init(string:))
+                    let url = candidate.flatMap { AddressResolver.isWebURL($0) && $0.absoluteString.utf8.count <= 8192 ? $0 : nil }
+                    let title = url == nil ? "New tab" : boundedPageTitle(item["title"] as? String ?? "Untitled")
+                    return ChromiumSessionPage(url: url, title: title)
+                }
+            }
+            if let chrome = value["chromeStyle"] as? Bool { chromeStyle = chrome }
+            if let chrome = value["navigationChrome"] as? Bool { navigationChrome = chrome }
+            if let visible = value["navigationChromeVisible"] as? Bool { navigationChromeVisible = visible }
+            if let address = value["committedURL"] as? String, let url = URL(string: address) {
+                failedURL = nil; errorMessage = nil; activePristine = false; pageURL = url; pageTitle = nil
+            }
+            if value["navigationStart"] as? Bool == true {
+                didStartNavigation()
+                if value["committedURL"] != nil { onChange?(false) }
+                return
+            }
+            if let address = value["url"] as? String { pageURL = URL(string: address) }
+            if let title = value["title"] as? String { pageTitle = title.isEmpty ? nil : boundedPageTitle(title) }
+            if let value = value["loading"] as? Bool {
+                loading = value; progress = value ? 0.4 : 1
+                if value && failedURL == nil { errorMessage = nil }
+            }
+            if let value = value["canGoBack"] as? Bool { canGoBack = value }
+            if let value = value["canGoForward"] as? Bool { canGoForward = value }
+            if let value = value["zoom"] as? Double, value.isFinite, value > 0, zoom != value { zoom = value }
+            onChange?(event == Int32(RADIUS_CEF_FINISHED))
+        case Int32(RADIUS_CEF_ERROR):
+            errorMessage = value["message"] as? String
+            loading = false; progress = 0
+            if let address = value["failedURL"] as? String, let url = URL(string: address), AddressResolver.isWebURL(url) {
+                activePristine = false; failedURL = url; pageTitle = nil
+            }
+            onChange?(false)
+        case Int32(RADIUS_CEF_NOTICE):
+            if let message = value["message"] as? String { onNotice?(message) }
+        case Int32(RADIUS_CEF_CLOSED):
+            removeFocusObserver()
+            downloads.chromiumOwnerClosed(ids: downloadIDs)
+            downloadIDs.removeAll()
+            page = nil; cancelRequests(); runtime.finishedClosing(self); onClose?()
+        case Int32(RADIUS_CEF_ACTIVATE):
+            onActivate?()
+        case Int32(RADIUS_CEF_BROWSER_COMMAND):
+            if let command = value["message"] as? String { onBrowserCommand?(command) }
+        case Int32(RADIUS_CEF_DOWNLOAD_BEGIN):
+            guard let id = value["id"] as? Int else { return }
+            guard !disposing else {
+                command(Int(RADIUS_CEF_DOWNLOAD_CANCEL), value: Double(id))
+                command(Int(RADIUS_CEF_DOWNLOAD_PATH), value: Double(id))
+                return
+            }
+            let key = downloadPrefix + ":" + String(id)
+            downloadIDs.insert(key)
+            let source = (value["url"] as? String).flatMap(URL.init(string:))
+            downloads.beginChromium(id: key, profileID: profileID, suggestedName: value["name"] as? String ?? "Download", sourceURL: source, cancel: { [weak self] in
+                self?.command(Int(RADIUS_CEF_DOWNLOAD_CANCEL), value: Double(id))
+            }, completion: { [weak self] destination in
+                self?.command(Int(RADIUS_CEF_DOWNLOAD_PATH), text: destination?.path ?? "", value: Double(id))
+            })
+        case Int32(RADIUS_CEF_DOWNLOAD_UPDATE):
+            guard let id = value["id"] as? Int else { return }
+            let key = downloadPrefix + ":" + String(id)
+            if value["ownerClosed"] as? Bool == true {
+                downloads.chromiumOwnerClosed(ids: [key])
+                downloadIDs.remove(key)
+                return
+            }
+            let complete = value["complete"] as? Bool == true
+            let cancelled = value["cancelled"] as? Bool == true
+            let interrupted = value["interrupted"] as? Bool == true
+            downloads.updateChromium(id: key, fraction: value["fraction"] as? Double ?? 0,
+                                     complete: complete, cancelled: cancelled, interrupted: interrupted)
+            if complete || cancelled || interrupted {
+                downloadIDs.remove(key)
+                if disposing && downloadIDs.isEmpty && closeTask == nil { closePage() }
+            }
+        case Int32(RADIUS_CEF_READER_CONTEXT):
+            if value["clear"] as? Bool == true { readerContexts.removeAll() }
+            else if value["destroyed"] as? Bool == true {
+                if let uniqueID = value["uniqueID"] as? String, !uniqueID.isEmpty {
+                    readerContexts = readerContexts.filter { $0.value != uniqueID }
+                } else if let id = value["id"] as? Int { readerContexts.removeValue(forKey: id) }
+            } else if let id = value["id"] as? Int, id > 0,
+                      let uniqueID = value["uniqueID"] as? String, !uniqueID.isEmpty, uniqueID.utf8.count <= 256 {
+                if readerContexts.count >= 16 { readerContexts.removeAll() }
+                readerContexts[id] = uniqueID
+            }
+        case Int32(RADIUS_CEF_RESULT):
+            guard let id = value["id"] as? Int else { return }
+            if value["success"] as? Bool == true, let result = value["result"], let data = try? JSONSerialization.data(withJSONObject: result) {
+                completeRequest(id, result: .success(data))
+            } else { completeRequest(id, result: .failure(ValidationError("The Chromium page operation failed."))) }
+        default: break
+        }
+    }
+    private func cancelRequests() {
+        readerContexts.removeAll()
+        let requests = pending.values; pending.removeAll()
+        for request in requests {
+            request.timeout.cancel()
+            request.continuation.resume(throwing: ValidationError("The Chromium page was closed."))
+        }
+    }
+    override func dispose() {
+        guard page != nil, closeTask == nil else { return }
+        let notice = onNotice
+        if !disposing {
+            disposing = true
+            command(Int(RADIUS_CEF_STOP_ADMISSION))
+            removeFocusObserver()
+            cancelRequests(); super.dispose()
+        }
+        // A previous cancellation attempt can time out while Chromium still
+        // owns a file. Subsequent quit/close attempts must send cancellation
+        // again, even after the outer tab and its model have disappeared.
+        // CEF must retain the browser and callback receiver until cancellation
+        // closes each download writer. Removing the native tab can happen now.
+        if downloadIDs.isEmpty { closePage() }
+        else {
+            runtime.retainWhileClosing(self)
+            closeTask = Task { [self] in
+                defer { closeTask = nil }
+                do {
+                    try await downloads.cancelChromiumAndWait(ids: downloadIDs)
+                    closePage()
+                } catch {
+                    // Keep the callback target alive. A late terminal update
+                    // releases this page safely; quit remains available to retry.
+                    runtime.reportCloseFailure(error.localizedDescription)
+                    notice?(error.localizedDescription)
+                }
+            }
+        }
+    }
+    private func removeFocusObserver() {
+        for observer in chromeFocusObservers { NotificationCenter.default.removeObserver(observer) }
+        chromeFocusObservers.removeAll()
+        if let chromeKeyMonitor { NSEvent.removeMonitor(chromeKeyMonitor) }
+        chromeKeyMonitor = nil
+    }
+    private func closePage() {
+        if let page { runtime.api?.close_page(page); self.page = nil }
+        runtime.finishedClosing(self)
+    }
+}

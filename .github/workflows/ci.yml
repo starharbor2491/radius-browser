@@ -1,0 +1,71 @@
+name: Build and test Radius
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: radius-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift version
+        run: swift --version
+      - name: Test core and validate packages
+        run: ./scripts/test.sh
+      - name: Build native app
+        run: ./scripts/build-app.sh
+      - name: Verify native integration in release configuration
+        env:
+          RADIUS_DISTRIBUTION_TEST_APP: ${{ github.workspace }}/dist/Radius.app
+        run: python3 scripts/native-tests.py -c release --filter 'BrowserIntegrationTests|ResourceModuleTests|ReaderModuleTests|BehaviorModuleTests|DistributionNativeTests|DownloadsTests|ProfilesIntegrationTests|ChromiumProfileDataTests'
+      - name: Package graphical development installer
+        run: python3 scripts/package-release.py --development
+      - name: Launch packaged app and capture native screens
+        timeout-minutes: 3
+        run: python3 scripts/installed-smoke.py
+      - name: Archive application
+        run: ditto -c -k --sequesterRsrc --keepParent dist/Radius.app dist/Radius-macOS.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Radius-macOS-local-build
+          path: |
+            dist/Radius-macOS.zip
+            dist/*.dmg
+            dist/*-package.json
+            dist/installed-smoke.json
+            dist/smoke-performance.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Radius-native-screenshots
+          path: dist/screenshots/*.png
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Radius-launch-diagnostics
+          path: |
+            dist/smoke-*.log
+            dist/smoke-sample.txt
+            dist/native-tests*.log
+            dist/native-tests*.txt
+            dist/*-package.json
+            dist/installed-smoke.json
+            dist/smoke-performance.json
+          if-no-files-found: warn
+  portable-core:
+    runs-on: ubuntu-24.04
+    container: swift:6.2.1
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: apt-get update && apt-get install -y libsqlite3-dev python3
+      - run: ./scripts/test.sh

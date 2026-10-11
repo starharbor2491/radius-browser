@@ -1,0 +1,63 @@
+name: Pinned upstream CEF proof
+on:
+  push:
+    branches: ['codex/**']
+    paths:
+      - '.github/workflows/chromium-proof.yml'
+      - 'scripts/chromium-proof.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: chromium-proof-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  upstream-cef:
+    name: Upstream CEF (${{ matrix.architecture }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: arm64
+            runner: macos-15
+          - architecture: x86_64
+            runner: macos-15-intel
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build pinned upstream sample with sandbox support
+        id: build
+        run: |
+          mkdir -p "$RUNNER_TEMP/radius-cef-proof"
+          python3 -u scripts/chromium-proof.py build --arch '${{ matrix.architecture }}' \
+            --work-dir "$RUNNER_TEMP/radius-cef-proof" 2>&1 | tee "$RUNNER_TEMP/radius-cef-proof/build.log"
+      - name: Probe Chrome-style sample on matching host architecture
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 3
+        run: |
+          python3 -u scripts/chromium-proof.py probe --arch '${{ matrix.architecture }}' --style chrome \
+            --work-dir "$RUNNER_TEMP/radius-cef-proof" 2>&1 | tee "$RUNNER_TEMP/radius-cef-proof/probe-chrome.log"
+      - name: Probe native Alloy sample on matching host architecture
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 3
+        run: |
+          python3 -u scripts/chromium-proof.py probe --arch '${{ matrix.architecture }}' --style native-alloy \
+            --work-dir "$RUNNER_TEMP/radius-cef-proof" 2>&1 | tee "$RUNNER_TEMP/radius-cef-proof/probe-native-alloy.log"
+      - name: Preserve provenance and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: CEF-proof-${{ matrix.architecture }}
+          path: |
+            ${{ runner.temp }}/radius-cef-proof/*.json
+            ${{ runner.temp }}/radius-cef-proof/*.log
+            ${{ runner.temp }}/radius-cef-proof/profiles/**/cef.log
+          if-no-files-found: warn
+          retention-days: 14

@@ -1,0 +1,20 @@
+{
+  "id": "org.radius.focus",
+  "name": "Focus Mode",
+  "version": 2,
+  "summary": "Hide Radius controls for focused reading. Escape restores them. Chromium keeps its toolbar.",
+  "publisher": "Radius",
+  "source": "https://github.com/starharbor2491/radius-browser",
+  "capability": "focusMode",
+  "dependencies": [],
+  "defaultInstalled": true,
+  "runtime": "behaviorProgram",
+  "settings": [
+    {
+      "id": "hideChrome",
+      "title": "Hide Radius controls in Focus Mode",
+      "kind": "toggle",
+      "defaultValue": true
+    }
+  ]
+}

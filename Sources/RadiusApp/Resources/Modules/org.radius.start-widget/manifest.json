@@ -1,0 +1,12 @@
+{
+  "id": "org.radius.start-widget",
+  "name": "Start Page Tips",
+  "version": 2,
+  "summary": "Keyboard shortcuts for browsing and tabs on new-tab pages.",
+  "publisher": "Radius",
+  "source": "https://github.com/starharbor2491/radius-browser",
+  "capability": "startWidget",
+  "dependencies": [],
+  "defaultInstalled": true,
+  "runtime": "declarative"
+}

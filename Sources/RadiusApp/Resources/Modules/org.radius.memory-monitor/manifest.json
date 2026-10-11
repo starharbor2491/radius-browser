@@ -1,0 +1,12 @@
+{
+  "id": "org.radius.memory-monitor",
+  "name": "Memory Breakdown",
+  "version": 1,
+  "summary": "Replace Resource Monitor with detailed active, wired, compressed, inactive, and free memory measurements.",
+  "publisher": "Radius",
+  "source": "https://github.com/starharbor2491/radius-browser",
+  "capability": "resourceMonitor",
+  "dependencies": [],
+  "defaultInstalled": false,
+  "runtime": "nativeResourceWorker"
+}

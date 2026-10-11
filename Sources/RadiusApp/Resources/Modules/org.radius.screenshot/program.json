@@ -1,0 +1,28 @@
+{
+  "formatVersion": 1,
+  "entrypoints": {
+    "prepare": {
+      "op": "object",
+      "fields": {
+        "filename": {
+          "op": "prefix",
+          "limit": 100,
+          "arguments": [
+            {
+              "op": "input",
+              "key": "filename"
+            }
+          ]
+        },
+        "format": {
+          "op": "literal",
+          "value": "png"
+        },
+        "visibleOnly": {
+          "op": "literal",
+          "value": true
+        }
+      }
+    }
+  }
+}

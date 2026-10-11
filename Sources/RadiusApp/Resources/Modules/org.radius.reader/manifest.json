@@ -1,0 +1,12 @@
+{
+  "id": "org.radius.reader",
+  "name": "Reader",
+  "version": 2,
+  "summary": "Extract article, main, or body text in a removable worker. Best-effort reading of page snapshots up to 1 MB.",
+  "publisher": "Radius",
+  "source": "https://github.com/starharbor2491/radius-browser",
+  "capability": "reader",
+  "dependencies": [],
+  "defaultInstalled": true,
+  "runtime": "nativeReaderWorker"
+}

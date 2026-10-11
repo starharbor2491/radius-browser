@@ -1,0 +1,76 @@
+{
+  "formatVersion": 1,
+  "entrypoints": {
+    "create": {
+      "op": "object",
+      "fields": {
+        "title": {
+          "op": "prefix",
+          "limit": 100,
+          "arguments": [
+            {
+              "op": "input",
+              "key": "defaultTitle"
+            }
+          ]
+        },
+        "text": {
+          "op": "literal",
+          "value": ""
+        }
+      }
+    },
+    "update": {
+      "op": "object",
+      "fields": {
+        "value": {
+          "op": "choose",
+          "arguments": [
+            {
+              "op": "equal",
+              "arguments": [
+                {
+                  "op": "input",
+                  "key": "field"
+                },
+                {
+                  "op": "literal",
+                  "value": "title"
+                }
+              ]
+            },
+            {
+              "op": "prefix",
+              "limit": 100,
+              "arguments": [
+                {
+                  "op": "input",
+                  "key": "value"
+                }
+              ]
+            },
+            {
+              "op": "prefix",
+              "limit": 200000,
+              "arguments": [
+                {
+                  "op": "input",
+                  "key": "value"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "delete": {
+      "op": "object",
+      "fields": {
+        "delete": {
+          "op": "literal",
+          "value": true
+        }
+      }
+    }
+  }
+}

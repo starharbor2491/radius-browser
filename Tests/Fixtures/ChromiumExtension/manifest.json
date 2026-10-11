@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Radius MV3 Test Fixture",
+  "version": "1.0.0",
+  "description": "Local integration fixture for Radius Chromium extension API checks.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA17pizNFYFo4zWsSxZ+XsGKt3032LFq2YkcgnJ6HnSf9avH040i9iiAmHCVmUnWVGfQsS9yqAEYzbT63YHekzStKIERjVLJ0yBPZR5EOqWw2JRSv07iiGpI2U7hwGofcvrWAGOz316sxQsc8D2JTl3xyIOCYEgYxFaikooRu5e6QNkYaXg7tKSid82IdXLbkvt0SK1gvihNfpseSIuxzWR5oRdLyjGM4ZddI7r6DM+SQp2xI6RUZj/Tmir1dcHorEROIrGV1sC/GWhchm5XsTYzrTvwVX+p31W3wWsDIHTKDWN8AtQMeM/izn/3ul5jvXDp6yhSEM6BFfvlOU4bta6QIDAQAB",
+  "permissions": ["storage", "activeTab", "scripting", "sidePanel"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "background": {
+    "service_worker": "worker.js"
+  },
+  "content_scripts": [{
+    "matches": ["http://127.0.0.1/*"],
+    "js": ["content.js"],
+    "run_at": "document_idle"
+  }],
+  "action": {
+    "default_title": "Radius MV3 Test Fixture",
+    "default_popup": "popup.html"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  }
+}
